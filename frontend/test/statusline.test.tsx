@@ -7,15 +7,36 @@
  * 所以"用哪一份"必须被钉住：两边各算一份就会出现"CLI 说 92%、前端说 40%"。
  *
  * 宽度裁剪（`fitSegments`）不在这里重复测 —— 那是它自己那条口径。
+ *
+ * ---
+ * ## 迁移记录（2026-10-04，换内核前置样板）
+ *
+ * 渲染断言从 `ink-testing-library` 的 `render()` / `lastFrame()` 迁到
+ * `./helpers/screen.js` 的 `renderLines()`（走 vendored 内核 `renderToScreen`：
+ * 同步、纯 buffer、不写 stdout）——原因见 `helpers/screen.ts` 文件头。
+ *
+ * 三条改动，**断言一个字没改**：
+ *   1. `render(<X/>).lastFrame() ?? ''` → `renderLines(h(X, props), width).lines`；
+ *   2. 不需要 `await tick()`：`renderToScreen` 返回时帧已经画完（原来那两次 sleep 是在赌 Ink 的异步 flush）；
+ *   3. 宽度只能由调用方给：`renderLines(tree, 80)`，跟组件自己的 `width={80}` 对齐。
+ *
+ * ⚠️ **`引擎分段优先` 那两条现在是 skip 的，不是写错了。** 内核渲染器跑在 **React 19**
+ * 上，而此刻 `src/**` 还在 **React 18**（`frontend/package.json`）：React 19 只认
+ * `react.transitional.element`，React 18 建的元素要被**静默丢弃** —— 屏幕全空、不报错
+ * （`renderLines` 现在会当场抛错点名这件事）。换内核（`src` 跟着上 React 19）之后删掉
+ * 两个 `.skip` 即可，断言已经是新工具的形式。下面第一个 describe 是**今天就能跑**的
+ * 工具自检。
  */
 
-import { render } from 'ink-testing-library';
 import { describe, expect, it } from 'vitest';
 
 import { StatusLine, levelToken, segmentsFromEngine } from '../src/components/StatusLine.js';
 import type { StatusSegmentWire } from '../src/protocol/types.js';
 import { initialState } from '../src/state/store.js';
 import type { Meta } from '../src/state/store.js';
+import { displayWidth } from '../src/render/text.js';
+import { Box, Text } from './helpers/kernel.js';
+import { h, kernelReactVersion, renderLines } from './helpers/screen.js';
 
 const noColor = (): string | undefined => undefined;
 const t = (key: string, params?: Record<string, string | number>): string =>
@@ -32,37 +53,70 @@ function metaWith(over: Partial<Meta>): Meta {
   return { ...initialState().meta, ...over };
 }
 
+/**
+ * 工具自检 —— 不依赖 `src/**`，所以换内核之前也能跑。它证明的是"这套断言工具真的通"：
+ * 从 cell 网格取字、CJK 占两列、查询辅助都工作。
+ */
+describe('内核断言工具自检', () => {
+  it('取字符/取行；`甲` 在网格里占 2 列，不是 1 个码点', () => {
+    const ui = h(
+      Box,
+      { flexDirection: 'column' },
+      h(Text, null, '权限:write'),
+      h(Text, null, '甲甲'),
+    );
+    const r = renderLines(ui, 12);
+
+    // 接的是内核那份 React，不是 ace 的 18
+    expect(kernelReactVersion.startsWith('19.')).toBe(true);
+    // 行宽 = 渲染列数（跟内容长短无关）
+    expect(r.width).toBe(12);
+    expect(r.lines[0]).toBe('权限:write');
+    // `甲甲` = 2 个码点 / **4 列**：宽度要用 displayWidth 数，不能用 .length
+    expect(r.lines[1]?.length).toBe(2);
+    expect(displayWidth(r.lines[1] ?? '')).toBe(4);
+    // 查询辅助
+    expect(r.has('权限')).toBe(true);
+    expect(r.lineWith('write')).toBe('权限:write');
+    expect(r.linesWith('甲')).toHaveLength(1);
+    expect(r.linesWith('没有这一行')).toHaveLength(0);
+  });
+});
+
 describe('引擎分段优先', () => {
-  it('有引擎分段时不再自算', () => {
-    const out = render(
-      <StatusLine
-        meta={metaWith({
+  it.skip('有引擎分段时不再自算', () => {
+    // 原来：const out = render(<StatusLine ... />).lastFrame() ?? '';
+    const out = renderLines(
+      h(StatusLine, {
+        meta: metaWith({
           permission: 'readonly',
           model: 'some-model',
           statusSegments: [seg('context', '上下文 92%', 20, 'warn')],
-        })}
-        busy={false}
-        color={noColor}
-        width={80}
-        t={t}
-      />,
-    ).lastFrame() ?? '';
+        }),
+        busy: false,
+        color: noColor,
+        width: 80,
+        t,
+      }),
+      80,
+    ).text;
     expect(out).toContain('上下文 92%');
     // 自算那套若也上了屏，这里会看到 i18n 键名（假 t 把它拼成 "footer_permission:readonly"）
     expect(out).not.toContain('footer_permission');
     expect(out).not.toContain('some-model');
   });
 
-  it('没有引擎分段时退回自算（界面挂载早于第一个事件，那一行不该是空的）', () => {
-    const out = render(
-      <StatusLine
-        meta={metaWith({ permission: 'readonly', statusSegments: [] })}
-        busy={false}
-        color={noColor}
-        width={80}
-        t={t}
-      />,
-    ).lastFrame() ?? '';
+  it.skip('没有引擎分段时退回自算（界面挂载早于第一个事件，那一行不该是空的）', () => {
+    const out = renderLines(
+      h(StatusLine, {
+        meta: metaWith({ permission: 'readonly', statusSegments: [] }),
+        busy: false,
+        color: noColor,
+        width: 80,
+        t,
+      }),
+      80,
+    ).text;
     expect(out).toContain('footer_permission:readonly');
   });
 });
