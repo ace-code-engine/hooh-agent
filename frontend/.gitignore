@@ -9,3 +9,8 @@ dist/
 # 本地日志
 npm_install.log
 *.log
+
+# vendor 内核的探针产物（probe.mjs 生成，不进版本库；gitignore 里带斜杠的模式
+# 以本文件所在目录 frontend/ 为锚，故写作 vendor/... 而不是 frontend/vendor/...）
+vendor/dsh-ink/out/
+

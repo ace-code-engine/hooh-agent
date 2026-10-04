@@ -1,0 +1,1283 @@
+import { ansiCodesToString, styledCharsFromTokens, tokenize, } from '@alcalzone/ansi-tokenize';
+import { logForDebugging } from '../utils/debug.js';
+import { getGraphemeSegmenter } from '../utils/intl.js';
+import sliceAnsi from '../utils/sliceAnsi.js';
+import { reorderBidi } from './bidi.js';
+import { unionRect } from './layout/geometry.js';
+import { blitRegion, cellRunSpan, createCellRun, extractHyperlinkFromStyles, filterOutHyperlinkStyles, allocateCopyRegionId, clearCopyRegionSpan, markCopyRegion, pruneCopyTexts, markNoSelectRegion, OSC8_PREFIX, shadeRegion, recordCellRunEntry, recordSpacerRunEntry, replayCellRun, resetScreen, setCellAt, shiftRows, } from './screen.js';
+import { stringWidth } from './stringWidth.js';
+import { expandTabs } from './tabstops.js';
+import { TERMINAL_IMAGE_MAX_CELLS, TERMINAL_IMAGE_MAX_FRAME_BYTES, TERMINAL_IMAGE_MAX_PLACEMENTS, } from './terminal-image.js';
+import { widestLine } from './widest-line.js';
+/**
+ * charCache bounds. The entry-count cap alone was not enough: a streaming
+ * line produces a NEW cache key on every frame, and each entry's cost is
+ * proportional to the line length (one object per character, plus the key
+ * string itself). A 16384-entry cache of 80KB-line entries is tens of GB —
+ * the process OOMs long before reaching the count cap. Two extra guards:
+ *
+ * 1. Lines longer than MAX_CACHEABLE_LINE are never cached. During
+ *    streaming the growing last line changes every frame, so a cached
+ *    entry would be used for exactly one frame — pure cost, zero hits.
+ *    Long lines are also rare in settled transcripts (minified code,
+ *    base64, URLs), so skipping them barely affects the hit rate.
+ * 2. A byte budget (total characters of cached keys) caps retained
+ *    memory regardless of the entry size distribution.
+ *
+ * Keys are detached from their parent string before caching: a line
+ * sliced out of a large streaming buffer is a V8 SlicedString that pins
+ * the whole parent, turning one 200-char entry into a 100KB retention.
+ */
+const MAX_CACHEABLE_LINE = 500;
+const CHAR_CACHE_MAX_ENTRIES = 16384;
+const CHAR_CACHE_MAX_CHARS = 100_000;
+/** Packed-run line cap: runs are three integers per cell (no per-char
+ *  objects like charCache entries), so long ANSI-art lines (the whale
+ *  logo, ~700 chars) are worth caching — they would otherwise
+ *  re-tokenize and re-cluster every frame. */
+const PACKED_MAX_LINE = 4000;
+/** Copy a string into a fresh flat string with no parent references. */
+function detachString(s) {
+    // Buffer round-trip guarantees a newly allocated flat string; cheaper
+    // tricks (' '+s).slice(1) are optimized back into SlicedStrings by V8.
+    return Buffer.from(s, 'utf8').toString('utf8');
+}
+/**
+ * Bounded cache of line → clustered characters. Enforces all three guards
+ * (line-length threshold, entry count, byte budget) at insertion time, so
+ * no caller can accidentally grow it unboundedly.
+ */
+export class CharCache {
+    /**
+     * LRU of line → clustered characters. A full clear on overflow
+     * (the original behavior) thrashes during long-session streaming: the
+     * mounted window's static lines alone approach the char budget, so the
+     * streaming row's per-frame new keys tip it over every frame or two,
+     * nuking the cache and forcing ~1800 line re-tokenizations per frame
+     * (measured ~100ms/frame at a 175-row session). Evicting oldest-first
+     * keeps the hot mounted lines resident while streaming churn falls out
+     * the back. Recency is refreshed on hit (delete + re-insert) so lines
+     * read every frame are never evicted by one-shot churn.
+     */
+    map = new Map();
+    chars = 0;
+    /**
+     * Return the cached clustered characters for a line, if present, and
+     * refresh the entry's recency.
+     * @param line - the line to look up.
+     * @returns the cached characters, or undefined on a miss.
+     */
+    get(line) {
+        const hit = this.map.get(line);
+        if (hit !== undefined) {
+            this.map.delete(line);
+            this.map.set(line, hit);
+        }
+        return hit;
+    }
+    /**
+     * Cache clustered characters for a line, enforcing the cache bounds by
+     * evicting least-recently-used entries (never a full clear).
+     * @param line - the line key.
+     * @param characters - the clustered characters to cache.
+     */
+    set(line, characters) {
+        if (line.length > MAX_CACHEABLE_LINE)
+            return;
+        if (this.map.has(line)) {
+            this.map.delete(line);
+            this.chars -= line.length;
+        }
+        // Evict oldest entries until the new one fits. A single line longer
+        // than the whole budget cannot fit even empty — skip caching it.
+        if (line.length > CHAR_CACHE_MAX_CHARS)
+            return;
+        while (this.map.size >= CHAR_CACHE_MAX_ENTRIES ||
+            this.chars + line.length > CHAR_CACHE_MAX_CHARS) {
+            const oldest = this.map.keys().next();
+            if (oldest.done === true)
+                break;
+            const oldestKey = oldest.value;
+            this.chars -= oldestKey.length;
+            this.map.delete(oldestKey);
+        }
+        this.map.set(detachString(line), characters);
+        this.chars += line.length;
+    }
+    /** Retained-key character total, exposed for diagnostics/tests. */
+    get retainedChars() {
+        return this.chars;
+    }
+    /** Number of cached line entries. */
+    get size() {
+        return this.map.size;
+    }
+}
+/**
+ * Intersect two clips. `undefined` on an axis means unbounded; the other
+ * clip's bound wins. If both are bounded, take the tighter constraint
+ * (max of mins, min of maxes). If the resulting region is empty
+ * (x1 >= x2 or y1 >= y2), writes clipped by it will be dropped.
+ */
+function intersectClip(parent, child) {
+    if (!parent)
+        return child;
+    return {
+        x1: maxDefined(parent.x1, child.x1),
+        x2: minDefined(parent.x2, child.x2),
+        y1: maxDefined(parent.y1, child.y1),
+        y2: minDefined(parent.y2, child.y2),
+    };
+}
+function maxDefined(a, b) {
+    if (a === undefined)
+        return b;
+    if (b === undefined)
+        return a;
+    return Math.max(a, b);
+}
+function minDefined(a, b) {
+    if (a === undefined)
+        return b;
+    if (b === undefined)
+        return a;
+    return Math.min(a, b);
+}
+function isNodeInSubtree(node, root) {
+    let current = node;
+    while (current !== undefined) {
+        if (current === root)
+            return true;
+        current = current.parentNode;
+    }
+    return false;
+}
+/**
+ * One copy region id per image node for its lifetime, so rows captured
+ * during drag-to-scroll and rows still on screen name the same formula.
+ */
+const copyRegionIds = new WeakMap();
+/**
+ * Copy text reaches the clipboard without passing through cells, so it never
+ * met the render path's control-character rules. Drop C0/C1 (newlines
+ * excepted: a block formula's source is multi-line) and the
+ * interlinear-annotation code points, which the copy pipeline reserves for
+ * its own row metadata.
+ */
+const COPY_TEXT_STRIP = /[\u0000-\u0009\u000b-\u001f\u007f-\u009f\uFFF9-\uFFFB]/g;
+function cleanCopyText(value) {
+    return value.replace(COPY_TEXT_STRIP, '');
+}
+/**
+ * Slot-reuse ceiling: the clustered array is a second full memory image of
+ * the line, and pathological single-line output (base64 blobs, minified
+ * code) would pin it across frames on top of the string itself. Past this
+ * length every frame takes the full path — transient, GC-able.
+ */
+const STREAMING_SLOT_MAX_LINE = 65_536;
+/**
+ * Classify the tail of the line relative to its LAST ESC character.
+ * - 'none': no ESC at all
+ * - 'dangling': the last ESC starts an escape sequence that is cut off at
+ *   end-of-line - next frame's continuation completes it, so the prefix
+ *   clustering cannot be reused (the partial sequence was clustered as text)
+ * - 'bare': the last ESC's sequence is complete but ends exactly at
+ *   end-of-line - the SGR state after it never applied to any character, so
+ *   trailingStyles (derived from the last char) would be stale next frame
+ * - 'complete': last sequence terminated with plain text after it
+ */
+function escapeTailState(line) {
+    const i = line.lastIndexOf('\x1b');
+    if (i === -1)
+        return 'none';
+    const rest = line.slice(i);
+    const c1 = rest[1];
+    if (c1 === undefined)
+        return 'dangling';
+    if (c1 === '[') {
+        for (let k = 2; k < rest.length; k++) {
+            const ch = rest.charCodeAt(k);
+            if (ch >= 0x40 && ch <= 0x7e)
+                return k === rest.length - 1 ? 'bare' : 'complete';
+            if (ch < 0x20 || ch > 0x3f)
+                return 'complete';
+        }
+        return 'dangling';
+    }
+    if (c1 === ']' || c1 === 'P' || c1 === '_' || c1 === '^' || c1 === 'X') {
+        for (let k = 2; k < rest.length; k++) {
+            if (rest[k] === '\x07')
+                return k === rest.length - 1 ? 'bare' : 'complete';
+            if (rest[k] === '\x1b' && rest[k + 1] === '\\') {
+                return k + 1 === rest.length - 1 ? 'bare' : 'complete';
+            }
+        }
+        return 'dangling';
+    }
+    // Two-character sequence ESC <0x30-0x7E>: rest.length >= 2 means complete.
+    return rest.length === 2 ? 'bare' : 'complete';
+}
+/** True when the line's last code point may continue into a multi-codepoint
+ *  grapheme (ZWJ, variation selectors, combining marks, skin tones, regional
+ *  indicators) - appending to it would change the last grapheme's clustering. */
+function endsWithOpenGrapheme(line) {
+    const cp = line.codePointAt(line.length - 1);
+    if (cp === undefined)
+        return false;
+    return (cp === 0x200d ||
+        cp === 0xfe0f ||
+        cp === 0xfe0e ||
+        (cp >= 0x0300 && cp <= 0x036f) ||
+        (cp >= 0x1f3fb && cp <= 0x1f3ff) ||
+        (cp >= 0x1f1e6 && cp <= 0x1f1ff));
+}
+/** Hebrew / Arabic / Syriac and related RTL blocks - bidirectional reordering
+ *  is line-global, so prefix-reuse (which reorders only the suffix) is not
+ *  safe for these; take the full path. */
+function hasRtlChars(text) {
+    return /[\u0590-\u05FF\u0600-\u06FF\u0700-\u08FF\uFB1D-\uFDFF\uFE70-\uFEFF]/.test(text);
+}
+/** Update (or clear) the streaming slot after a full-path build of `line`.
+ *  The slot is only kept when the line can safely be extended next frame. */
+function updateStreamingSlot(slot, line, clustered, chars) {
+    if (line.length <= MAX_CACHEABLE_LINE ||
+        line.length > STREAMING_SLOT_MAX_LINE ||
+        endsWithOpenGrapheme(line) ||
+        hasRtlChars(line)) {
+        // Short lines are served by CharCache; complex tails always take the
+        // full path. Drop a stale slot when the stream settles.
+        if (slot.current)
+            slot.current = null;
+        return;
+    }
+    const tail = escapeTailState(line);
+    if (tail === 'dangling' || tail === 'bare') {
+        if (slot.current)
+            slot.current = null;
+        return;
+    }
+    slot.current = {
+        line: detachString(line),
+        clustered,
+        trailingStyles: chars.length > 0 ? chars[chars.length - 1].styles : [],
+    };
+}
+/**
+ * Build the clustered characters for one line, taking the streaming-prefix
+ * fast path when possible. `slot` is the instance-level streaming slot;
+ * `prevChars`/`fullChars` wiring is handled by updateStreamingSlot.
+ */
+function buildClusteredChars(line, stylePool, slot) {
+    const prev = slot.current;
+    if (prev &&
+        line.length > MAX_CACHEABLE_LINE &&
+        line.length > prev.line.length &&
+        line.startsWith(prev.line) &&
+        !endsWithOpenGrapheme(prev.line) &&
+        !hasRtlChars(line.slice(prev.line.length))) {
+        // Reuse the prefix clustering verbatim; tokenize only the appended
+        // suffix, replaying the line-end SGR state so new characters inherit
+        // the correct style. Bidi runs on the suffix alone (line verified RTL-free).
+        const suffix = line.slice(prev.line.length);
+        const replay = styledCharsFromTokens(tokenize(ansiCodesToString(prev.trailingStyles) + suffix));
+        const clustered = styledCharsWithGraphemeClustering(replay, stylePool);
+        const result = prev.clustered.concat(reorderBidi(clustered));
+        updateStreamingSlot(slot, line, result, replay);
+        return result;
+    }
+    const chars = styledCharsFromTokens(tokenize(line));
+    const clustered = reorderBidi(styledCharsWithGraphemeClustering(chars, stylePool));
+    updateStreamingSlot(slot, line, clustered, chars);
+    return clustered;
+}
+/**
+ * The screen rect a paint operation covers, when it can occlude a raster
+ * painted earlier in the same frame. `clip`/`unclip`/`noSelect` paint nothing.
+ */
+function imageOcclusionRect(op, width) {
+    if (op.type === 'write') {
+        return { x: op.x, y: op.y, width: widestLine(op.text), height: op.lines?.length ?? op.text.split('\n').length };
+    }
+    if (op.type === 'blit')
+        return op;
+    if (op.type === 'clear' || op.type === 'shade')
+        return op.region;
+    if (op.type === 'shift')
+        return { x: 0, y: op.top, width, height: op.bottom - op.top + 1 };
+    return undefined;
+}
+/**
+ * The union of two rects, but only when that union covers no cell the pair did
+ * not already cover between them. Two rects qualify when one contains the
+ * other, or when they are bands sharing a full edge span (same x-span and
+ * abutting/overlapping rows, or the transpose) — exactly the pairs whose union
+ * is itself a rectangle. An L-shaped pair does not qualify: the bounding box of
+ * its two arms covers cells neither arm covers, and the caller would erase
+ * pixels that are still visible.
+ * @param a - the first rectangle.
+ * @param b - the second rectangle.
+ * @returns their union, or undefined when folding them would add cells.
+ */
+function exactUnion(a, b) {
+    const contains = (outer, inner) => outer.x <= inner.x && outer.y <= inner.y &&
+        outer.x + outer.width >= inner.x + inner.width &&
+        outer.y + outer.height >= inner.y + inner.height;
+    if (contains(a, b))
+        return a;
+    if (contains(b, a))
+        return b;
+    const sameColumns = a.x === b.x && a.width === b.width &&
+        a.y <= b.y + b.height && b.y <= a.y + a.height;
+    const sameRows = a.y === b.y && a.height === b.height &&
+        a.x <= b.x + b.width && b.x <= a.x + a.width;
+    return sameColumns || sameRows ? unionRect(a, b) : undefined;
+}
+/**
+ * Fold occluder rects that can be folded without covering anything new, so an
+ * image protocol that has to erase them (Sixel) does not repeat the same cells.
+ * One overlay usually contributes several rects for the same area (interior
+ * fill, border row, text row), and an overlay that covers several placements
+ * would otherwise erase the shared cells once per placement.
+ *
+ * Folding stops at exact unions on purpose. The erasure has to match the cells
+ * an overlay really covers: merging any two intersecting rects into their
+ * bounding box would take down the pixels beside an L-shaped cover, which are
+ * still on screen.
+ */
+function mergeOcclusionRects(rects) {
+    const merged = [];
+    for (const rect of rects) {
+        let current = rect;
+        let joined = true;
+        while (joined) {
+            joined = false;
+            for (let index = merged.length - 1; index >= 0; index--) {
+                const other = merged[index];
+                const union = exactUnion(current, other);
+                if (union === undefined)
+                    continue;
+                current = union;
+                merged.splice(index, 1);
+                joined = true;
+            }
+        }
+        merged.push(current);
+    }
+    return merged;
+}
+/**
+ * Collects write/blit/clear/clip operations from the render tree, then
+ * applies them to a Screen buffer in get(). The Screen is what gets
+ * diffed against the previous frame to produce terminal updates.
+ */
+export default class Output {
+    /** Screen width in columns. */
+    width;
+    /** Screen height in rows. */
+    height;
+    stylePool;
+    screen;
+    terminalImagesEnabled;
+    opaqueImageBacking;
+    imageReady;
+    operations = [];
+    imagePlacements = [];
+    imageNodes = new Set();
+    imageBackingEnds = new Map();
+    imageClips = [];
+    imageDecodedBytes = 0;
+    previousImages;
+    charCache = new CharCache();
+    /**
+     * LRU of line → recorded packed cell run, mirroring charCache's bounds.
+     * The main-screen architecture repaints every settled line each frame;
+     * the recorded run replays as raw two-word stores (no interning, no
+     * packing, no guard branches) — the long-session streaming fix. Runs are
+     * validated against the screen they were interned on and die with it.
+     */
+    packedLines = new Map();
+    packedChars = 0;
+    /** Stable owner handle passed to writeLineToScreen (no per-call closure). */
+    packedOwner = {
+        lines: this.packedLines,
+        commit: (line, run) => {
+            this.setPackedLine(line, run);
+        },
+    };
+    /** Insert into the packed-lines LRU, evicting oldest entries on budget. */
+    setPackedLine(line, run) {
+        if (line.length > PACKED_MAX_LINE)
+            return;
+        if (this.packedLines.has(line)) {
+            this.packedLines.delete(line);
+            this.packedChars -= line.length;
+        }
+        while (this.packedLines.size >= CHAR_CACHE_MAX_ENTRIES ||
+            this.packedChars + line.length > CHAR_CACHE_MAX_CHARS) {
+            const oldest = this.packedLines.keys().next();
+            if (oldest.done === true)
+                break;
+            this.packedChars -= oldest.value.length;
+            this.packedLines.delete(oldest.value);
+        }
+        this.packedLines.set(detachString(line), run);
+        this.packedChars += line.length;
+    }
+    /**
+     * Streaming-tail slot, shared by every writeLineToScreen call of this
+     * Output (only one line grows per frame during streaming). Survives reset()
+     * like charCache - it is keyed by strict line extension, so stale entries
+     * can never produce a wrong hit.
+     */
+    streamingSlot = { current: null };
+    constructor(options) {
+        const { width, height, stylePool, screen } = options;
+        this.width = width;
+        this.height = height;
+        this.stylePool = stylePool;
+        this.screen = screen;
+        this.terminalImagesEnabled = options.terminalImages ?? false;
+        this.opaqueImageBacking = options.opaqueImageBacking ?? false;
+        this.imageReady = options.imageReady;
+        this.previousImages = options.previousImages ?? [];
+        resetScreen(screen, width, height);
+    }
+    /**
+     * Reuse this Output for a new frame. Zeroes the screen buffer, clears
+     * the operation list (backing storage is retained), and caps charCache
+     * growth. Preserving charCache across frames is the main win — most
+     * lines don't change between renders, so tokenize + grapheme clustering
+     * becomes a cache hit.
+     * @param width - the new screen width in columns.
+     * @param height - the new screen height in rows.
+     * @param screen - the screen buffer to render into.
+     */
+    reset(width, height, screen, terminalImages = false, previousImages = [], imageReady, opaqueImageBacking = false) {
+        this.width = width;
+        this.height = height;
+        this.screen = screen;
+        this.terminalImagesEnabled = terminalImages;
+        this.opaqueImageBacking = opaqueImageBacking;
+        this.imageReady = imageReady;
+        this.previousImages = previousImages;
+        this.operations.length = 0;
+        this.imagePlacements.length = 0;
+        this.imageNodes.clear();
+        this.imageBackingEnds.clear();
+        this.imageClips.length = 0;
+        this.imageDecodedBytes = 0;
+        resetScreen(screen, width, height);
+        // Bounds are enforced at insertion time (CharCache.set); nothing to
+        // do here. The cache intentionally survives frames — most lines don't
+        // change between renders, so tokenize + clustering becomes a hit.
+    }
+    /**
+     * Copy cells from a source screen region (blit = block image transfer).
+     * @param src - the source screen.
+     * @param x - the destination left column.
+     * @param y - the destination top row.
+     * @param width - the region width in columns.
+     * @param height - the region height in rows.
+     */
+    blit(src, x, y, width, height) {
+        this.operations.push({ type: 'blit', src, x, y, width, height });
+    }
+    /**
+     * Shift full-width rows within [top, bottom] by n. n > 0 = up. Mirrors
+     * what DECSTBM + SU/SD does to the terminal. Paired with blit() to reuse
+     * prevScreen content during pure scroll, avoiding full child re-render.
+     * @param top - the first row of the shift region.
+     * @param bottom - the last row of the shift region.
+     * @param n - the shift amount; positive moves content up.
+     */
+    shift(top, bottom, n) {
+        this.operations.push({ type: 'shift', top, bottom, n });
+    }
+    /**
+     * Clear a region by writing empty cells. Used when a node shrinks to
+     * ensure stale content from the previous frame is removed.
+     * @param region - the region to clear.
+     * @param fromAbsolute - whether the clear is for an absolute-positioned node's old bounds.
+     */
+    clear(region, fromAbsolute) {
+        this.operations.push({ type: 'clear', region, fromAbsolute });
+    }
+    /**
+     * Shade the cells painted so far inside `region` (see ShadeOperation).
+     * Idempotent per cell, so a clean subtree blitted back from prevScreen
+     * with last frame's shade is not shaded twice.
+     * @param region - the backdrop node's rect.
+     */
+    shade(region) {
+        this.operations.push({ type: 'shade', region });
+    }
+    /**
+     * Mark a region as non-selectable (excluded from fullscreen text
+     * selection copy + highlight). Used by <NoSelect> to fence off
+     * gutters (line numbers, diff sigils). Applied AFTER blit/write so
+     * the mark wins regardless of what's blitted into the region.
+     * @param region - the region to mark.
+     */
+    /** Mark row `y` as a wrap continuation (see Styles.softWrapContinuation). */
+    softWrapRow(y, contentEnd) {
+        this.operations.push({ type: 'softWrapRow', y, contentEnd });
+    }
+    noSelect(region) {
+        this.operations.push({ type: 'noSelect', region });
+    }
+    /**
+     * Record a fully visible, frame-budgeted image request. Rejected placements
+     * keep their cell fallback, so terminal graphics never escape a clip or
+     * create an unbounded decoded-data upload burst.
+     */
+    image(node, x, y, columns, rows, source, background) {
+        if (this.imageNodes.has(node))
+            return this.imagePlacements.find(p => p.node === node)?.graphicsReady !== false;
+        if (this.imagePlacements.length >= TERMINAL_IMAGE_MAX_PLACEMENTS)
+            return false;
+        const left = Math.floor(x);
+        const top = Math.floor(y);
+        const width = Math.floor(columns);
+        const height = Math.floor(rows);
+        if (width <= 0 ||
+            height <= 0 ||
+            width * height > TERMINAL_IMAGE_MAX_CELLS) {
+            return false;
+        }
+        const presentation = node.attributes.imagePresentation;
+        const transparent = node.attributes.imageTransparent === 'transparent';
+        // Both protocols crop a partially visible content image to its visible
+        // cells (Sixel re-encodes the slice, Kitty places a source rectangle), so
+        // scrolling past a viewport edge never flips it to its text fallback.
+        const canCrop = this.terminalImagesEnabled && (presentation === 'preview' || presentation === 'transcript');
+        if (!canCrop && (left < 0 ||
+            top < 0 ||
+            left + width > this.width ||
+            top + height > this.height)) {
+            return false;
+        }
+        const clip = this.imageClips.at(-1);
+        if (!canCrop && (clip !== undefined &&
+            ((clip.x1 !== undefined && left < clip.x1) ||
+                (clip.x2 !== undefined && left + width > clip.x2) ||
+                (clip.y1 !== undefined && top < clip.y1) ||
+                (clip.y2 !== undefined && top + height > clip.y2)))) {
+            return false;
+        }
+        const visibleLeft = Math.max(0, left, Math.ceil(clip?.x1 ?? 0));
+        const visibleTop = Math.max(0, top, Math.ceil(clip?.y1 ?? 0));
+        const visibleRight = Math.min(this.width, left + width, Math.floor(clip?.x2 ?? this.width));
+        const visibleBottom = Math.min(this.height, top + height, Math.floor(clip?.y2 ?? this.height));
+        if (visibleRight <= visibleLeft || visibleBottom <= visibleTop)
+            return false;
+        const decodedBytes = source.data.byteLength;
+        if (this.imageDecodedBytes + decodedBytes >
+            TERMINAL_IMAGE_MAX_FRAME_BYTES) {
+            return false;
+        }
+        const placement = {
+            node,
+            x: left,
+            y: top,
+            columns: width,
+            rows: height,
+            source,
+            ...(presentation === 'preview' || presentation === 'transcript' ? { presentation } : {}),
+            ...(transparent ? { transparent: true } : {}),
+            ...(canCrop ? { clip: { x: visibleLeft, y: visibleTop, columns: visibleRight - visibleLeft, rows: visibleBottom - visibleTop } } : {}),
+            ...(background !== undefined ? { background } : {}),
+        };
+        const graphicsReady = this.imageReady?.(placement);
+        this.imagePlacements.push(graphicsReady === undefined ? placement : { ...placement, graphicsReady });
+        this.imageNodes.add(node);
+        this.imageDecodedBytes += decodedBytes;
+        return graphicsReady !== false;
+    }
+    /**
+     * Reuse images inside a clean subtree whose cells came from prevScreen.
+     * Returns false when any former placement no longer fits this frame, so
+     * the painter can descend and restore that image's text fallback instead
+     * of blitting its old blank backing cells.
+     */
+    reuseImages(node) {
+        // A scrollable image's current clip is only known inside its ScrollBox.
+        // Descend first rather than admitting stale placements from an ancestor
+        // blit: a crop computed without that clip would spill past the viewport.
+        if (this.terminalImagesEnabled && this.previousImages.some(p => isNodeInSubtree(p.node, node)))
+            return false;
+        let reusedAll = true;
+        for (const placement of this.previousImages) {
+            if (!isNodeInSubtree(placement.node, node))
+                continue;
+            const ready = this.image(placement.node, placement.x, placement.y, placement.columns, placement.rows, placement.source, placement.background);
+            if (!ready || ready !== (placement.graphicsReady !== false)) {
+                reusedAll = false;
+            }
+        }
+        return reusedAll;
+    }
+    /** Whether this node owned a terminal placement in the previous frame. */
+    hadPreviousImage(node) {
+        return this.previousImages.some(placement => placement.node === node && placement.graphicsReady !== false);
+    }
+    /** Whether a baseline placement overlaps a screen region. */
+    hasPreviousImageInRegion(x, y, width, height) {
+        if (!this.terminalImagesEnabled)
+            return false;
+        const right = x + width;
+        const bottom = y + height;
+        return this.previousImages.some(placement => placement.graphicsReady !== false &&
+            placement.x < right &&
+            placement.x + placement.columns > x &&
+            placement.y < bottom &&
+            placement.y + placement.rows > y);
+    }
+    /** Current frame's immutable-by-convention terminal image requests. */
+    getImages() {
+        return this.imagePlacements.map(placement => {
+            const end = this.imageBackingEnds.get(placement.node);
+            if (end === undefined)
+                return placement;
+            const visible = placement.clip ?? placement;
+            const right = visible.x + visible.columns;
+            const bottom = visible.y + visible.rows;
+            const overlaps = (rect) => rect.x < right &&
+                rect.x + rect.width > visible.x && rect.y < bottom && rect.y + rect.height > visible.y;
+            // A later paint that covers the whole visible rect makes the raster
+            // unreachable and erasing is the only correct outcome (a blank `opaque`
+            // overlay would otherwise be pierced by the pixels beneath it). A paint
+            // that covers only part of it must not take the rest of the raster down
+            // with it — SixelGraphicsManager keeps those pixels instead.
+            const covers = (rect) => rect.x <= visible.x && rect.y <= visible.y &&
+                rect.x + rect.width >= right && rect.y + rect.height >= bottom;
+            let occluded = false;
+            let covered = false;
+            const occluders = [];
+            for (const op of this.operations.slice(end)) {
+                const rect = imageOcclusionRect(op, this.width);
+                if (rect === undefined || !overlaps(rect))
+                    continue;
+                occluded = true;
+                if (covers(rect)) {
+                    covered = true;
+                    break;
+                }
+                occluders.push(rect);
+            }
+            if (!occluded)
+                return placement;
+            if (covered)
+                return { ...placement, occluded, occludedFully: true };
+            return { ...placement, occluded, coveredRects: mergeOcclusionRects(occluders) };
+        });
+    }
+    /** Pixel ownership is determined by paint order, not just final text values. */
+    imageBacking(node) {
+        const placement = this.imagePlacements.find(image => image.node === node);
+        if (placement) {
+            const visible = placement.clip ?? placement;
+            const region = { x: visible.x, y: visible.y, width: visible.columns, height: visible.rows };
+            // An image's backing cells are blank; one with copy text (a formula's
+            // source) copies as that text, any other image is left out of copies.
+            const copyText = node.attributes['imageCopyText'];
+            const copied = typeof copyText === 'string' ? cleanCopyText(copyText) : '';
+            if (copied !== '') {
+                let id = copyRegionIds.get(node);
+                if (id === undefined)
+                    copyRegionIds.set(node, id = allocateCopyRegionId());
+                this.operations.push({ type: 'copyRegion', region, text: copied, id });
+            }
+            else
+                this.noSelect(region);
+        }
+        if (this.imageReady)
+            this.imageBackingEnds.set(node, this.operations.length);
+    }
+    /**
+     * The admitted placement's backing colour, or undefined when the raster
+     * composites transparently: its cells are then blanks, not a painted
+     * surface, so whatever the terminal shows behind the UI stays visible.
+     */
+    imagePlacementBackground(node) {
+        return this.imagePlacements.find(image => image.node === node)?.background;
+    }
+    /**
+     * Queue a text write at a position, split across lines on newlines.
+     * @param x - the left column.
+     * @param y - the top row.
+     * @param text - the text to write.
+     * @param softWrap - per-line soft-wrap flags parallel to text.split('\n').
+     * @param lines - optional pre-split physical lines, exactly text.split('\n').
+     */
+    write(x, y, text, softWrap, lines) {
+        if (!text) {
+            return;
+        }
+        this.operations.push({
+            type: 'write',
+            x,
+            y,
+            text,
+            softWrap,
+            lines,
+        });
+    }
+    /** Whether a rectangle can contribute cells under the current paint clip. */
+    isRectVisible(x, y, width, height) {
+        const clip = this.imageClips.at(-1);
+        return x < Math.min(this.width, clip?.x2 ?? this.width) &&
+            x + width > Math.max(0, clip?.x1 ?? 0) &&
+            y < Math.min(this.height, clip?.y2 ?? this.height) &&
+            y + height > Math.max(0, clip?.y1 ?? 0);
+    }
+    /**
+     * Push a clip region; subsequent writes are restricted to it.
+     * @param clip - the clip region to apply.
+     */
+    clip(clip) {
+        this.imageClips.push(intersectClip(this.imageClips.at(-1), clip));
+        this.operations.push({
+            type: 'clip',
+            clip,
+        });
+    }
+    /** Pop the most recent clip region. */
+    unclip() {
+        this.imageClips.pop();
+        this.operations.push({
+            type: 'unclip',
+        });
+    }
+    /**
+     * Apply all queued operations to the screen buffer and return it.
+     * @returns the rendered screen, diffable against the previous frame.
+     */
+    get() {
+        const screen = this.screen;
+        const screenWidth = this.width;
+        const screenHeight = this.height;
+        // Track blit vs write cell counts for debugging
+        let blitCells = 0;
+        let writeCells = 0;
+        // Pass 1: expand damage to cover clear regions. The buffer is freshly
+        // zeroed by resetScreen, so this pass only marks damage so diff()
+        // checks these regions against the previous frame.
+        //
+        // Also collect clears from absolute-positioned nodes. An absolute
+        // node overlays normal-flow siblings; when it shrinks, its clear is
+        // pushed AFTER those siblings' clean-subtree blits (DOM order). The
+        // blit copies the absolute node's own stale paint from prevScreen,
+        // and since clear is damage-only, the ghost survives diff. Normal-
+        // flow clears don't need this — a normal-flow node's old position
+        // can't have been painted on top of a sibling's current position.
+        const absoluteClears = [];
+        for (const operation of this.operations) {
+            if (operation.type !== 'clear')
+                continue;
+            const { x, y, width, height } = operation.region;
+            const startX = Math.max(0, x);
+            const startY = Math.max(0, y);
+            const maxX = Math.min(x + width, screenWidth);
+            const maxY = Math.min(y + height, screenHeight);
+            if (startX >= maxX || startY >= maxY)
+                continue;
+            const rect = {
+                x: startX,
+                y: startY,
+                width: maxX - startX,
+                height: maxY - startY,
+            };
+            screen.damage = screen.damage ? unionRect(screen.damage, rect) : rect;
+            if (operation.fromAbsolute)
+                absoluteClears.push(rect);
+        }
+        const clips = [];
+        for (const operation of this.operations) {
+            switch (operation.type) {
+                case 'clear':
+                    // handled in pass 1
+                    continue;
+                case 'clip':
+                    // Intersect with the parent clip (if any) so nested
+                    // overflow:hidden boxes can't write outside their ancestor's
+                    // clip region. Without this, a message with overflow:hidden at
+                    // the bottom of a scrollbox pushes its OWN clip (based on its
+                    // layout bounds, already translated by -scrollTop) which can
+                    // extend below the scrollbox viewport — writes escape into
+                    // the sibling bottom section's rows.
+                    clips.push(intersectClip(clips.at(-1), operation.clip));
+                    continue;
+                case 'unclip':
+                    clips.pop();
+                    continue;
+                case 'blit': {
+                    // Bulk-copy cells from source screen region using TypedArray.set().
+                    // Tracking damage ensures diff() checks blitted cells for stale content
+                    // when a parent blits an area that previously contained child content.
+                    const { src, x: regionX, y: regionY, width: regionWidth, height: regionHeight, } = operation;
+                    // Intersect with active clip — a child's clean-blit passes its full
+                    // cached rect, but the parent ScrollBox may have shrunk (pill mount).
+                    // Without this, the blit writes past the ScrollBox's new bottom edge
+                    // into the pill's row.
+                    const clip = clips.at(-1);
+                    const startX = Math.max(regionX, clip?.x1 ?? 0);
+                    const startY = Math.max(regionY, clip?.y1 ?? 0);
+                    const maxY = Math.min(regionY + regionHeight, screenHeight, src.height, clip?.y2 ?? Infinity);
+                    const maxX = Math.min(regionX + regionWidth, screenWidth, src.width, clip?.x2 ?? Infinity);
+                    if (startX >= maxX || startY >= maxY)
+                        continue;
+                    // Skip rows covered by an absolute-positioned node's clear.
+                    // Absolute nodes overlay normal-flow siblings, so prevScreen in
+                    // that region holds the absolute node's stale paint — blitting
+                    // it back would ghost. See absoluteClears collection above.
+                    if (absoluteClears.length === 0) {
+                        blitRegion(screen, src, startX, startY, maxX, maxY);
+                        blitCells += (maxY - startY) * (maxX - startX);
+                        continue;
+                    }
+                    let rowStart = startY;
+                    for (let row = startY; row <= maxY; row++) {
+                        const excluded = row < maxY &&
+                            absoluteClears.some(r => row >= r.y &&
+                                row < r.y + r.height &&
+                                startX >= r.x &&
+                                maxX <= r.x + r.width);
+                        if (excluded || row === maxY) {
+                            if (row > rowStart) {
+                                blitRegion(screen, src, startX, rowStart, maxX, row);
+                                blitCells += (row - rowStart) * (maxX - startX);
+                            }
+                            rowStart = row + 1;
+                        }
+                    }
+                    continue;
+                }
+                case 'shift': {
+                    shiftRows(screen, operation.top, operation.bottom, operation.n);
+                    continue;
+                }
+                case 'softWrapRow': {
+                    // Paint order: the marker lands where the producer asked for it, and
+                    // the write case above resets it when a later operation repaints that
+                    // row. (This used to run in a pass after every write, which let a
+                    // marker outlive an overlay that overwrote the row.)
+                    if (operation.y > 0 && operation.y < screen.height) {
+                        screen.softWrap[operation.y] = Math.max(1, operation.contentEnd);
+                    }
+                    continue;
+                }
+                case 'copyRegion': {
+                    // In paint order: anything written over the image later (a menu,
+                    // an overlay) clears the cells it covers, so a copy reads what is
+                    // visible there rather than the formula beneath.
+                    const { x, y, width, height } = operation.region;
+                    markCopyRegion(screen, x, y, width, height, operation.text, operation.id);
+                    continue;
+                }
+                case 'shade': {
+                    // Honour the active clip like a write: a backdrop inside an
+                    // overflow-hidden ancestor must not shade cells outside it.
+                    const { x, y, width, height } = operation.region;
+                    const clip = clips.at(-1);
+                    const startX = Math.max(x, clip?.x1 ?? 0);
+                    const startY = Math.max(y, clip?.y1 ?? 0);
+                    const maxX = Math.min(x + width, clip?.x2 ?? Infinity);
+                    const maxY = Math.min(y + height, clip?.y2 ?? Infinity);
+                    if (startX >= maxX || startY >= maxY)
+                        continue;
+                    shadeRegion(screen, this.stylePool, startX, startY, maxX - startX, maxY - startY);
+                    continue;
+                }
+                case 'write': {
+                    const { text, softWrap } = operation;
+                    let { x, y } = operation;
+                    let lines = operation.lines ?? text.split('\n');
+                    let prevContentEnd = 0;
+                    const clip = clips.at(-1);
+                    // Clip vertically BEFORE measuring or slicing ANSI lines. A long
+                    // tool result/code block may intersect the viewport by one row;
+                    // horizontal work over its entire history is still O(transcript).
+                    // Screen bounds apply even without an explicit overflow clip.
+                    const from = Math.max(0, Math.max(0, clip?.y1 ?? 0) - y);
+                    const to = Math.min(lines.length, Math.min(screenHeight, clip?.y2 ?? screenHeight) - y);
+                    if (from >= to)
+                        continue;
+                    const swFrom = from;
+                    const clipHorizontally = typeof clip?.x1 === 'number' && typeof clip?.x2 === 'number';
+                    if (clipHorizontally && x >= clip.x2)
+                        continue;
+                    const clipLine = (line) => {
+                        // Width/slicing treat raw tabs as zero cells. Expand at the
+                        // ORIGINAL x before clipping, also for the soft-wrap predecessor.
+                        line = expandTabs(line, undefined, x);
+                        if (!clipHorizontally)
+                            return line;
+                        const start = Math.max(0, clip.x1 - x);
+                        const width = stringWidth(line);
+                        const end = Math.min(width, clip.x2 - x);
+                        if (start >= end)
+                            return '';
+                        if (start === 0 && end === width)
+                            return line;
+                        let sliced = sliceAnsi(line, start, end);
+                        // Do not leave a wide glyph's SpacerTail outside the clip.
+                        if (stringWidth(sliced) > end - start)
+                            sliced = sliceAnsi(line, start, end - 1);
+                        return sliced;
+                    };
+                    const writeX = clipHorizontally ? Math.max(x, clip.x1) : x;
+                    // Copy joins need only the preceding (horizontally clipped) line,
+                    // not every discarded line. Preserve its content-end coordinate.
+                    if (softWrap && from > 0 && softWrap[from] === true) {
+                        prevContentEnd = writeX + stringWidth(clipLine(lines[from - 1]));
+                    }
+                    lines = lines.slice(from, to);
+                    if (clipHorizontally)
+                        lines = lines.map(clipLine);
+                    x = writeX;
+                    y += from;
+                    const swBits = screen.softWrap;
+                    let offsetY = 0;
+                    for (const line of lines) {
+                        const lineY = y + offsetY;
+                        // Line can be outside screen if `text` is taller than screen height
+                        if (lineY >= screenHeight) {
+                            break;
+                        }
+                        const contentEnd = writeLineToScreen(screen, line, x, lineY, screenWidth, this.stylePool, this.charCache, this.streamingSlot, this.packedOwner);
+                        writeCells += contentEnd - x;
+                        if (screen.copyTexts !== undefined && screen.copyTexts.size > 0) {
+                            clearCopyRegionSpan(screen, lineY, x, contentEnd);
+                        }
+                        // See Screen.softWrap docstring for the encoding. contentEnd
+                        // from writeLineToScreen is tab-expansion-aware, unlike
+                        // x+stringWidth(line) which treats tabs as width 0.
+                        if (softWrap) {
+                            const isSW = softWrap[swFrom + offsetY] === true;
+                            swBits[lineY] = isSW ? prevContentEnd : 0;
+                            prevContentEnd = contentEnd;
+                        }
+                        else {
+                            // Paint order: a producer that doesn't track wrapping (fills,
+                            // raw-ansi, overlays) still replaces the row it paints, so a
+                            // continuation marker an earlier softWrapRow set for this row
+                            // is stale — keep it and a copy would glue the overlay's text
+                            // onto the previous line.
+                            swBits[lineY] = 0;
+                        }
+                        offsetY++;
+                    }
+                    continue;
+                }
+            }
+        }
+        // noSelect ops go LAST so they win over blits (which copy noSelect
+        // from prevScreen) and writes (which don't touch noSelect). This way
+        // a <NoSelect> box correctly fences its region even when the parent
+        // blits, and moving a <NoSelect> between frames correctly clears the
+        // old region (resetScreen already zeroed the bitmap).
+        for (const operation of this.operations) {
+            if (operation.type === 'noSelect') {
+                const { x, y, width, height } = operation.region;
+                markNoSelectRegion(screen, x, y, width, height);
+            }
+        }
+        // Blits carry the previous frame's region texts; keep only the ones a
+        // cell still references, or the map grows by every redrawn formula.
+        pruneCopyTexts(screen);
+        // Log blit/write ratio for debugging - high write count suggests blitting isn't working
+        const totalCells = blitCells + writeCells;
+        if (totalCells > 1000 && writeCells > blitCells) {
+            logForDebugging(`High write ratio: blit=${blitCells}, write=${writeCells} (${((writeCells / totalCells) * 100).toFixed(1)}% writes), screen=${screenHeight}x${screenWidth}`);
+        }
+        return screen;
+    }
+}
+function stylesEqual(a, b) {
+    if (a === b)
+        return true; // Reference equality fast path
+    const len = a.length;
+    if (len !== b.length)
+        return false;
+    if (len === 0)
+        return true; // Both empty
+    for (let i = 0; i < len; i++) {
+        if (a[i].code !== b[i].code)
+            return false;
+    }
+    return true;
+}
+/**
+ * Convert a string with ANSI codes into styled characters with proper grapheme
+ * clustering. Fixes ansi-tokenize splitting grapheme clusters (like family
+ * emojis) into individual code points.
+ *
+ * Also precomputes styleId + hyperlink per style run (not per char) — an
+ * 80-char line with 3 style runs does 3 intern calls instead of 80.
+ */
+function styledCharsWithGraphemeClustering(chars, stylePool) {
+    const charCount = chars.length;
+    if (charCount === 0)
+        return [];
+    const result = [];
+    const bufferChars = [];
+    let bufferStyles = chars[0].styles;
+    for (let i = 0; i < charCount; i++) {
+        const char = chars[i];
+        const styles = char.styles;
+        // Different styles means we need to flush and start new buffer
+        if (bufferChars.length > 0 && !stylesEqual(styles, bufferStyles)) {
+            flushBuffer(bufferChars.join(''), bufferStyles, stylePool, result);
+            bufferChars.length = 0;
+        }
+        bufferChars.push(char.value);
+        bufferStyles = styles;
+    }
+    // Final flush
+    if (bufferChars.length > 0) {
+        flushBuffer(bufferChars.join(''), bufferStyles, stylePool, result);
+    }
+    return result;
+}
+function flushBuffer(buffer, styles, stylePool, out) {
+    // Compute styleId + hyperlink ONCE for the whole style run.
+    // Every grapheme in this buffer shares the same styles.
+    //
+    // Extract and track hyperlinks separately, filter from styles.
+    // Always check for OSC 8 codes to filter, not just when a URL is
+    // extracted. The tokenizer treats OSC 8 close codes (empty URL) as
+    // active styles, so they must be filtered even when no hyperlink
+    // URL is present.
+    const hyperlink = extractHyperlinkFromStyles(styles) ?? undefined;
+    const hasOsc8Styles = hyperlink !== undefined ||
+        styles.some(s => s.code.length >= OSC8_PREFIX.length && s.code.startsWith(OSC8_PREFIX));
+    const filteredStyles = hasOsc8Styles
+        ? filterOutHyperlinkStyles(styles)
+        : styles;
+    const styleId = stylePool.intern(filteredStyles);
+    for (const { segment: grapheme } of getGraphemeSegmenter().segment(buffer)) {
+        out.push({
+            value: grapheme,
+            width: stringWidth(grapheme),
+            styleId,
+            hyperlink,
+        });
+    }
+}
+/**
+ * Write a single line's characters into the screen buffer.
+ * Extracted from Output.get() so JSC can optimize this tight,
+ * monomorphic loop independently — better register allocation,
+ * setCellAt inlining, and type feedback than when buried inside
+ * a 300-line dispatch function.
+ *
+ * Returns the end column (x + visual width, including tab expansion) so
+ * the caller can record it in screen.softWrap without re-walking the
+ * line via stringWidth(). Caller computes the debug cell-count as end-x.
+ */
+function writeLineToScreen(screen, line, x, y, screenWidth, stylePool, charCache, streamingSlot, packed) {
+    // Fast path: replay the recorded packed run for this exact line — two
+    // typed-array stores per cell, no interning/packing/guard work. The run
+    // dies with its screen; a width transition needs the slow path's guards
+    // and replayCellRun reports that.
+    if (packed !== undefined) {
+        const run = packed.lines.get(line);
+        if (run !== undefined &&
+            run.charPool === screen.charPool &&
+            x >= 0 &&
+            x + cellRunSpan(run) <= screenWidth) {
+            if (replayCellRun(screen, x, y, run)) {
+                // LRU refresh (chars budget unchanged: same key length).
+                packed.lines.delete(line);
+                packed.lines.set(line, run);
+                return x + cellRunSpan(run);
+            }
+            // fall through to the slow path for this line this frame
+        }
+    }
+    let characters = charCache.get(line);
+    if (!characters) {
+        characters = buildClusteredChars(line, stylePool, streamingSlot);
+        charCache.set(line, characters);
+    }
+    // Recording for the packed fast path: only plain single/wide char cells
+    // are recordable — control chars (tab expansion is x-relative), edge
+    // SpacerHead substitution, and y/x off-screen abort it. The packed-run
+    // limit is far above the charCache's MAX_CACHEABLE_LINE: a run costs
+    // three small integers per cell (no per-char objects), so even the
+    // ~700-char ANSI-art whale lines belong — without this they
+    // re-tokenize and re-cluster EVERY frame.
+    const recordable = packed !== undefined &&
+        line.length <= PACKED_MAX_LINE &&
+        x >= 0 &&
+        y >= 0 &&
+        y < screen.height;
+    let run = recordable ? createCellRun(screen) : undefined;
+    let runAlive = run !== undefined;
+    let offsetX = x;
+    for (let charIdx = 0; charIdx < characters.length; charIdx++) {
+        const character = characters[charIdx];
+        const codePoint = character.value.codePointAt(0);
+        // Handle C0 control characters (0x00-0x1F) that cause cursor movement
+        // mismatches. stringWidth treats these as width 0, but terminals may
+        // move the cursor differently.
+        if (codePoint !== undefined && codePoint <= 0x1f) {
+            // Not recordable: tab expansion is x-relative, ESC handling varies.
+            runAlive = false;
+            // Tab (0x09): expand to spaces at the tab's OWN style, not stylePool.none.
+            // An unstyled space drops the background and is skipped by the diff's
+            // empty-cell optimization, so a tab inside a bg region (code blocks) shows
+            // the terminal default bg — the black indentation of issue #606.
+            if (codePoint === 0x09) {
+                const tabWidth = 8;
+                const spacesToNextStop = tabWidth - (offsetX % tabWidth);
+                for (let i = 0; i < spacesToNextStop && offsetX < screenWidth; i++) {
+                    setCellAt(screen, offsetX, y, {
+                        char: ' ',
+                        styleId: character.styleId,
+                        width: 0 /* CellWidth.Narrow */,
+                        hyperlink: undefined,
+                    });
+                    offsetX++;
+                }
+            }
+            // ESC (0x1B): skip incomplete escape sequences that ansi-tokenize
+            // didn't recognize. ansi-tokenize only parses SGR sequences (ESC[...m)
+            // and OSC 8 hyperlinks (ESC]8;;url BEL). Other sequences like cursor
+            // movement, screen clearing, or terminal title become individual char
+            // tokens that we need to skip here.
+            else if (codePoint === 0x1b) {
+                const nextChar = characters[charIdx + 1]?.value;
+                const nextCode = nextChar?.codePointAt(0);
+                if (nextChar === '(' ||
+                    nextChar === ')' ||
+                    nextChar === '*' ||
+                    nextChar === '+') {
+                    // Charset selection: ESC ( X, ESC ) X, etc.
+                    // Skip the intermediate char and the charset designator
+                    charIdx += 2;
+                }
+                else if (nextChar === '[') {
+                    // CSI sequence: ESC [ ... final-byte
+                    // Final byte is in range 0x40-0x7E (@, A-Z, [\]^_`, a-z, {|}~)
+                    // Examples: ESC[2J (clear), ESC[?25l (cursor hide), ESC[H (home)
+                    charIdx++; // skip the [
+                    while (charIdx < characters.length - 1) {
+                        charIdx++;
+                        const c = characters[charIdx]?.value.codePointAt(0);
+                        // Final byte terminates the sequence
+                        if (c !== undefined && c >= 0x40 && c <= 0x7e) {
+                            break;
+                        }
+                    }
+                }
+                else if (nextChar === ']' ||
+                    nextChar === 'P' ||
+                    nextChar === '_' ||
+                    nextChar === '^' ||
+                    nextChar === 'X') {
+                    // String-based sequences terminated by BEL (0x07) or ST (ESC \):
+                    // - OSC: ESC ] ... (Operating System Command)
+                    // - DCS: ESC P ... (Device Control String)
+                    // - APC: ESC _ ... (Application Program Command)
+                    // - PM:  ESC ^ ... (Privacy Message)
+                    // - SOS: ESC X ... (Start of String)
+                    charIdx++; // skip the introducer char
+                    while (charIdx < characters.length - 1) {
+                        charIdx++;
+                        const c = characters[charIdx]?.value;
+                        // BEL (0x07) terminates the sequence
+                        if (c === '\x07') {
+                            break;
+                        }
+                        // ST (String Terminator) is ESC \
+                        // When we see ESC, check if next char is backslash
+                        if (c === '\x1b') {
+                            const nextC = characters[charIdx + 1]?.value;
+                            if (nextC === '\\') {
+                                charIdx++; // skip the backslash too
+                                break;
+                            }
+                        }
+                    }
+                }
+                else if (nextCode !== undefined &&
+                    nextCode >= 0x30 &&
+                    nextCode <= 0x7e) {
+                    // Single-character escape sequences: ESC followed by 0x30-0x7E
+                    // (excluding the multi-char introducers already handled above)
+                    // - Fp range (0x30-0x3F): ESC 7 (save cursor), ESC 8 (restore)
+                    // - Fe range (0x40-0x5F): ESC D (index), ESC M (reverse index)
+                    // - Fs range (0x60-0x7E): ESC c (reset)
+                    charIdx++; // skip the command char
+                }
+            }
+            // Carriage return (0x0D): would move cursor to column 0, skip it
+            // Backspace (0x08): would move cursor left, skip it
+            // Bell (0x07), vertical tab (0x0B), form feed (0x0C): skip
+            // All other control chars (0x00-0x06, 0x0E-0x1F): skip
+            // Note: newline (0x0A) is already handled by line splitting
+            continue;
+        }
+        // Zero-width characters (combining marks, ZWNJ, ZWS, etc.)
+        // don't occupy terminal cells — storing them as Narrow cells
+        // desyncs the virtual cursor from the real terminal cursor.
+        // Width was computed once during clustering (cached via charCache).
+        const charWidth = character.width;
+        if (charWidth === 0) {
+            continue;
+        }
+        const isWideCharacter = charWidth >= 2;
+        // Wide char at last column can't fit — terminal would wrap it to
+        // the next line, desyncing our cursor model. Place a SpacerHead to
+        // mark the blank column, matching terminal behavior.
+        if (isWideCharacter && offsetX + 2 > screenWidth) {
+            runAlive = false;
+            setCellAt(screen, offsetX, y, {
+                char: ' ',
+                styleId: stylePool.none,
+                width: 3 /* CellWidth.SpacerHead */,
+                hyperlink: undefined,
+            });
+            offsetX++;
+            continue;
+        }
+        // styleId + hyperlink were precomputed during clustering (once per
+        // style run, cached via charCache). Hot loop is now just property
+        // reads — no intern, no extract, no filter per frame.
+        const cellWidth = isWideCharacter ? 1 /* CellWidth.Wide */ : 0 /* CellWidth.Narrow */;
+        setCellAt(screen, offsetX, y, {
+            char: character.value,
+            styleId: character.styleId,
+            width: cellWidth,
+            hyperlink: character.hyperlink,
+        });
+        if (runAlive && run !== undefined) {
+            recordCellRunEntry(run, screen, offsetX, {
+                char: character.value,
+                styleId: character.styleId,
+                width: cellWidth,
+                hyperlink: character.hyperlink,
+            });
+            // setCellAt also writes a SpacerTail after a wide char (when it
+            // fits); record that deterministic write too, or abort at the edge.
+            if (isWideCharacter) {
+                if (offsetX + 1 < screenWidth) {
+                    recordSpacerRunEntry(run, offsetX + 1);
+                }
+                else {
+                    runAlive = false;
+                }
+            }
+        }
+        offsetX += isWideCharacter ? 2 : 1;
+    }
+    // Commit the recording for the packed fast path. Complete NON-EMPTY
+    // runs only: an empty line ('' from split('\n'), zero-width-only lines)
+    // records zero entries and would commit a degenerate run whose replay
+    // writes NaN damage (gaps[0] undefined) and poisons the whole frame diff.
+    if (runAlive && run !== undefined && packed !== undefined && run.gaps.length > 0) {
+        packed.commit(line, run);
+    }
+    return offsetX;
+}

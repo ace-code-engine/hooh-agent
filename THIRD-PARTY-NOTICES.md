@@ -1,7 +1,7 @@
 # Third-party notices
 
 This project is MIT-licensed (see [`LICENSE`](LICENSE)) — but it is **not** free of
-third-party code or text. It does two different things with other people's work, and the two
+third-party code or text. It does a few different things with other people's work, and the
 sections below cover them separately.
 
 1. **Redistributes** the third-party Python packages in
@@ -14,7 +14,8 @@ sections below cover them separately.
    and those texts ship with this repository, so the attribution below is an index rather
    than a substitute.
 2. **Adapts source code and text** from the projects in
-   [Adapted source & text](#adapted-source--text). Those are *derived* files, not
+   [Adapted source & text](#adapted-source--text), and, for dsh-TUI, **vendors** the render
+   kernel byte-for-byte. Adapted files are *derived* files, not
    byte-for-byte upstream copies: upstream copyright and license terms apply to whatever we
    ship from them, and any inline license header in an upstream file is kept verbatim.
 
@@ -41,20 +42,25 @@ sections below cover them separately.
 
 ## Adapted source & text
 
-These are **not** byte-for-byte upstream files: this project adapts code and UI text from
-them. The upstream copyright and license terms apply to the adapted parts, and the
-attribution lands here **before** the first byte does, not after.
+These are, except where a row says otherwise, **not** byte-for-byte upstream files: this
+project adapts code and UI text from them. The upstream copyright and license terms apply to
+the adapted parts, and the attribution lands here **before** the first byte does, not after.
 
 | Project | Version | License | Obligations | Landed in this repo |
 |---|---|---|---|---|
-| dsh-TUI (`@deepseek-harness-tui/dsh-tui`) | 0.12.0 | MIT | Keep the upstream copyright + permission notice with every adapted part | *Planned* — renderer kernel and selected components; per-part upstreams in [`third_party/dsh-tui/NOTICE.md`](third_party/dsh-tui/NOTICE.md) |
+| dsh-TUI (`@deepseek-harness-tui/dsh-tui`) | 0.12.0 | MIT | Keep the upstream copyright + permission notice with every adapted or copied part | **Landed 2026-10-04** — render kernel vendored byte-for-byte, 135 files / 27,890 lines, at [`frontend/vendor/dsh-ink/`](frontend/vendor/dsh-ink/); per-file provenance in its [`MANIFEST.md`](frontend/vendor/dsh-ink/MANIFEST.md); per-part upstreams in [`third_party/dsh-tui/NOTICE.md`](third_party/dsh-tui/NOTICE.md) |
 
-No dsh-TUI source or text has been copied into this repository yet; the license and the
-attribution land first, on purpose. The upstream MIT text, copied verbatim, is
-[`third_party/dsh-tui/LICENSE`](third_party/dsh-tui/LICENSE). That NOTICE also lists the
+The dsh-TUI render kernel has landed: 135 upstream files, copied byte-for-byte into
+[`frontend/vendor/dsh-ink/`](frontend/vendor/dsh-ink/), carrying the upstream MIT text as
+[`LICENSE.upstream`](frontend/vendor/dsh-ink/LICENSE.upstream) (SHA256 identical to the
+upstream `LICENSE`). It requires no private package. Its per-file table lives in
+[`frontend/vendor/dsh-ink/MANIFEST.md`](frontend/vendor/dsh-ink/MANIFEST.md).
+[`third_party/dsh-tui/NOTICE.md`](third_party/dsh-tui/NOTICE.md) lists the
 upstreams of the parts *inside* dsh-TUI (Ink · pi · Yoga · dsh-ui-whale ·
 dsh-anchored-standard · mathjax-tex-svg) and the one dependency whose license is still
-**unverified** (the `vendor/dsh-std` submodule).
+**unverified** (the `vendor/dsh-std` submodule, which the vendored closure does not use).
+The vendored closure also contains derivations/ports of **Ink** and **Meta Yoga**; their full
+license texts live in [`third_party/dsh-tui/upstream/`](third_party/dsh-tui/upstream/).
 
 ## Notes on the licenses that carry obligations
 

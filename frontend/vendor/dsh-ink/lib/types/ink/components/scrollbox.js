@@ -1,0 +1,309 @@
+import { jsx as _jsx } from "react/jsx-runtime";
+import { useCallback, useImperativeHandle, useRef, useState } from 'react';
+import { FRAME_INTERVAL_MS } from '../constants.js';
+import { markScrollActivity } from '../../bootstrap/state.js';
+import { markDirty, scheduleRenderFrom } from '../dom.js';
+import { noteFrameCause } from '../geometry-trace.js';
+import { markCommitStart } from '../reconciler.js';
+import { swallowNestedUpdateOverflow } from '../update-overflow-guard.js';
+import Box from './Box.js';
+/**
+ * A Box with `overflow: scroll` and an imperative scroll API.
+ *
+ * Children are laid out at their full Yoga-computed height inside a
+ * constrained container. At render time, only children intersecting the
+ * visible window (scrollTop..scrollTop+height) are rendered (viewport
+ * culling). Content is translated by -scrollTop and clipped to the box bounds.
+ *
+ * Works best inside a fullscreen (constrained-height root) Ink tree.
+ */
+function ScrollBox({ children, ref, stickyScroll, ...style }) {
+    const domRef = useRef(null);
+    // scrollTo/scrollBy bypass React: they mutate scrollTop on the DOM node,
+    // mark it dirty, and call the root's throttled scheduleRender directly.
+    // The Ink renderer reads scrollTop from the node — no React state needed,
+    // no reconciler overhead per wheel event. The microtask defer coalesces
+    // multiple scrollBy calls in one input batch (discreteUpdates) into one
+    // render — otherwise scheduleRender's leading edge fires on the FIRST
+    // event before subsequent events mutate scrollTop. scrollToBottom still
+    // forces a React render: sticky is attribute-observed, no DOM-only path.
+    const [, forceRender] = useState(0);
+    const listenersRef = useRef(new Set());
+    const renderQueuedRef = useRef(false);
+    // The imperative handle, kept in a ref so the onWheel handler below can
+    // call scrollBy through the full public path (clamp bounds, sticky
+    // clearing, subscriber notify) instead of duplicating its logic.
+    const handleRef = useRef(null);
+    const notify = () => {
+        // #185 self-heal: scroll subscribers drive React state (setScrollTick);
+        // a thrown overflow here resets React's nested counter — absorb it.
+        for (const l of listenersRef.current) {
+            try {
+                l();
+            }
+            catch (error) {
+                if (!swallowNestedUpdateOverflow(error, 'scrollbox.notify'))
+                    throw error;
+            }
+        }
+    };
+    // Input-edge intent coalescing (Qwen Code's 16ms wheel merge, Crush's
+    // pre-queue filter): subscribers drive React state (MessageList's mount
+    // window, Chat's sticky flag, the timeline rail), so notifying per wheel
+    // EVENT runs a full React commit per event — a fast flick is 10-30
+    // events, each re-running the offsets/window/timeline loops on a big
+    // session. The scrollTop mutation and the ink render are already
+    // frame-throttled; this aligns the React commits to the same frame
+    // budget. Both edges defer to a microtask: the remaining input events of
+    // the same stdin batch then land BEFORE any commit, and one commit
+    // covers the whole batch (the sync leading edge used to run a full
+    // commit inside the wheel dispatch itself — pure input latency).
+    const notifyQueuedRef = useRef(false);
+    const lastNotifyAtRef = useRef(-Infinity);
+    const notifyCoalesced = () => {
+        const since = performance.now() - lastNotifyAtRef.current;
+        if (!notifyQueuedRef.current && since >= FRAME_INTERVAL_MS) {
+            notifyQueuedRef.current = true;
+            lastNotifyAtRef.current = performance.now();
+            queueMicrotask(() => {
+                notifyQueuedRef.current = false;
+                notify();
+            });
+            return;
+        }
+        if (notifyQueuedRef.current)
+            return;
+        notifyQueuedRef.current = true;
+        setTimeout(() => {
+            notifyQueuedRef.current = false;
+            lastNotifyAtRef.current = performance.now();
+            notify();
+        }, Math.max(0, FRAME_INTERVAL_MS - since));
+    };
+    function scrollMutated(el) {
+        // Signal background intervals (IDE poll, LSP poll, GCS fetch, orphan
+        // check) to skip their next tick — they compete for the event loop and
+        // contributed to 1402ms max frame gaps during scroll drain.
+        markScrollActivity();
+        noteFrameCause('scroll');
+        markDirty(el);
+        markCommitStart();
+        notifyCoalesced();
+        queueRender(el);
+    }
+    function queueRender(el) {
+        if (renderQueuedRef.current)
+            return;
+        renderQueuedRef.current = true;
+        queueMicrotask(() => {
+            renderQueuedRef.current = false;
+            scheduleRenderFrom(el);
+        });
+    }
+    useImperativeHandle(ref, () => {
+        const handle = {
+            scrollTo(y) {
+                const el = domRef.current;
+                if (!el)
+                    return;
+                // Explicit false overrides the DOM attribute so manual scroll
+                // breaks stickiness. Render code checks ?? precedence.
+                el.stickyScroll = false;
+                el.pendingScrollDelta = undefined;
+                el.scrollAnchor = undefined;
+                el.scrollTop = Math.max(0, Math.floor(y));
+                scrollMutated(el);
+            },
+            scrollToElement(el, offset = 0) {
+                const box = domRef.current;
+                if (!box)
+                    return;
+                box.stickyScroll = false;
+                box.pendingScrollDelta = undefined;
+                box.scrollAnchor = {
+                    el,
+                    offset
+                };
+                scrollMutated(box);
+            },
+            scrollBy(dy) {
+                const el = domRef.current;
+                if (!el)
+                    return;
+                const dyFloor = Math.floor(dy);
+                // Wheel-down / scroll-down while the view is already AT the bottom is
+                // pure overscroll: nothing left to reveal. Ignore it entirely — no
+                // sticky clear, no pending delta, no dirty mark, no subscriber
+                // notify. The old path ran every notch through sticky-break → drain →
+                // re-pin, which (with streaming content) flip-flopped the sticky flag
+                // frame by frame, remounted the virtualization window (isSticky is
+                // React state), flashed the "↓ back to bottom" pill while the user
+                // WAS at the bottom, let the drain overshoot past maxScroll on
+                // measure frames, and repainted the transcript per notch (flicker).
+                // Gate:
+                //  - sticky === true: the renderer keeps scrollTop pinned at
+                //    maxScroll each frame — a wheel-down must never unpin it
+                //    (leaving the bottom is wheel-UP's job).
+                //  - else positionally at the bottom or past it (a shrink-frozen
+                //    scrollTop can sit above the cached maxScroll): scrollTop >=
+                //    maxScroll with no in-flight scroll-UP (pending >= 0).
+                //    pending < 0 means an earlier wheel-up hasn't drained yet: a
+                //    down-notch must land so the accumulator cancels (scroll-up
+                //    followed by scroll-down naturally cancels — see the
+                //    accumulation comment below).
+                //  - Notches from ABOVE (scrollTop < maxScroll) are NOT gated —
+                //    including the landing notch that would finish the final row:
+                //    ±1-row callers (panel ↑/↓ keys) and scrollTo/seek landings can
+                //    rest at maxScroll - 1, and gating there would leave the last
+                //    row unreachable and never trigger the renderer's at-bottom
+                //    re-pin (which requires scrollTop >= maxScroll). The landing
+                //    notch drains to the bottom and the re-pin restores sticky /
+                //    clears the new-messages pill on that frame. No epsilon is
+                //    needed — the whole chain is integer rows.
+                if (dyFloor > 0) {
+                    const sticky = el.stickyScroll ?? Boolean(el.attributes['stickyScroll']);
+                    const pending = el.pendingScrollDelta ?? 0;
+                    const maxScroll = Math.max(0, (el.scrollHeight ?? 0) - (el.scrollViewportHeight ?? 0));
+                    if (sticky || ((el.scrollTop ?? 0) >= maxScroll && pending >= 0)) {
+                        return;
+                    }
+                }
+                el.stickyScroll = false;
+                // Wheel input cancels any in-flight anchor seek — user override.
+                el.scrollAnchor = undefined;
+                // Accumulate in pendingScrollDelta; renderer drains it at a capped
+                // rate so fast flicks show intermediate frames. Pure accumulator:
+                // scroll-up followed by scroll-down naturally cancels.
+                el.pendingScrollDelta = (el.pendingScrollDelta ?? 0) + dyFloor;
+                scrollMutated(el);
+            },
+            scrollToBottom() {
+                const el = domRef.current;
+                if (!el)
+                    return;
+                el.scrollAnchor = undefined;
+                const viewportH = el.scrollViewportHeight ?? 0;
+                const maxScroll = Math.max(0, (el.scrollHeight ?? 0) - viewportH);
+                el.pendingScrollDelta = undefined;
+                el.stickyScroll = true;
+                // Jump intent is not wheel debt: mounting the union of the current
+                // position and a far pending delta defeats virtualization. MessageList's
+                // sticky tail walk mounts the destination directly, even with estimated
+                // heights. Publish sticky + target before notifying; the renderer then
+                // pins to the fresh maxScroll as those tail rows are measured.
+                el.scrollTop = maxScroll;
+                scrollMutated(el);
+                forceRender(n => n + 1);
+            },
+            getScrollTop() {
+                return domRef.current?.scrollTop ?? 0;
+            },
+            getPendingDelta() {
+                // Accumulated-but-not-yet-drained delta. useVirtualScroll needs
+                // this to mount the union [committed, committed+pending] range —
+                // otherwise intermediate drain frames find no children (blank).
+                return domRef.current?.pendingScrollDelta ?? 0;
+            },
+            getScrollHeight() {
+                return domRef.current?.scrollHeight ?? 0;
+            },
+            getFreshScrollHeight() {
+                const content = domRef.current?.childNodes[0];
+                return content?.yogaNode?.getComputedHeight() ?? domRef.current?.scrollHeight ?? 0;
+            },
+            getViewportHeight() {
+                return domRef.current?.scrollViewportHeight ?? 0;
+            },
+            getViewportTop() {
+                return domRef.current?.scrollViewportTop ?? 0;
+            },
+            isSticky() {
+                const el = domRef.current;
+                if (!el)
+                    return false;
+                return el.stickyScroll ?? Boolean(el.attributes['stickyScroll']);
+            },
+            subscribe(listener) {
+                listenersRef.current.add(listener);
+                return () => listenersRef.current.delete(listener);
+            },
+            setClampBounds(min, max) {
+                const el = domRef.current;
+                if (!el)
+                    return;
+                if (el.scrollClampMin === min && el.scrollClampMax === max)
+                    return;
+                el.scrollClampMin = min;
+                el.scrollClampMax = max;
+                // Layout effects publish the new mount window AFTER resetAfterCommit
+                // may have painted with the previous bounds. Warm rows need no measure
+                // tick, so that paint can otherwise remain on blank spacer indefinitely.
+                // Invalidate the blit and schedule a paint, without notifying React
+                // subscribers (the window is already committed).
+                markDirty(el);
+                queueRender(el);
+            }
+        };
+        handleRef.current = handle;
+        return handle;
+    }, 
+    // notify/scrollMutated are inline (no useCallback) but only close over
+    // refs + imports — stable. Empty deps avoids rebuilding the handle on
+    // every render (which re-registers the ref = churn).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    []);
+    // Position-routed wheel events (pointer over this box) scroll THIS box
+    // through the public scrollBy path — clamp bounds, sticky clearing, and
+    // subscriber notify all apply. Horizontal wheel (deltaX) has no renderer
+    // support yet (no scrollLeft in the DOM model) and is ignored.
+    const handleWheel = useCallback((e) => {
+        if (e.deltaY !== 0)
+            handleRef.current?.scrollBy(e.deltaY);
+    }, []);
+    // Keep the host ref attached across updates. A new callback would detach
+    // it before children's layout effects publish their clamp bounds, making
+    // setClampBounds silently miss the commit (child effects run first).
+    const attachNode = useCallback((el) => {
+        domRef.current = el;
+        if (el) {
+            el.scrollTop ??= 0;
+            el.onStickyRestore = notify;
+            // A viewport-height change since the last layout pass means every
+            // geometry-reading subscriber painted the previous bounds (the
+            // renderer owns the write and this pass was otherwise silent). Wire
+            // it to the same subscriber notify as scroll mutations, coalesced to
+            // the frame budget: a terminal resize storm or a landing's chained
+            // chrome unmounts each produce a pass, and merging them bounds the
+            // React commits without dropping the final state — notifyCoalesced
+            // always runs the queued notify, and subscribers re-read the handle
+            // (level-triggered), so a coalesced pass still sees the latest bounds.
+            el.onViewportHeightChange = notifyCoalesced;
+        }
+        // notify/notifyCoalesced only close over refs, like the imperative handle
+        // above.
+        // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, []);
+    // Structure: outer viewport (overflow:scroll, constrained height) >
+    // inner content (flexGrow:1, flexShrink:0 — fills at least the viewport
+    // but grows beyond it for tall content). flexGrow:1 lets children use
+    // spacers to pin elements to the bottom of the scroll area. Yoga's
+    // Overflow.Scroll prevents the viewport from growing to fit the content.
+    // The renderer computes scrollHeight from the content box and culls
+    // content's children based on scrollTop.
+    //
+    // stickyScroll is passed as a DOM attribute (via ink-box directly) so it's
+    // available on the first render — ref callbacks fire after the initial
+    // commit, which is too late for the first frame.
+    return _jsx("ink-box", { ref: attachNode, onWheel: handleWheel, style: {
+            flexWrap: 'nowrap',
+            flexDirection: style.flexDirection ?? 'row',
+            flexGrow: style.flexGrow ?? 0,
+            flexShrink: style.flexShrink ?? 1,
+            ...style,
+            overflowX: 'scroll',
+            overflowY: 'scroll'
+        }, ...stickyScroll ? {
+            stickyScroll: true
+        } : {}, children: _jsx(Box, { flexDirection: "column", flexGrow: 1, flexShrink: 0, width: "100%", children: children }) });
+}
+export default ScrollBox;

@@ -236,7 +236,8 @@ ace-agent/
 │   │   ├── WP-9-SANDBOX-BACKEND.md  #   WP-9 立项卡（C6：**SEC-020**）：三层沙箱 + S-1 边界（可外包执行边界，不可外包决定权）
 │   │   └── ACE-MCP-SEC-SUBAGENT.md  #   WP-11 立项卡（**SEC-022**）：HooH 作为 MCP 安全子层 + 共用 CubeSandbox 底座
 │   │   ├── TUI-PRIOR-ART.md       #   同行研读：pi 与 Claude Code 的界面源码（控制层 / 设计系统 / 可搬清单）
-│   │   └── UI-OVERHAUL.md         #   界面重做立项书（现状取证 / 路线 A·B·C / 分期 / 可执行验收 / 明确不做）
+│   │   ├── UI-OVERHAUL.md         #   界面重做立项书（现状取证 / 路线 A·B·C / 分期 / 可执行验收 / 明确不做）
+│   │   └── DshShell-AceCapabilities.md # 整壳换 DSH TUI 后 ace 六项本体的露出设计卡（CAP-01~07：逐能力落点 / 优先级 / 最小新协议面 / 验收 / 上游冲突；§0 范围决定（ui/ 保留为降级路径）/ §3.7 引擎先行项（会话浏览器·树·设置的数据源）/ §6 前置门 G1（IME 候选框）与落点勘误（PageMargin 合并 · ui.js 唯一公开面 · 内核 vendor 落点））
 │   └── history/                #   会话纪要 / 调研 / 规范历史
 │       ├── SESSION-2026-09-06.md   #   评审会话纪要（风险清单→决策→提交→OPEN）
 │       ├── UI-CHAT-SCROLL.md       #   聊天内置滚动立项卡(引擎已实现,接线待真机)
@@ -257,7 +258,11 @@ ace-agent/
 ├── third_party/                # 第三方来源落点：许可全文与归属声明（**只放许可，不放源码**）
 │   └── dsh-tui/                #   dsh-TUI（@deepseek-harness-tui/dsh-tui v0.12.0，MIT，© 2026 chimney (ccch1mneyyy)）
 │       ├── LICENSE             #   上游 LICENSE 逐字副本（MIT 全文 + 版权行，不得改动）
-│       └── NOTICE.md           #   将引入的范围 / 逐条上游归属（Ink · pi · Yoga · dsh-ui-whale…）/ 未核实项（vendor/dsh-std）
+│       ├── NOTICE.md           #   已引入的范围 / 逐条上游归属（Ink · pi · Yoga · dsh-ui-whale…）/ 未核实项（vendor/dsh-std）
+│       └── upstream/           #   闭包内派生自其它上游的许可全文（只按实际 vendor 的 135 文件判定，不按上游 src/ 全目录）
+│           ├── README.md       #   文件↔上游对应表 / 文本来源与逐字性 / 待核实项（Ink 分叉基线版本）
+│           ├── INK-LICENSE.txt #   Ink（vadimdemedes/ink，MIT）逐字文本；覆盖 lib/types/ink/** 120 文件
+│           └── YOGA-LICENSE.txt #  Meta Yoga（facebook/yoga，MIT）逐字文本；覆盖 native-ts/yoga-layout/** 2 文件
 ├── packaging/                  # 发行打包：ace.spec + build_exe.ps1（PyInstaller 单目录 + 冒烟门禁）/ make_wix.py + build_installer.ps1（WiX MSI 安装包 + 便携 zip）/ make_icon.py（logo.svg → ace.ico，纯标准库光栅化）/ check_packaging.ps1（提交前脚本自检）
 ├── ace.cmd                     # Windows 启动器（向 setup_env 问路挑解释器，防商店占位）
 ├── hooh.cmd                    # 同一入口的新名字转发器（cmd /c 起子进程；call 会让 Ink 前端 0xC0000409 退出）
