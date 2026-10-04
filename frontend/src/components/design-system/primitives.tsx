@@ -10,6 +10,7 @@
 import { TerminalSizeContext, Text } from '../../../vendor/dsh-ink/kernel.js';
 import React from 'react';
 
+import { g, gstr } from '../../render/glyphs.js';
 import { displayWidth, truncateWidth } from '../../render/text.js';
 
 export type ColorFn = (token: string) => string | undefined;
@@ -50,26 +51,39 @@ export function Divider({
   color?: ColorFn;
 }): React.ReactElement {
   const total = Math.max(8, useColumns(width));
+  // 线字符**过字形降级层**（`docs/TUI-SWISS-SPEC.md` §1.2）：`─` 是 East Asian Width
+  // = Ambiguous，老 conhost/cp936 上按双宽渲染 → 整列错位。替身表由引擎握手时下发
+  // （`render/glyphs.ts`），所以默认 `char` 不许硬编码进字符串，必须在**渲染点**取 `g()`。
+  // 表为空 = 恒等（UTF-8 终端一个字都不变）。替身按规范 §4 与原型同宽（1 列），
+  // 否则 `.repeat()` 会把整宽/居中算歪。
+  const unit = gstr(char);
   const label = title ? ` ${title.trim()} ` : '';
   if (!label) {
-    return <Text color={color?.('border')}>{char.repeat(total)}</Text>;
+    return <Text color={color?.('border')}>{unit.repeat(total)}</Text>;
   }
   // 中文占两列：一律按**显示宽度**算，不能用 `label.length`（码点数）——
   // `" 状态 "` 码点数是 4、显示宽度是 6，按码点数居中会算多 2 列，
   // 分隔线既不是整宽、左右也不对称（同 `ui/ace_widgets.divider`，那边用的是 `display_width`）。
   const lw = displayWidth(label);
   if (lw >= total) {
-    // 标题比线还长：只留标题，别画负长度的线；截断也走显示宽度，绝不把中文劈成半个
-    return <Text color={color?.('dim')}>{truncateWidth(title.trim(), total)}</Text>;
+    // 标题比线还长：只留标题，别画负长度的线；截断也走显示宽度，绝不把中文劈成半个。
+    // 末尾的省略号 `…` 也过降级层 —— 但**替身可能比原字宽**（Python 表里 `…`→`...`），
+    // 宽过预算就退回按原字截断：整宽不变量（§7.2）优先于一个能画出的省略号。
+    const cut = gstr(truncateWidth(title.trim(), total));
+    return (
+      <Text color={color?.('dim')}>
+        {displayWidth(cut) <= total ? cut : truncateWidth(title.trim(), total)}
+      </Text>
+    );
   }
   const room = total - lw;
   const left = Math.floor(room / 2);
   const right = room - left;
   return (
     <Text>
-      <Text color={color?.('border')}>{char.repeat(left)}</Text>
+      <Text color={color?.('border')}>{unit.repeat(left)}</Text>
       <Text color={color?.('dim')}>{label}</Text>
-      <Text color={color?.('border')}>{char.repeat(right)}</Text>
+      <Text color={color?.('border')}>{unit.repeat(right)}</Text>
     </Text>
   );
 }
@@ -113,7 +127,9 @@ export function StatusIcon({
   color?: ColorFn;
 }): React.ReactElement {
   const [icon, token] = statusIcon(status);
-  return <Text color={color?.(token)}>{withSpace ? `${icon} ` : icon}</Text>;
+  // 六态字形同样过降级层：`✓✗⚠○` cp936 都印不出来（`◌`/`ℹ` 见 R3 报告的引擎侧缺口）。
+  const shown = g(icon);
+  return <Text color={color?.(token)}>{withSpace ? `${shown} ` : shown}</Text>;
 }
 
 // ─────────────────────────────────────────────────────────── ProgressBar
@@ -150,14 +166,23 @@ export function ProgressBar({
   width: number;
   color?: ColorFn;
 }): React.ReactElement {
-  return <Text color={color?.('accent')}>{progressBar(ratio, width)}</Text>;
+  // 整串过一遍降级层：`█` 与八分之一块（`▏▎▍…`）在老 conhost 上画不出。
+  // 纯函数 `progressBar()` 保持不降级 —— 它要和 `ui/ace_widgets.progress_bar` 逐值对拍。
+  return <Text color={color?.('accent')}>{gstr(progressBar(ratio, width))}</Text>;
 }
 
 // ─────────────────────────────────────────────────────────── Byline
 
-/** 元数据用 ` · ` 连（照 CC `Byline`）：空项自动丢，分隔符不出现在首尾。 */
+/**
+ * 元数据用 ` · ` 连（照 CC `Byline`）：空项自动丢，分隔符不出现在首尾。
+ *
+ * **只认字符串**：以前是 `String(p ?? '')`，于是 `false` 会被渲染成**字面量 `"false"`**
+ * 印到界面上（`Dialog` 的 `hints` 里塞条件项就会中招，实测见 `.recon/Q2-picker.md`）。
+ * `false` / `null` / `undefined` 是"这一项没有"的写法，不是文案。
+ * Python 侧 `ui/ace_widgets.byline` 只收字符串，对拍口径一致。
+ */
 export function byline(parts: Array<string | false | null | undefined>, sep = ' · '): string {
-  return parts.map((p) => String(p ?? '')).filter((p) => p.trim()).join(sep);
+  return parts.filter((p): p is string => typeof p === 'string' && p.trim().length > 0).join(sep);
 }
 
 export function Byline({

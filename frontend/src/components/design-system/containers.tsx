@@ -10,6 +10,7 @@ import { Box, Text } from '../../../vendor/dsh-ink/kernel.js';
 import React from 'react';
 
 import { Byline, Divider, StatusIcon, type ColorFn } from './primitives.js';
+import { g } from '../../render/glyphs.js';
 
 // ─────────────────────────────────────────────────────────── Pane
 
@@ -103,7 +104,9 @@ export function ListItem({
   color?: ColorFn;
   hint?: string;
 }): React.ReactElement {
-  const marker = isFocused ? '❯' : isSelected ? '✓' : ' ';
+  // 标记字形过降级层：`❯`/`✓` 在 cp936 控制台上印不出来（替身 `>`/`v`，同宽 1 列，
+  // 所以定宽标记列不会被撑开）。
+  const marker = g(isFocused ? '❯' : isSelected ? '✓' : ' ');
   return (
     <Box flexDirection="column">
       <Box flexDirection="row">
@@ -190,7 +193,7 @@ export function LoadingState({
   return (
     <Box flexDirection="column">
       <Box flexDirection="row">
-        <Text color={color?.('tool_pending')}>{`${icon} `}</Text>
+        <Text color={color?.('tool_pending')}>{`${g(icon)} `}</Text>
         <Text color={color?.('dim')} bold={bold}>{message}</Text>
       </Box>
       {subtitle ? (

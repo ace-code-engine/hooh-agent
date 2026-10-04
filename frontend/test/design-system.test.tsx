@@ -10,16 +10,20 @@ import { execFileSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   Byline, Dialog, Divider, ListItem, LoadingState, Pane, ProgressBar, ShortcutHint,
   StatusIcon, Tabs, byline, progressBar, statusIcon,
 } from '../src/components/design-system/index.js';
 import { resolvePython } from '../src/protocol/client.js';
+import { setGlyphs } from '../src/render/glyphs.js';
 import { displayWidth } from '../src/render/text.js';
 import { Text } from './helpers/kernel.js';
 import { renderLines } from './helpers/screen.js';
+
+// 字形表是模块级状态：每个用例后复位，别污染别的用例（照 `glyphs.test.tsx`）。
+afterEach(() => setGlyphs(undefined));
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const noColor = (): string | undefined => undefined;
@@ -70,6 +74,14 @@ describe('设计系统 · 纯函数', () => {
   it('byline：` · ` 连，空项丢掉', () => {
     expect(byline(['a', '', null, 'b'])).toBe('a · b');
     expect(byline([])).toBe('');
+  });
+
+  it('byline：`false` / `null` / `undefined` 是"没有这一项"，不是文案', () => {
+    // 回归：旧的 `String(p ?? '')` 把 `false` 变成**字面量 `"false"`** 画到界面上
+    // （`.recon/Q2-picker.md` ⑥.2；调用方只能靠传 `''` 绕开）。
+    expect(byline([false, null, undefined, ''])).toBe('');
+    expect(byline(['a', false, 'b', undefined])).toBe('a · b');
+    expect(byline([true as unknown as string, 'a'])).toBe('a');   // 非字符串一律不算文案
   });
 });
 
@@ -128,6 +140,37 @@ describe('设计系统 · 渲染', () => {
       .text.trim();
     expect(line).toBe('很长很长…');           // 4 个汉字 8 列 + 省略号 1 列
     expect(displayWidth(line)).toBeLessThanOrEqual(9);
+  });
+
+  it('Byline：`false` 不是文案 —— 帧上不许出现字面量 `"false"`', () => {
+    // 回归：`String(false)` 会把 `false` 画进脚注（`.recon/Q2-picker.md` ⑥.2）
+    const out = renderLines(
+      <Byline parts={['模型', false, undefined, null, '']} color={noColor} />,
+      40,
+    ).text.trim();
+    expect(out).toBe('模型');
+    expect(out).not.toContain('false');
+  });
+
+  it('Dialog：hints 全是假项时连 byline 那行都不画（更不会画 "false"）', () => {
+    const out = renderLines(
+      <Dialog title="空提示" color={noColor} width={20} hints={[false, undefined, '']}>
+        <Text>甲</Text>
+      </Dialog>,
+      40,
+    ).text;
+    expect(out).toContain('空提示');
+    expect(out).not.toContain('false');
+  });
+
+  it('Dialog：hints 里混着真项与假项 → 只留真项（Q2 那条"只能传 `\'\'` 绕过"不再需要）', () => {
+    const out = renderLines(
+      <Dialog title="选择模型" color={noColor} width={30} hints={['Enter 确认', false, 'Esc 取消']}>
+        <Text>甲</Text>
+      </Dialog>,
+      40,
+    ).text;
+    expect(out).toContain('Enter 确认 · Esc 取消');
   });
 
   it('ListItem：聚焦 `❯` / 选中 `✓` / 无标记，且标记列**定宽**（文字不左右跳）', () => {
@@ -207,5 +250,66 @@ describe('设计系统 · 渲染', () => {
       100,
     ).text.trim();
     expect(out).toBe('(展开 ctrl+o)');
+  });
+});
+
+describe('设计系统 · 默认字形必须过降级层（`docs/TUI-SWISS-SPEC.md` §1.2）', () => {
+  it('Divider 默认线字符跟着降级表变（证明走的是 `g()/gstr()`，不是硬编码 `─`）', () => {
+    setGlyphs({ '─': '-' });
+    const plain = renderLines(<Divider color={noColor} width={24} />, 24).text.trim();
+    expect(plain).toBe('-'.repeat(24));
+    expect(plain).not.toContain('─');
+    // 带标题那条路（左右两段）同样换字
+    const titled = renderLines(<Divider title="Status" color={noColor} width={20} />, 20).text.trim();
+    expect(titled).toBe('------ Status ------');
+    expect(titled).not.toContain('─');
+  });
+
+  it('Dialog 的整宽细线同样跟着降级表变（它复用的就是 Divider）', () => {
+    setGlyphs({ '─': '-' });
+    const out = renderLines(
+      <Dialog title="选择模型" color={noColor} width={30}><Text>甲</Text></Dialog>,
+      30,
+    ).text;
+    expect(out).toContain('-'.repeat(30));
+    expect(out).not.toContain('─');
+  });
+
+  it('显式传的 `char` 过的是同一个层（没降级时原样，降级时跟着变）', () => {
+    // 设置面板那条路传 `char="-"`；表为空时它必须一字不变
+    expect(renderLines(<Divider char="-" color={noColor} width={12} />, 12).text.trim())
+      .toBe('-'.repeat(12));
+    setGlyphs({ '-': '=' });                    // 引擎说这台终端连 `-` 都画不出
+    expect(renderLines(<Divider char="-" color={noColor} width={12} />, 12).text.trim())
+      .toBe('='.repeat(12));
+  });
+
+  it('表为空时一个都不换（UTF-8 终端不该被降级）', () => {
+    setGlyphs(undefined);
+    expect(renderLines(<Divider color={noColor} width={8} />, 8).text.trim()).toBe('─'.repeat(8));
+    expect(renderLines(<StatusIcon status="success" color={noColor} />, 8).text.trim()).toBe('✓');
+  });
+
+  it('超长标题的省略号也过降级层；替身变宽时退回原字，线不许溢出', () => {
+    expect(renderLines(<Divider title="很长很长的标题" color={noColor} width={9} />, 9)
+      .text.trim()).toBe('很长很长…');
+    setGlyphs({ '…': '.' });                    // 同宽替身：跟着换
+    expect(renderLines(<Divider title="很长很长的标题" color={noColor} width={9} />, 9)
+      .text.trim()).toBe('很长很长.');
+    setGlyphs({ '…': '...' });                  // 变宽替身：退回原字，宽度不变量优先
+    const wide = renderLines(<Divider title="很长很长的标题" color={noColor} width={9} />, 9)
+      .text.trim();
+    expect(wide).toBe('很长很长…');
+    expect(displayWidth(wide)).toBeLessThanOrEqual(9);
+  });
+
+  it('StatusIcon / ListItem / LoadingState / ProgressBar 的默认字形也都过降级层', () => {
+    setGlyphs({ '✓': 'v', '❯': '>', '◌': 'o', '█': '#', '─': '-' });
+    expect(renderLines(<StatusIcon status="success" color={noColor} />, 8).text.trim()).toBe('v');
+    expect(renderLines(<ListItem label="甲" isFocused color={noColor} />, 20).text).toContain('>');
+    expect(renderLines(<ListItem label="甲" isSelected color={noColor} />, 20).text).toContain('v');
+    expect(renderLines(<LoadingState message="读取中" color={noColor} />, 20).text).toContain('o ');
+    expect(renderLines(<ProgressBar ratio={0.5} width={8} color={noColor} />, 20).text.trim())
+      .toBe('####----');
   });
 });
