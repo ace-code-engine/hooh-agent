@@ -1,15 +1,22 @@
 # Third-party notices
 
-This project is MIT-licensed (see [`LICENSE`](LICENSE)). It also **redistributes** the
-third-party Python packages listed below, as unmodified wheels in
-[`vendor/`](vendor/) (3.5 MB, 16 wheels) — that directory is committed on purpose so an
-offline or air-gapped machine can `setup_env.py --ensure` without a package index.
-See [`vendor/README.md`](vendor/README.md) for why.
+This project is MIT-licensed (see [`LICENSE`](LICENSE)) — but it is **not** free of
+third-party code or text. It does two different things with other people's work, and the two
+sections below cover them separately.
 
-Each wheel is byte-for-byte the file published by its upstream project: **not** patched,
-**not** repackaged, **not** stripped. Every wheel carries its own full license text inside
-`<pkg>-<ver>.dist-info/licenses/`, and those texts ship with this repository, so the
-attribution below is an index rather than a substitute.
+1. **Redistributes** the third-party Python packages in
+   [Redistributed packages](#redistributed-packages), as unmodified wheels in
+   [`vendor/`](vendor/) (3.5 MB, 16 wheels) — that directory is committed on purpose so an
+   offline or air-gapped machine can `setup_env.py --ensure` without a package index.
+   See [`vendor/README.md`](vendor/README.md) for why. Each wheel is byte-for-byte the file
+   published by its upstream project: **not** patched, **not** repackaged, **not** stripped.
+   Every wheel carries its own full license text inside `<pkg>-<ver>.dist-info/licenses/`,
+   and those texts ship with this repository, so the attribution below is an index rather
+   than a substitute.
+2. **Adapts source code and text** from the projects in
+   [Adapted source & text](#adapted-source--text). Those are *derived* files, not
+   byte-for-byte upstream copies: upstream copyright and license terms apply to whatever we
+   ship from them, and any inline license header in an upstream file is kept verbatim.
 
 ## Redistributed packages
 
@@ -31,6 +38,23 @@ attribution below is an index rather than a substitute.
 | typing_extensions | 4.16.0 | PSF-2.0 | https://github.com/python/typing_extensions |
 | urllib3 | 2.8.0 | MIT | https://github.com/urllib3/urllib3 |
 | wcwidth | 0.8.4 | MIT | https://github.com/jquast/wcwidth |
+
+## Adapted source & text
+
+These are **not** byte-for-byte upstream files: this project adapts code and UI text from
+them. The upstream copyright and license terms apply to the adapted parts, and the
+attribution lands here **before** the first byte does, not after.
+
+| Project | Version | License | Obligations | Landed in this repo |
+|---|---|---|---|---|
+| dsh-TUI (`@deepseek-harness-tui/dsh-tui`) | 0.12.0 | MIT | Keep the upstream copyright + permission notice with every adapted part | *Planned* — renderer kernel and selected components; per-part upstreams in [`third_party/dsh-tui/NOTICE.md`](third_party/dsh-tui/NOTICE.md) |
+
+No dsh-TUI source or text has been copied into this repository yet; the license and the
+attribution land first, on purpose. The upstream MIT text, copied verbatim, is
+[`third_party/dsh-tui/LICENSE`](third_party/dsh-tui/LICENSE). That NOTICE also lists the
+upstreams of the parts *inside* dsh-TUI (Ink · pi · Yoga · dsh-ui-whale ·
+dsh-anchored-standard · mathjax-tex-svg) and the one dependency whose license is still
+**unverified** (the `vendor/dsh-std` submodule).
 
 ## Notes on the licenses that carry obligations
 

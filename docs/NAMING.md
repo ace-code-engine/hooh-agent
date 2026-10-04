@@ -197,7 +197,9 @@ MCP 身份中断、发布物改名兼容 —— 属于「带迁移文档的破�
 - ✅ **`hooh.cmd`** —— 转发到 `ace.cmd`。**必须用 `cmd /c` 而不是 `call`**：实测
   `call` 会让 Ink 前端以 `0xC0000409`（栈溢出）退出，`cmd /c` 正常返回 0。注释里写了原因
 - ✅ **`THIRD-PARTY-NOTICES.md`** —— 16 个 vendor wheel 的许可证索引（含 MPL-2.0 的 certifi
-  与 Apache-2.0 的 requests 的义务说明）；每个 wheel 自带完整许可证文本
+  与 Apache-2.0 的 requests 的义务说明）；每个 wheel 自带完整许可证文本。
+  另立 `Adapted source & text` 一节，登记**派生源码与文案**的来源（dsh-TUI，MIT）与逐条上游
+  归属（见 [`third_party/dsh-tui/NOTICE.md`](../third_party/dsh-tui/NOTICE.md)）
 - ✅ **`.gitignore`** —— 补 `executor/ace-executor-*`（3.75 MB 交叉编译产物没被忽略）与
   `.env` / `.env.*` 规则
 - ✅ **发行物改名（`ace-*` → `hooh-*`）** —— 打包脚本与四个 workflow 一起改：

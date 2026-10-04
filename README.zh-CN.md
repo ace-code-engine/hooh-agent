@@ -98,7 +98,8 @@ Windows 没装 Python：去 [Releases](https://github.com/ace-code-engine/hooh-a
 **HooH（互）** 是**致意，不是素材占用**。`互` 就是这套系统的形状：模型提出、代码裁决；
 先写快照，`/undo` 才谈得上意义。每一次动作都有对等回应，而且可逆。
 
-仓库内**不含任何米哈游素材**。图标 [`assets/logo.svg`](assets/logo.svg) 是按本项目自身的
+仓库内**不含任何米哈游素材**——这句只说**命名与素材**，不等于本仓没有第三方代码：改编的源码
+与文案另见 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)。图标 [`assets/logo.svg`](assets/logo.svg) 是按本项目自身的
 视觉语言从零画出来的「互」字几何构图（三横一竖），没有描摹、没有提取、没有二次分发。
 
 > 作者本人是米哈游长期玩家，这个名字是向《崩坏：星穹铁道》"均衡"星神致意。
@@ -107,3 +108,6 @@ Windows 没装 Python：去 [Releases](https://github.com/ace-code-engine/hooh-a
 ## 许可
 
 [MIT](LICENSE) © 2026 jincheng3870682453-hash
+
+第三方许可声明：[THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) —— 本仓既分发未修改的第三方
+wheel，也**改编**第三方源码与文案，逐条见该文件。

@@ -250,10 +250,14 @@ ace-agent/
 ├── LICENSE                     # MIT
 ├── CHANGELOG.md                # 逐版本更新日志（Keep a Changelog 风格）
 ├── SECURITY.md                 # 安全策略：漏洞报告流程 / 承诺 / 已知边界
-├── THIRD-PARTY-NOTICES.md      # 第三方许可证索引：vendor/ 里 16 个 wheel 的署名与义务（MPL-2.0 / Apache-2.0 等）
+├── THIRD-PARTY-NOTICES.md      # 第三方许可证索引：vendor/ 里 16 个 wheel 的署名与义务（MPL-2.0 / Apache-2.0 等）+ 派生源码与文案的来源（dsh-TUI，MIT）
 ├── requirements.txt            # 依赖清单（安全核心零依赖，模型调用需 requests）
 ├── setup_env.py                # 运行环境一键准备：多环境发现 + 真的 import 一次 + 离线 wheel
 ├── vendor/                     # 离线依赖落点（放 wheel 即可离线安装；README 说明口径）
+├── third_party/                # 第三方来源落点：许可全文与归属声明（**只放许可，不放源码**）
+│   └── dsh-tui/                #   dsh-TUI（@deepseek-harness-tui/dsh-tui v0.12.0，MIT，© 2026 chimney (ccch1mneyyy)）
+│       ├── LICENSE             #   上游 LICENSE 逐字副本（MIT 全文 + 版权行，不得改动）
+│       └── NOTICE.md           #   将引入的范围 / 逐条上游归属（Ink · pi · Yoga · dsh-ui-whale…）/ 未核实项（vendor/dsh-std）
 ├── packaging/                  # 发行打包：ace.spec + build_exe.ps1（PyInstaller 单目录 + 冒烟门禁）/ make_wix.py + build_installer.ps1（WiX MSI 安装包 + 便携 zip）/ make_icon.py（logo.svg → ace.ico，纯标准库光栅化）/ check_packaging.ps1（提交前脚本自检）
 ├── ace.cmd                     # Windows 启动器（向 setup_env 问路挑解释器，防商店占位）
 ├── hooh.cmd                    # 同一入口的新名字转发器（cmd /c 起子进程；call 会让 Ink 前端 0xC0000409 退出）

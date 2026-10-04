@@ -105,7 +105,9 @@ The name **HooH (互)** is a **tribute**, not an asset claim. 互 — *mutual* �
 project is shaped like: the model proposes, code decides; a snapshot is written, only then
 can `/undo` mean anything. Every action gets a reciprocal, reversible answer.
 
-The project **contains no miHoYo material**. The icon ([`assets/logo.svg`](assets/logo.svg))
+The project **contains no miHoYo material** — that claim is about names and artwork only;
+third-party code and text adapted by this project is listed separately in
+[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md). The icon ([`assets/logo.svg`](assets/logo.svg))
 is original geometry in this repo's own visual language — two interlocking strokes crossed by
 one spine, the 互 glyph, drawn from scratch. Nothing is traced, copied, or extracted from any game.
 
@@ -116,3 +118,6 @@ one spine, the 互 glyph, drawn from scratch. Nothing is traced, copied, or extr
 ## License
 
 [MIT](LICENSE) © 2026 jincheng3870682453-hash
+
+Third-party notices: [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) — redistributed wheels
+and adapted source & text.

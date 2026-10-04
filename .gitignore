@@ -86,3 +86,7 @@ examples/02_document_parsing/drop_docs_here/*
 .acl-recovery/
 previews/
 video_work/
+
+# 并行侦察/研读的中间产物（整合后按需入库或删除）
+.recon/
+
