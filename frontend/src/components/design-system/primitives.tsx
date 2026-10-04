@@ -177,11 +177,17 @@ export function ShortcutHint({
 }): React.ReactElement {
   const text = t('key_hint', { shortcut: keys, action });
   const body = parens ? `(${text})` : text;
-  if (!bold) return <Text color={color?.('dim')}>{body}</Text>;
+  // 键名的位置由 i18n 决定（`{shortcut}` 不一定在开头），所以按 `indexOf` 定位切两段；
+  // 不能拿 parens 之后的整串按 `keys.length` 硬切 —— 多出来的 `(` 会让切点整体后移，键名当场重复。
+  const at = text.indexOf(keys);
+  if (!bold || at < 0) return <Text color={color?.('dim')}>{body}</Text>;
   return (
     <Text color={color?.('dim')}>
+      {parens ? '(' : ''}
+      {text.slice(0, at)}
       <Text bold color={color?.('text')}>{keys}</Text>
-      {body.slice(keys.length)}
+      {text.slice(at + keys.length)}
+      {parens ? ')' : ''}
     </Text>
   );
 }

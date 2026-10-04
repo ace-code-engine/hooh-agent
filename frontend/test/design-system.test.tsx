@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 设计系统原语 —— 单测 + **与 Python 侧逐值对拍**。
  *
  * 为什么要对拍：这一层在两边各有一份实现（终端在 `ui/ace_widgets.py`，前端在这里），
@@ -193,6 +193,38 @@ describe('设计系统 · 渲染', () => {
                          'ctrl+o expand', '✓']) {
       expect(out).toContain(probe);
     }
+    tree.unmount();
+  });
+
+  it('ShortcutHint：四种组合输出一致，加粗+括号时键名只出现一次', async () => {
+    const cases: Array<[boolean, boolean, string]> = [
+      [false, false, 'ctrl+o 展开'],
+      [true, false, 'ctrl+o 展开'],
+      [false, true, '(ctrl+o 展开)'],
+      [true, true, '(ctrl+o 展开)'],
+    ];
+    for (const [bold, parens, want] of cases) {
+      const tree = render(
+        <ShortcutHint keys="ctrl+o" action="展开" t={t} bold={bold} parens={parens} color={noColor} />,
+      );
+      await tick();
+      const tag = `bold=${bold} parens=${parens}`;
+      const out = (tree.lastFrame() ?? '').trim();
+      tree.unmount();
+      expect(out, tag).toBe(want);
+      // 回归护栏：旧的 `body.slice(keys.length)` 在 parens 下会吐出 `ctrl+oo 展开)`
+      expect(out.split('ctrl+o').length - 1, tag).toBe(1);
+    }
+  });
+
+  it('ShortcutHint：加粗段跟着 i18n 给的位置走（action 在前也不硬切）', async () => {
+    const tEn = (k: string, p?: Record<string, string | number>): string =>
+      k === 'key_hint' ? `${p?.action} ${p?.shortcut}` : k;
+    const tree = render(
+      <ShortcutHint keys="ctrl+o" action="展开" t={tEn} bold parens color={noColor} />,
+    );
+    await tick();
+    expect((tree.lastFrame() ?? '').trim()).toBe('(展开 ctrl+o)');
     tree.unmount();
   });
 });
