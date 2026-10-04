@@ -9,7 +9,7 @@
  * 也是这一套，所以 `/model` 在菜单里和在选择框里排序一致。
  */
 
-import { Box, Text, useInput } from 'ink';
+import { Box, Text, useInput } from '../../vendor/dsh-ink/kernel.js';
 
 import { Divider } from './design-system/index.js';
 import React, { useMemo, useState } from 'react';

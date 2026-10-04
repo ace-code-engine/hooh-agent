@@ -6,13 +6,12 @@
  * 组件层保持纯粹。这样界面部分能在测试里被假事件驱动，不必起 Python。
  */
 
-import { Box, Text, render } from 'ink';
+import { Box, Text, renderSync } from '../vendor/dsh-ink/kernel.js';
 import React from 'react';
 
 import { I18n, SUPPORTED, type Lang } from './i18n.js';
 import { AceClient } from './protocol/client.js';
 import { Root } from './Root.js';
-import { wrapSynchronizedOutput } from './tui/synchronized.js';
 import { setGlyphs } from './render/glyphs.js';
 import type { BuildMenuOptions } from './render/menu.js';
 import { colorFor, detectTheme, type Token } from './theme/tokens.js';
@@ -75,11 +74,16 @@ function parseArgs(argv: string[]): Args {  const out: Args = { mock: false, str
 }
 
 /**
- * 渲染期错误的兜底 —— **没有它，"闪退"是静默的**。
+ * 渲染期错误的兜底 —— **没有它，错误的位置就由内核决定**。
  *
- * Ink 遇到未捕获的渲染错误会卸载整棵树、`waitUntilExit` 随即 resolve，
- * 于是进程正常退出、终端上一片干净 —— 用户看到的就是"卡一下然后窗口没了"，
- * 拿不到任何线索。有了边界，错误会留在屏幕上、细节打到 stderr。
+ * 内核的 `<App>` 自己也有一层（`app.js:48 getDerivedStateFromError` + `:260 componentDidCatch`）：
+ * 实测（`render` 一棵一渲染就抛错的树）它接住后会画它自家的 `ErrorOverview`，
+ * 而 `waitUntilExit()` **既不 resolve 也不 reject** —— 进程就停在错误屏上等人退出。
+ * 错误不再"静默闪退"，但屏幕上没有一行说清"这是前端的 bug"，stderr 也是空的。
+ *
+ * 我们这层更靠近出错点（`<App>` 在它上面），所以错误先落到这里：错误留在屏幕上
+ * （带 i18n 文案 + 一句"这是前端的 bug"）、细节打到 stderr，**界面继续活着**，
+ * 用户可以正常退出、也能把这段话贴给维护者。
  */
 class Boundary extends React.Component<
   { children: React.ReactNode; t: (k: string) => string },
@@ -182,15 +186,27 @@ async function main(): Promise<number> {
     translate: (k) => i18n.t(k),
   };
 
-  // 控制层三件（照 pi / Claude Code 的架构自己实现的）：
-  //   · 同步输出：把每帧写入原子化（`?2026`），消掉长转录时的撕裂/频闪；
-  //   · 备用屏：`--fullscreen` 时进入，退出必须还原（否则回主屏一片空白）；
+  // 控制层两件（照 pi / Claude Code 的架构自己实现的）：
+  //   · 备用屏：`--fullscreen` 时进入（见 `Root.tsx`），退出必须还原（否则回主屏一片空白）；
   //   · 滚动视口（App 里）：备用屏没有终端回滚，历史得自己管。
-  // 同步输出：**只要是真终端就开**（此前只在 `--fullscreen` 下开）。
-  // 它把每帧写入原子化，正是长转录重画时的频闪来源；不支持的终端会忽略这两个序列。
-  const restoreSync = wrapSynchronizedOutput(process.stdout, { enabled: Boolean(process.stdout.isTTY) });
-
-  const app = render(
+  //
+  // **同步输出（DEC 2026）不再由这里包**：内核自己就带（`terminal.js` 算
+  // `SYNC_OUTPUT_SUPPORTED`，`dec.js` 的 BSU/ESU 包住每一帧），而 ace 那层
+  // `wrapSynchronizedOutput` 包的是 `stream.write` —— 内核出帧走
+  // `writeSync(stdout.fd, frame)`（`ink.js:2558`）**绕过 `stream.write`**，所以它拦不到帧，
+  // 只会把备用屏的 `?1049h` 推后一个微任务，让首帧先画在主屏上（内核用
+  // `useInsertionEffect` 写 1049 正是为了避免这个顺序）。
+  // 旧模块 `tui/synchronized.ts` 与它的单测原样留着（回滚要用），这里只是不再调它。
+  //
+  // 挂载用 `renderSync` 而不是 `render`：后者返回 **Promise**（`root.js:41`），
+  // 而它的实例句柄与 `renderSync` 返回的是同一份（`waitUntilExit` 是内核实例上**绑好的**
+  // 自有方法，实测 `exit()` / 卸载后都会 settle）。
+  // 内核在 `render()` 里多插的那次微任务边界（`await Promise.resolve()`）照抄在下面 ——
+  // 它护着"首帧 vs 回滚缓冲"的顺序，别省。
+  // （注：`kernel.d.ts` 只声明了 default 的 `render`，而 `kernel.js` 里它是**具名**导出、
+  //  根本没有 default 导出 —— 具名声明漏了，那是 S1 的 `.d.ts` 待补项，不是这里能改的。）
+  await Promise.resolve();
+  const app = renderSync(
     <Boundary t={(k: string) => i18n.t(k)}>
       <Root
           client={client}
@@ -212,9 +228,16 @@ async function main(): Promise<number> {
   process.on('SIGINT', onSignal);
   process.on('SIGTERM', onSignal);
 
-  await app.waitUntilExit();
-  restoreSync();
-  await client.shutdown();
+  try {
+    await app.waitUntilExit();
+  } finally {
+    // 必须走完收尾：`waitUntilExit()` 在内核**带着错误卸载**时会 **reject**
+    // （`useApp().exit(new Error(...))` 实测 reject；旧注释里那句"渲染出错就静默
+    // resolve"在新内核下不成立 —— 渲染期抛错会被内核 App 接住画成 ErrorOverview，
+    // 于是 `waitUntilExit()` 既不 resolve 也不 reject，进程停在错误屏等用户退出）。
+    // 这条路上漏掉 `shutdown()`，引擎子进程就成了孤儿。
+    await client.shutdown();
+  }
   return 0;
 }
 

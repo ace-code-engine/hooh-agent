@@ -27,7 +27,7 @@
  * 间隔，中间会重渲染），**粘贴必现**。所以读一律走 ref。
  */
 
-import { Box, Text, useInput } from 'ink';
+import { Box, Text, useInput } from '../../vendor/dsh-ink/kernel.js';
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 
 import {

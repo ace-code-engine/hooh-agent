@@ -16,11 +16,14 @@
 
 import React from 'react';
 
-import { App, type AceClientLike } from './App.js';
-import { AlternateScreen } from './tui/alternate-screen.js';
+import { App, reducer, type AceClientLike } from './App.js';
+// 备用屏用**内核版**（`?1049` 由内核连同它的帧缓冲/污染检测一起管）。
+// 回滚 = 把下面这行换回 `'./tui/alternate-screen.js'`（自制 1049 版一直原样留着）。
+import { AlternateScreen } from './tui/alternate-screen-kernel.js';
 import { I18n, SUPPORTED, type Lang } from './i18n.js';
 import type { AceEvent } from './protocol/types.js';
 import type { BuildMenuOptions } from './render/menu.js';
+import { initialState } from './state/store.js';
 
 export interface RootProps {
   /** 只要 `on`（收事件）与可选 `off`（退订）—— 测试里的假客户端没有 `off`。 */
@@ -53,11 +56,15 @@ export function Root({
   const apply = (raw: string | undefined): void => {
     if (raw && (SUPPORTED as readonly string[]).includes(raw)) i18n.setLanguage(raw as Lang);
   };
+  // 转录状态挂**在这里**而不是 `App` 里：内核备用屏只有挂载/卸载语义（没有 `enabled`），
+  // 下面 `enabled` 一翻就是换元素类型 ⇒ `App` 卸载重挂。状态住在 Root（这层不重挂），
+  // `/fullscreen off` 才不会把转录清空 —— 见 `AppProps.state` 那段注释。
+  const [state, dispatch] = React.useReducer(reducer, undefined, initialState);
+  // 备用屏开关：起步听命令行，之后可以**被引擎的 `/fullscreen` 改**（配置回来时同步）。
+  const [fs, setFs] = React.useState<boolean>(fullscreen);
   // 启动语言**只决定一次**（`useState` 初始化函数只跑一次）。
   // 别写成"渲染期每次都 apply"：那样运行中切到英文后，`setLang` 引发的重渲染会
   // 拿引擎**初始**的 `engineLang`（zh）再 apply 一遍，把语言掰回中文 —— 实测踩过。
-  // 备用屏开关：起步听命令行，之后可以**被引擎的 `/fullscreen` 改**（配置回来时同步）。
-  const [fs, setFs] = React.useState<boolean>(fullscreen);
   const [curLang, setLang] = React.useState<Lang>(() => {
     apply(commandLineLang ?? engineLang);
     return i18n.language;
@@ -88,6 +95,8 @@ export function Root({
         t={t}
         fullscreen={fs}
         onFullscreenChange={setFs}
+        state={state}
+        dispatch={dispatch}
         colorOf={colorOf}
         menuOptions={menuOptions}
         {...(initialMessage !== undefined ? { initialMessage } : {})}

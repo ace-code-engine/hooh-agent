@@ -8,10 +8,10 @@
  *      层级感全丢。
  */
 
-import { Box, Text, useStdout } from 'ink';
+import { Box, Text } from '../../vendor/dsh-ink/kernel.js';
 import React from 'react';
 
-import { Divider } from './design-system/index.js';
+import { Divider, useColumns } from './design-system/index.js';
 import { gstr } from '../render/glyphs.js';
 import type { Block, Span, TableRow } from '../render/markdown.js';
 import { displayWidth } from '../render/text.js';
@@ -21,6 +21,12 @@ export interface MarkdownProps {
   color: (token: string) => string | undefined;
   /** 流式中：末尾画一个光标，让人知道"它还在说"而不是"卡住了"。 */
   streaming?: boolean;
+  /**
+   * 渲染宽度（列）。**可选**：不给就走 `useColumns()` 的规则
+   * （`TerminalSizeContext` ?? 80）—— 真机由内核 `<App>` 的 Provider 供真实列宽，
+   * 测试直接给这个 prop 就能钉死宽度，两条路都不抛错、不空屏。
+   */
+  width?: number;
 }
 
 function Spans({ spans, color }: { spans: Span[]; color: MarkdownProps['color'] }): React.ReactElement {
@@ -62,15 +68,22 @@ function Spans({ spans, color }: { spans: Span[]; color: MarkdownProps['color'] 
  * 表格 —— 与终端 `ace_markdown._render_table` **同一套排版**：列宽按显示宽度算（中文占两列），
  * 边框 `│ ├ ┼ ┤ ─`，总宽超出终端时按比例压缩每一列（而不是把最后一列挤没）。
  *
- * 为什么单独一个组件：列宽要跟着**终端宽度**变，而宽度只能从 `useStdout()` 拿 ——
- * 在 `BlockView` 的 switch 里读 hook 会违反 hooks 规则。
+ * 为什么单独一个组件：列宽要跟着**终端宽度**变，而在 `BlockView` 的 switch 里读 hook
+ * 会违反 hooks 规则。宽度走 `useColumns(width)`（`width` prop ?? 终端列宽 ?? 80）。
  *
  * 已知天花板：单元格内容超宽时**不截断**（截断会把行内样式切碎），交给终端折行；
  * 终端那份是截断的。真在意的话，把 `cols` 从 App 一路传进来再走截断那条路。
  */
-function Table({ rows, color }: { rows: TableRow[]; color: MarkdownProps['color'] }): React.ReactElement {
-  const { stdout } = useStdout();
-  const cols = stdout?.columns ?? 80;
+function Table({
+  rows,
+  color,
+  width,
+}: {
+  rows: TableRow[];
+  color: MarkdownProps['color'];
+  width?: number;
+}): React.ReactElement {
+  const cols = useColumns(width);
   const plain = rows.map((r) => r.map((spans) => spans.map((s) => s.text).join('')));
   const ncol = Math.max(1, ...rows.map((r) => r.length));
   const widths = Array.from({ length: ncol }, (_, j) =>
@@ -105,14 +118,14 @@ function Table({ rows, color }: { rows: TableRow[]; color: MarkdownProps['color'
   );
 }
 
-export function Markdown({ blocks, color, streaming = false }: MarkdownProps): React.ReactElement {
+export function Markdown({ blocks, color, streaming = false, width }: MarkdownProps): React.ReactElement {
   return (
     <Box flexDirection="column">
       {blocks.map((b, i) => {
         const last = i === blocks.length - 1;
         return (
           <Box key={i} flexDirection="column">
-            <BlockView block={b} color={color} cursor={streaming && last} />
+            <BlockView block={b} color={color} cursor={streaming && last} width={width} />
           </Box>
         );
       })}
@@ -124,10 +137,12 @@ function BlockView({
   block,
   color,
   cursor,
+  width,
 }: {
   block: Block;
   color: MarkdownProps['color'];
   cursor: boolean;
+  width?: number;
 }): React.ReactElement {
   switch (block.kind) {
     case 'heading': {
@@ -185,12 +200,12 @@ function BlockView({
       );
 
     case 'table':
-      return <Table rows={block.rows} color={color} />;
+      return <Table rows={block.rows} color={color} width={width} />;
 
     case 'hr':
-      // **整宽**分隔线（此前固定 20 个 `─`：宽终端上像没画完）。宽度只能从
-      // `useStdout()` 拿，所以单独一个小组件 —— 与 Python 侧 `ace_widgets.divider` 同观感。
-      return <Divider color={color} />;
+      // **整宽**分隔线（此前固定 20 个 `─`：宽终端上像没画完）。宽度走 `useColumns()`
+      // （prop ?? 终端列宽 ?? 80）—— 与 Python 侧 `ace_widgets.divider` 同观感。
+      return <Divider color={color} width={width} />;
 
     default:
       return <Text> </Text>;

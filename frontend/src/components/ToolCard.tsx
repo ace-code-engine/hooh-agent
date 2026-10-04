@@ -10,7 +10,7 @@
  * 重要的那几行挤出屏幕（这是 Python 侧 `_fold_read` 的同一条口径）。
  */
 
-import { Box, Text } from 'ink';
+import { Box, Text } from '../../vendor/dsh-ink/kernel.js';
 import React from 'react';
 
 import { colorizeDiff, summarizeDiff } from '../render/diff.js';

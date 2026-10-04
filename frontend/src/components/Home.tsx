@@ -14,7 +14,7 @@
  * 这里只负责画。文案是 i18n 键，前端自己查字典。
  */
 
-import { Box, Text } from 'ink';
+import { Box, Text } from '../../vendor/dsh-ink/kernel.js';
 import React from 'react';
 
 import type { HomeData, HomeItem, HomeSection } from '../protocol/types.js';

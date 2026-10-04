@@ -9,7 +9,7 @@
  * 受阻 = `tool_fail`、待办 = `dim`。同一种状态在同一个产品里不该有两种颜色。
  */
 
-import { Box, Text } from 'ink';
+import { Box, Text } from '../../vendor/dsh-ink/kernel.js';
 import React from 'react';
 
 import { gstr } from '../render/glyphs.js';

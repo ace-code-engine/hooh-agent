@@ -16,6 +16,7 @@ export {
   byline,
   progressBar,
   statusIcon,
+  useColumns,
   type ColorFn,
 } from './primitives.js';
 export { Dialog, ListItem, LoadingState, Pane, Tabs, type TabItem } from './containers.js';

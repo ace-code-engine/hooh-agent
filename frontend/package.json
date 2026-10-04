@@ -16,11 +16,15 @@
   "dependencies": {
     "chalk": "^5.3.0",
     "ink": "^5.0.1",
-    "react": "^18.3.1"
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "react-reconciler": "^0.34.0",
+    "usehooks-ts": "^3.1.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
-    "@types/react": "^18.3.12",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
     "ink-testing-library": "^4.0.0",
     "tsx": "^4.19.2",
     "typescript": "^5.6.3",

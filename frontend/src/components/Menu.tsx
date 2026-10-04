@@ -13,7 +13,7 @@
  *      用户就只看到半句话。
  */
 
-import { Box, Text } from 'ink';
+import { Box, Text } from '../../vendor/dsh-ink/kernel.js';
 
 import { Divider } from './design-system/index.js';
 import React from 'react';

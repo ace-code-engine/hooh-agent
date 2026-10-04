@@ -11,7 +11,7 @@
  * 单独一行、带说明。这是 Python 侧写在注释里的口径，这里照样遵守。
  */
 
-import { Box, Text, useInput } from 'ink';
+import { Box, Text, useInput } from '../../vendor/dsh-ink/kernel.js';
 
 import { Divider } from './design-system/index.js';
 import React, { useState } from 'react';

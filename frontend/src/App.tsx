@@ -6,7 +6,13 @@
  * 不必真的起 Python、更不必有模型。
  */
 
-import { Box, Static, Text, useApp, useInput, useStdout } from 'ink';
+import {
+  Box,
+  TerminalSizeContext,
+  Text,
+  useApp,
+  useInput,
+} from '../vendor/dsh-ink/kernel.js';
 
 import { ScrollBox } from './tui/scroll-box.js';
 import React, { useCallback, useEffect, useReducer, useState } from 'react';
@@ -68,6 +74,12 @@ export interface AppProps {
   fullscreen?: boolean;
   /** 引擎侧 `/fullscreen on|off` 生效时上报（备用屏由 Root 管，App 只管转录形态）。 */
   onFullscreenChange?: (on: boolean) => void;
+  /**
+   * 转录状态**由外层托管**（`Root` 持有，见下面 `App` 里那段注释）。
+   * 不给就组件自己管 —— 单独用 `<App>`（测试 / preview）时接口不变。
+   */
+  state?: State;
+  dispatch?: React.Dispatch<Action>;
   client: AceClientLike;
   t: (key: string, params?: Record<string, string | number>) => string;
   colorOf: (token: string) => string | undefined;
@@ -81,20 +93,30 @@ export interface AppProps {
   menuOptions?: Omit<BuildMenuOptions, 'state'>;
 }
 
-type Action =
+export type Action =
   | { type: 'event'; ev: AceEvent }
   | { type: 'answered'; decision: GrantDecision }
   | { type: 'choice_answered' };
 
-function reducer(state: State, action: Action): State {
+export function reducer(state: State, action: Action): State {
   if (action.type === 'event') return applyEvent(state, action.ev);
   if (action.type === 'choice_answered') return applyChoiceAnswer(state);
   return applyPermissionAnswer(state, action.decision);
 }
 
 export function App({ client, t, colorOf, initialMessage, menuOptions, fullscreen = false,
-  onFullscreenChange }: AppProps): React.ReactElement {
-  const [state, dispatch] = useReducer(reducer, undefined, initialState);
+  onFullscreenChange, state: givenState, dispatch: givenDispatch }: AppProps): React.ReactElement {
+  // 转录状态**优先由外层给**（`Root` 把它挂在自己身上）。
+  //
+  // 为什么状态不能只住在这里：内核的 `<AlternateScreen>` 只有"挂载即进入、卸载即退出"语义，
+  // **没有 `enabled`**（`vendor/dsh-ink/.../components/alternatescreen.js` 只吃 `mouseTracking`）。
+  // 于是 `Root` 把备用屏开关从 true 翻到 false 时换掉的是**元素类型** ⇒ 本组件整个卸载重挂
+  // —— `useReducer` 里那本转录会当场清空（`/fullscreen off` 丢历史，S3 记的回归）。
+  // 状态住在 `Root`（那层不重挂）就原样带过；单独用 `<App>`（测试 / preview）时退回自己这份，
+  // 接口不变。**不能**用 `key` 之类的把戏去逼重渲染，那同样是重挂。
+  const [ownState, ownDispatch] = useReducer(reducer, undefined, initialState);
+  const state = givenState ?? ownState;
+  const dispatch = givenDispatch ?? ownDispatch;
   const [errors, setErrors] = useState<string[]>([]);
   /** 主页内容（引擎侧 `ace_home.build_home` 算好的结构化分区）。 */
   const [home, setHome] = useState<HomeData | null>(null);
@@ -118,19 +140,22 @@ export function App({ client, t, colorOf, initialMessage, menuOptions, fullscree
    */
   const [sessions, setSessions] = useState<SessionRow[]>([]);
   const { exit } = useApp();
-  const { stdout } = useStdout();
-  const [cols, setCols] = useState(stdout?.columns ?? 80);
-
-  // 终端尺寸会变（用户拉窗口）。状态行与卡片都按列宽排版，所以必须跟着变 ——
-  // 拿一次初始值就不再更新的话，拉宽窗口后右半边会一直是空的。
-  useEffect(() => {
-    if (!stdout) return;
-    const onResize = (): void => setCols(stdout.columns ?? 80);
-    stdout.on('resize', onResize);
-    return () => {
-      stdout.off('resize', onResize);
-    };
-  }, [stdout]);
+  // 宽度/高度走**接口 B**：新内核没有 `useStdout()`
+  // （`hooks/use-stdout.*` 整块删除），终端尺寸只有一个来源 —— 内核 `<App>` 在根部提供的
+  // `TerminalSizeContext`，value 形状 `{columns, rows}`，窗口拉伸时它自己更新
+  // （所以这里**不需要**再监听 `stdout.on('resize')`，旧的 8 行监听整块删掉）。
+  //
+  // 用 `useContext` 而不是 `useTerminalSize()`：后者在 Provider 外**当场抛错**，
+  // 而 `renderToScreen()` 不提供任何 context，抛出的错会被 React 吞掉、只留下一张**空屏**
+  // （S1 实测）。直接读 context 拿不到就退回 80×30 —— 真机上一定有 Provider
+  // （`components/app.js` 的 `TerminalSizeContext.Provider`），退回值只服务于测试/非 TTY。
+  //
+  // ⚠️ Context 身份：`TerminalSizeContext` 必须从 `kernel.js` 取（它转口的是内核内部
+  // 同一条 `./components/TerminalSizeContext.js` 路径），自己另开一条路径会拿到**另一个**
+  // context 对象，Provider 就白包了。
+  const size = React.useContext(TerminalSizeContext);
+  const cols = size?.columns ?? 80;
+  const rows = size?.rows ?? 30;
 
   // 主页拉一次就够（进入会话后它会被滚上去）。拉不到就**不显示** —— 一个空壳主页
   // （有分区标题没条目）比没有主页更让人困惑。
@@ -199,7 +224,8 @@ export function App({ client, t, colorOf, initialMessage, menuOptions, fullscree
     });
     // **引擎进程结束了**（正常收工或崩了）→ 界面也得退。不监听它的后果与 `/exit`
     // 空转是同一类：窗口还开着、输入没反应，用户只能 Ctrl+C（实测投诉）。
-    // 退出去不丢东西：转录是经 `<Static>` 写进终端回滚缓冲的，退出后照样往上翻。
+    // 退出去不丢东西：转录是**主屏 inline** 渲染的，内核把滚出视口的行推进终端原生
+    // 回滚缓冲，退出后照样往上翻（换内核前这条走的是 `<Static>`，机制不同、效果一致）。
     client.on('exit', (code: unknown, signal: unknown) => {
       const why = signal ? `signal ${String(signal)}` : `code ${String(code ?? 0)}`;
       setErrors((e) => [...e, `engine exited (${why})`].slice(-5));
@@ -322,25 +348,30 @@ export function App({ client, t, colorOf, initialMessage, menuOptions, fullscree
     };
   }, [menuOptions, config, sessions, t]);
 
-  // 视口高度：终端行数减去底部区（状态行 + 输入行 + 对话框/任务树的预留）。
-  // 留 10 行是经验值：底部区最少要这么多才不至于把输入行挤没；下限 3 行。
-  const bodyHeight = Math.max(3, (stdout?.rows ?? 30) - 10);
+  // 视口高度（只给**全屏**那条路的 `<ScrollBox>` 用）：终端行数减去底部区
+  // （状态行 + 输入行 + 对话框/任务树的预留）。留 10 行是经验值：底部区最少要这么多
+  // 才不至于把输入行挤没；下限 3 行。
+  const bodyHeight = Math.max(3, rows - 10);
 
   const perm = state.pendingPermission;
   const choice = state.pendingChoice;
 
-  // **定稿的转写交给 `<Static>`**：只写一次、进终端**真实回滚缓冲**，之后永不重画。
-  // 一条改动解决三件事：
-  //   ① 频闪 —— 长转录时按 `/` 弹菜单会触发整帧重画，重画量是 O(整段转录)（实测投诉）；
-  //   ② 往上翻 —— 动态帧里的东西不进回滚缓冲，翻上去只有一屏；
-  //   ③ 帧预算 —— 每帧只剩"还会变的那几条 + 底部区"，与转录长度无关。
+  // **主屏（非全屏）不需要任何切分**：新内核删掉了 `<Static>`（"写一次就不再重画"的机制
+  // 不存在了），它自己走的是**主屏 inline + 终端原生 scrollback** —— 全部条目一次渲染进
+  // 主屏，帧引擎把**滚出视口的行**当作真实输出推进终端回滚缓冲
+  // （`log-update.js` 的 growth 分支靠 CR+LF 让旧行滚上去，此后跳过这些行的 diff），
+  // 往上翻仍然是终端自己的事。于是原来为 `<Static>` 服务的"冻结/动态切分"在主屏**整块不用**：
+  //   - 历史照样进得了真实回滚缓冲（属性①，这条是专门修过的 bug）；
+  //   - 工具卡（`running`→`ok`）/权限项（未答→已答）这类**原地变状态**的项，只要还在视口里
+  //     就跟着重画 —— 第一版按前缀把它们冻死，卡片永远停在"运行中"（属性②，别重蹈）。
   //
-  // `Static` 的语义是**追加**（内部记着已印到第几项），所以只能放"印完就不会再变"的项。
-  // 两个坑：
-  //   - 助手消息**正在流**时必须留在动态帧，否则会被印死、后续增量全丢；
-  //   - **工具卡片是原地变状态的**（`running` → `ok`/`fail`，权限项 `answered` 同理），
-  //     刚 push 就冻住的话卡片会永远停在"运行中"—— 第一版就是这么错的，套件当场抓了出来。
-  // 因此按**后缀**切：冻结"全部不会再变"的最长前缀，其余留在动态帧 —— 顺序自然不会乱。
+  // ⚠️ 已知代价（内核这条路本身的口径，不是本文件的取巧）：每帧要对**整段转录**跑一次布局，
+  // 帧预算不再与转录长度无关 —— 内核用 node-cache 缓存在树里没变的节点的测量值来兜。
+  // 长会话若真卡，先看内核的 `Slow render` 调试日志，再谈是不是要另想办法。
+  //
+  // 切分只剩下**全屏（备用屏）**一个用处：备用屏里终端没有回滚，历史只能自己管，
+  // 所以定型的前缀进 `<ScrollBox>`，**仍在变的尾部钉在它下面**（这样用户往上翻历史时，
+  // 正在流的那条 / 正在跑的工具卡依然看得见）。全屏那条路与滚动视口的去重归 **S3**。
   const mutable = (it: Item): boolean =>
     (it.kind === 'assistant' && it.streaming)
     || (it.kind === 'tool' && it.status === 'running')
@@ -371,9 +402,11 @@ export function App({ client, t, colorOf, initialMessage, menuOptions, fullscree
         <Home home={home} t={t} color={colorOf} width={cols} />
       ) : null}
 
-      {/* 定稿转录：
-          主屏 → `<Static>` 写完就不再重画（进终端**真实回滚缓冲**，往上翻靠终端）；
-          备用屏 → 终端没有回滚，交给 `<ScrollBox>`（PgUp/PgDn/↑↓/g/G 翻，滚动条自动）。 */}
+      {/* 转录 —— 两条路：
+          主屏（默认）：**全部条目 inline 一次渲染**，滚出视口的行由内核帧引擎推进终端
+            **真实回滚缓冲**（往上翻靠终端），只有还在视口里的那几行参与 diff/重画；
+          备用屏（全屏）：终端没有回滚缓冲，交给我们自己的 `<ScrollBox>`
+            （PgUp/PgDn/↑↓/g/G 翻，滚动条自动），仍会变的那几条钉在它下面。 */}
       {fullscreen ? (
         <ScrollBox
           items={frozen}
@@ -383,14 +416,11 @@ export function App({ client, t, colorOf, initialMessage, menuOptions, fullscree
           hint={t('scroll_hint')}
           renderItem={(it) => <Transcript key={it.id} items={[it]} t={t} color={colorOf} />}
         />
-      ) : (
-        <Static items={frozen}>
-          {(it) => <Transcript key={it.id} items={[it]} t={t} color={colorOf} />}
-        </Static>
-      )}
+      ) : null}
 
-      {/* 动态帧：只会是在流的那一条 + 底部区（对话框/任务树/状态行/输入框） */}
-      <Transcript items={live} t={t} color={colorOf} />
+      {/* 动态帧：主屏是**整段转录**（历史由终端回滚缓冲接住）；全屏只剩"仍在变的尾部"
+          + 底部区（对话框/任务树/状态行/输入框）。 */}
+      <Transcript items={fullscreen ? live : state.items} t={t} color={colorOf} />
 
       {perm ? (
         <Box marginBottom={1}>

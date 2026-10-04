@@ -7,9 +7,15 @@
  * 这是接手后的第一件事"。原因是开发环境没有 TTY，Ink 起不来，于是配色、排版、
  * vim 光标、卡片对齐这些**只能看**的东西一直没有判据。
  *
- * 这个脚本用 `ink-testing-library`（本来就是 devDependency，`app.test.tsx` 已经在用它
- * 渲染真组件）把 `App` 跑起来，喂一段**脚本化的事件流**，把每一步的帧按顺序打出来。
- * 它渲的是真组件、真 reducer、真排版 —— 不是另画一份示意图。
+ * 这个脚本用 `test/mount.tsx` 的 `mountTree()`（内核 `renderSync` + 假 stdio，
+ * 与 `app.test.tsx` 同一套工具）把 `App` 跑起来，喂一段**脚本化的事件流**，
+ * 把每一步的帧按顺序打出来。它渲的是真组件、真 reducer、真排版 —— 不是另画一份示意图。
+ *
+ * ## 迁移记录（S6，换内核）
+ * 原来用 `ink-testing-library` 的 `render()`。换内核后它整体失效：它写死上游 `ink`
+ * 的 React 18 reconciler，**collect 期**就抛 `Cannot read properties of undefined
+ * (reading 'ReactCurrentOwner')` —— `test/preview.test.ts` 于是 0 用例。
+ * 换成 `mountTree()`（同形状句柄：`lastFrame / stdin / unmount`），断言一字未改。
  *
  * ## 用法
  *
@@ -28,7 +34,6 @@
  * 在 Python 侧走的路，等这套帧稳定了再说 —— 先让"有人看过"这件事成立。
  */
 
-import { render } from 'ink-testing-library';
 import chalk from 'chalk';
 
 import { App } from '../src/App.js';
@@ -36,6 +41,7 @@ import { I18n } from '../src/i18n.js';
 import type { AceEvent } from '../src/protocol/types.js';
 import { colorFor, detectTheme, type Token } from '../src/theme/tokens.js';
 import { FakeClient, tick } from '../test/fake-engine.js';
+import { mountTree } from '../test/mount.js';
 
 export interface PreviewFrame {
   /** 这一步在看什么（打印时的标题）。 */
@@ -161,7 +167,7 @@ export async function buildPreviewFrames(plain = false): Promise<PreviewFrame[]>
   // 自己另拼一份 chalk 名字的话，这里看到的颜色就不是用户看到的。
   const theme = detectTheme();
   const colorOf = (token: string): string | undefined => colorFor(token as Token, theme);
-  const tree = render(
+  const tree = mountTree(
     <App client={client} t={(k, p) => i18n.t(k, p)} colorOf={colorOf} />,
   );
   await tick();
@@ -189,8 +195,13 @@ export async function buildPreviewFrames(plain = false): Promise<PreviewFrame[]>
   return frames;
 }
 
-/** 最小 ANSI 剥离：CSI 序列与 OSC 标题（`\x1b]0;…\x07`）。 */
-function stripAnsi(s: string): string {
+/**
+ * 最小 ANSI 剥离：CSI 序列与 OSC（超链接/标题，内核发的 OSC8 是 **BEL 收尾**的
+ * `\x1b]8;;\x07` —— 少剥它，`--plain` 出来的帧贴进 issue 就带一串隐形控制符）。
+ * `test/preview.test.ts` 直接 import 它，两侧用**同一把尺子**，免得"剥色"这件事
+ * 各自实现一遍然后慢慢走偏。
+ */
+export function stripAnsi(s: string): string {
   return s
     .replace(/\u001b\][^\u0007]*\u0007/g, '')
     .replace(/\u001b\[[0-9;?]*[ -/]*[@-~]/g, '');
@@ -205,10 +216,10 @@ async function main(): Promise<void> {
   }
   process.stdout.write(
     `\n${bar}\n` +
-      `共 ${frames.length} 帧 · 由 ink-testing-library 渲染**真组件**得出（不是示意图）\n` +
+      `共 ${frames.length} 帧 · 由 test/mount.tsx 的内核渲染**真组件**得出（不是示意图）\n` +
       (plain ? '（--plain / 非 TTY：已剥离 ANSI）\n' : '（带色；--plain 可剥掉 ANSI）\n') +
       // 颜色是 chalk 在 import 时按"输出是不是 TTY"定级的，而这里的 stdout 是
-      // ink-testing-library 的假 stdout —— **它永远不是 TTY**。所以不设 FORCE_COLOR
+      // `mountTree()` 的假 stdout —— **它永远不是 TTY**。所以不设 FORCE_COLOR
       // 的话拿到的是无色的帧：排版能验，配色不能。这句话就是那条出口。
       (chalk.level === 0
         ? '⚠ 颜色没开（chalk.level=0）：本脚本用假 stdout 渲染，chalk 认为"不是终端"。\n' +

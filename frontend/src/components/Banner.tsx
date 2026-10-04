@@ -23,7 +23,7 @@
  * 用 `.length` 算会把整栏往右推。
  */
 
-import { Box, Text } from 'ink';
+import { Box, Text } from '../../vendor/dsh-ink/kernel.js';
 import React from 'react';
 
 import { gstr } from '../render/glyphs.js';

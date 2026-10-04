@@ -6,16 +6,25 @@
  *     （`components/scroll-view.ts`）+ 全屏布局 `createChatViewport`
  *   - Claude Code `ink/components/ScrollBox.tsx`：命令式 `scrollTo` / `scrollBy`
  *
- * 为什么需要它：主屏模式靠**终端自己的回滚缓冲**（`<Static>` 写完就不管），
+ * 为什么需要它：主屏模式靠**终端自己的回滚缓冲**（内核把滚出视口的行推进终端 scrollback），
  * 但备用屏（全屏）里终端没有回滚 —— 不放一个自己的视口，历史就彻底看不见。
  *
  * 三条状态语义（与 pi 一致）：
  *   1. **跟随尾部**：新内容到来时自动贴底（除非用户主动往上翻过）；
  *   2. **往上翻即脱离**：翻上去就不再被新内容拽回底部（这条不做好，翻历史是白翻）；
  *   3. **翻回底部即恢复跟随**。
+ *
+ * 与内核自带 `<ScrollBox stickyScroll>` 的取舍（**选保留自制这一版**）：
+ *   - 内核那版吃的是 `children`（要求内容全量建树、由它按 `overflow:scroll` 裁剪），
+ *     调用方是 `App.tsx`（S2 的地盘）——换接口等于把改动推给别人，且 `renderToScreen`
+ *     下无法验证滚动语义（它要一个受限高度的根 + ref 句柄）；
+ *   - 自制这版吃 `items` + `renderItem`，自带 `PgUp/PgDn/↑↓/g/G` 与溢出才画的滚动条，
+ *     `clampOffset`/`windowRange` 两个纯函数还能被单测直接盯（`test/scroll-box.test.tsx`）；
+ *   - 两边都"自己虚拟化"，所以**只用一边**才不重复 —— 这里不引入内核那版。
+ *   代价：拿不到鼠标滚轮/拖选（内核版才有）。
  */
 
-import { Box, Text, useInput } from 'ink';
+import { Box, Text, useInput } from '../../vendor/dsh-ink/kernel.js';
 import React from 'react';
 
 export interface ScrollBoxProps<T> {

@@ -9,7 +9,7 @@
  * 随机轮换会让"现在到底卡在哪一步"这条信息消失。
  */
 
-import { Box, Text } from 'ink';
+import { Box, Text } from '../../vendor/dsh-ink/kernel.js';
 import React, { useEffect, useState } from 'react';
 
 import { gstr } from '../render/glyphs.js';

@@ -6,7 +6,7 @@
  * 不画四边闭合的框 —— 那种框在窄终端上会把内容挤到只剩十几列。
  */
 
-import { Box, Text } from 'ink';
+import { Box, Text } from '../../../vendor/dsh-ink/kernel.js';
 import React from 'react';
 
 import { Byline, Divider, StatusIcon, type ColorFn } from './primitives.js';

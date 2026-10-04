@@ -7,12 +7,28 @@
  * 关键算法刻意写成同形，`test/design-parity.test.ts` 会拿真 Python 对拍。
  */
 
-import { Text, useStdout } from 'ink';
+import { TerminalSizeContext, Text } from '../../../vendor/dsh-ink/kernel.js';
 import React from 'react';
 
 import { displayWidth, truncateWidth } from '../../render/text.js';
 
 export type ColorFn = (token: string) => string | undefined;
+
+/**
+ * 宽度来源 —— **全库唯一一条规则**：`width` prop ?? `TerminalSizeContext` ?? 80。
+ *
+ * - 真实树：内核的 `<App>` 自带 `TerminalSizeContext.Provider`（`components/app.js`），
+ *   所以不传 prop 也能拿到真实列宽，窗口缩放跟着变。
+ * - 直接渲染（测试的 `renderLines` / `renderToScreen`、`tools/preview`）：没有 Provider，
+ *   落到 `width` prop，再落到 80 —— **不会抛错、不会空屏**。
+ *
+ * 刻意**不用** `useTerminalSize()`：它没有 Provider 就抛错，而内核的
+ * `renderToScreen` 会把错误吞成**空屏且零报错**（S1 §3）。宁可要一个明确的 80。
+ */
+export function useColumns(width?: number): number {
+  const size = React.useContext(TerminalSizeContext);
+  return width ?? size?.columns ?? 80;
+}
 
 // ─────────────────────────────────────────────────────────── Divider
 
@@ -20,7 +36,7 @@ export type ColorFn = (token: string) => string | undefined;
  * 整宽分隔线；给了 `title` 就把它**居中嵌进线里**（`──── 状态 ────`）。
  *
  * 为什么不用固定长度（此前 markdown 那块是 `'─'.repeat(20)`）：宽终端上像"没画完"，
- * 窄终端上又可能溢出。宽度只能从 `useStdout()` 拿，所以这里自己读。
+ * 窄终端上又可能溢出。宽度走 `useColumns()`（prop ?? 终端列宽 ?? 80）。
  */
 export function Divider({
   title = '',
@@ -33,8 +49,7 @@ export function Divider({
   width?: number;
   color?: ColorFn;
 }): React.ReactElement {
-  const { stdout } = useStdout();
-  const total = Math.max(8, width ?? stdout?.columns ?? 80);
+  const total = Math.max(8, useColumns(width));
   const label = title ? ` ${title.trim()} ` : '';
   if (!label) {
     return <Text color={color?.('border')}>{char.repeat(total)}</Text>;

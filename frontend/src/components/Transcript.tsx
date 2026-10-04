@@ -8,7 +8,7 @@
  *      这两者的后续动作完全不同（等 vs 中断）。
  */
 
-import { Box, Text } from 'ink';
+import { Box, Text } from '../../vendor/dsh-ink/kernel.js';
 import React, { useMemo } from 'react';
 
 import { gstr } from '../render/glyphs.js';
