@@ -290,6 +290,13 @@ export interface InitializeResult {
  * 为什么让它跟主页共用一份：菜单里那行「（当前 xxx）」与主页分区里的当前值必须是
  * **同一个答案**。各算各的必然会漂（主页说沙箱是 job、菜单说 off，用户不知道该信哪个）。
  */
+/** `command.exec` 的回执。`keep_going: false` = 这一行之后引擎就结束了（`/exit`）。 */
+export interface CommandResult {
+  ok?: boolean;
+  /** 缺省视为 true；**只有显式 false 才该退**（老引擎不带这个字段时不许误退）。 */
+  keep_going?: boolean;
+}
+
 export interface ConfigData {
   /** `/fullscreen` 的引擎侧取值 —— 外壳据此进出备用屏（它才知道能不能进 1049）。 */
   fullscreen?: boolean;

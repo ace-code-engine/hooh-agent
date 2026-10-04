@@ -22,6 +22,7 @@ import { TaskTree } from './components/TaskTree.js';
 import { Transcript } from './components/Transcript.js';
 import type {
   AceEvent,
+  CommandResult,
   ConfigData,
   GrantDecision,
   HomeData,
@@ -46,7 +47,7 @@ export interface AceClientLike {
   // 真实的 AceClient 因为逆变检查而**不可赋值** —— 那是类型体操，不是真需求。
   on(event: string, listener: (...args: any[]) => void): unknown;
   send(text: string): Promise<unknown>;
-  command(line: string): Promise<unknown>;
+  command(line: string): Promise<CommandResult | unknown>;
   answerPermission(decision: GrantDecision, feedback?: string): Promise<unknown>;
   answerChoice(payload: {
     values?: string[];
@@ -196,6 +197,19 @@ export function App({ client, t, colorOf, initialMessage, menuOptions, fullscree
       const text = String(chunk ?? '').trim();
       if (text) setErrors((e) => [...e, text].slice(-5));
     });
+    // **引擎进程结束了**（正常收工或崩了）→ 界面也得退。不监听它的后果与 `/exit`
+    // 空转是同一类：窗口还开着、输入没反应，用户只能 Ctrl+C（实测投诉）。
+    // 退出去不丢东西：转录是经 `<Static>` 写进终端回滚缓冲的，退出后照样往上翻。
+    client.on('exit', (code: unknown, signal: unknown) => {
+      const why = signal ? `signal ${String(signal)}` : `code ${String(code ?? 0)}`;
+      setErrors((e) => [...e, `engine exited (${why})`].slice(-5));
+      exit();
+    });
+    // `error` 事件没人接会让 EventEmitter 直接抛（崩在没人看得见的地方）
+    client.on('error', (err: unknown) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      setErrors((e) => [...e, msg].slice(-5));
+    });
     client.on('protocol-violation', (raw: unknown) => {
       setErrors((e) => [...e, `协议违规（stdout 上出现了非 JSON 行）：${String(raw).slice(0, 120)}`].slice(-5));
     });
@@ -237,9 +251,18 @@ export function App({ client, t, colorOf, initialMessage, menuOptions, fullscree
       const isCommand = line.startsWith('/');
       const p = isCommand ? client.command(line) : client.send(line);
       if (isCommand) {
-        // 命令可能改了界面侧开关（`/vim` 最典型）。执行完重读一次 ——
-        // 不重读的话用户敲了 `/vim` 会看到"提示说开了，但按键没变"。
-        void p.then(() => refreshConfig()).catch(() => undefined);
+        void p
+          .then((res: unknown) => {
+            // 命令可能改了界面侧开关（`/vim` 最典型）。执行完重读一次 ——
+            // 不重读的话用户敲了 `/vim` 会看到「提示说开了，但按键没变」。
+            refreshConfig();
+            // **`keep_going: false` = 引擎说「这一行之后我就结束了」**（`/exit` 就是）。
+            // 不消费它的后果：输入框被禁用、窗口还在，用户只能 Ctrl+C 才退得出去
+            // （实测投诉）。只有**显式 false** 才退 —— 老引擎不带该字段时不许误退。
+            const keep = (res as { keep_going?: boolean } | null)?.keep_going;
+            if (keep === false) exit();
+          })
+          .catch(() => undefined);
       }
       p.catch((e: unknown) => {
         const msg = e instanceof Error ? e.message : String(e);

@@ -52,13 +52,20 @@ export class FakeClient implements AceClientLike {
     for (const fn of this.listeners.get('event') ?? []) fn(ev);
   }
 
+  /** 模拟引擎进程结束（`client.ts` 会转发成 `exit` 事件）。 */
+  emitExit(code = 0, signal: string | null = null): void {
+    for (const fn of this.listeners.get('exit') ?? []) fn(code, signal);
+  }
+
   async send(text: string): Promise<unknown> {
     this.calls.push({ method: 'send', args: [text] });
     return {};
   }
+  /** `command.exec` 的回执；用例可以覆盖成 `{ keep_going: false }` 模拟 `/exit`。 */
+  commandReply: Record<string, unknown> = { ok: true, keep_going: true };
   async command(line: string): Promise<unknown> {
     this.calls.push({ method: 'command', args: [line] });
-    return {};
+    return this.commandReply;
   }
   async answerPermission(decision: GrantDecision, feedback?: string): Promise<unknown> {
     this.calls.push({ method: 'answerPermission', args: [decision, feedback] });
