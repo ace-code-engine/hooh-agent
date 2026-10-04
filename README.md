@@ -2,10 +2,10 @@
   <a href="https://github.com/ace-code-engine/hooh-agent/actions/workflows/ci.yml"><img alt="Tests" src="https://github.com/ace-code-engine/hooh-agent/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="Python" src="https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue">
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-blue"></a>
-  <img alt="Release" src="https://img.shields.io/badge/release-v1.0.0%20Public%20Beta-brightgreen">
+  <img alt="Release" src="https://img.shields.io/badge/release-v1.1.0-brightgreen">
   <img alt="Safety core" src="https://img.shields.io/badge/safety%20core-zero--dep-orange">
   <img alt="Model API" src="https://img.shields.io/badge/model%20API-requires%20requests-blue">
-  <a href="CHANGELOG.md"><img alt="Latest" src="https://img.shields.io/badge/latest-v1.0.0%20(2026--10--01)-brightgreen"></a>
+  <a href="CHANGELOG.md"><img alt="Latest" src="https://img.shields.io/badge/latest-v1.1.0%20(2026--10--04)-brightgreen"></a>
 </p>
 
 <h1 align="center">HooH · 互</h1>
@@ -64,6 +64,20 @@ and run `ace\ace.exe --mock`. Install & build: [docs/PACKAGING-EXE.md](docs/PACK
 <p align="center">
   <img src="demo/demo.svg" alt="A recorded offline HooH session" width="820">
 </p>
+
+## What's new in 1.1.0
+
+- **The UI was rebuilt on one spec.** No borders (full-width hairlines instead), one accent per
+  screen, left-aligned, and small parts (dividers, six-state status icons, eighth-block progress
+  bars, bylines, key hints) that are **value-for-value parity-tested against the terminal renderer**.
+- **Chinese · English · 日本語, all complete.** Switch the *interface* language with `/lang` — the
+  slash menu, dialogs, errors and status bar switch with it (it no longer silently changes the
+  model's reply language).
+- **The context window follows the model.** DeepSeek → 1M, GLM-4.6/4.7 → 200K, table entries carry
+  their sources; unknown models get a safe fallback *and a visible hint*. New: `/window 1m`.
+- **Fullscreen that actually works**: `--fullscreen` gives the transcript its own scroll viewport
+  (`PgUp/PgDn/↑↓/g/G`, scrollbar) — plus **synchronized output** (`\u001b[?2026`) so long transcripts
+  stop flickering, and `<Static>` so the main screen keeps real scrollback.
 
 ## Documentation
 

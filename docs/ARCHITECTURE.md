@@ -84,6 +84,7 @@ ace-agent/
 │   ├── ace_host.py             #   引擎宿主：权限/确认/文本问答 → 内联面板（Question 状态机 + 跨线程泵）
 │   ├── ace_engine_repl.py      #   把 REPL 接到引擎上（`--engine`，真终端下默认）：worker 跑轮次 + 队列回收输出
 │   ├── ace_swatches.py         #   风格词典屏（瑞士风格试点）+ 13 组断言（含 golden 与帧预算）
+│   ├── ace_widgets.py          #   边角小零件：状态图标六态 / 整宽分隔线(标题可居中) / 八分之一块进度条 / 快捷键提示 / byline / 方块小人
 │   └── i18n.py                 #   轻量国际化（zh / en / ja 字典在根级 locales/）
 ├── frontend/                   # 主前端（TypeScript + Ink，独立进程）：经 `ace --serve` 的双向 NDJSON 协议驱动引擎；与 ui/ 并存，内部结构见 frontend/README.md
 ├── cli/                        # 操作者侧工具：自检 / 上下文 / 会话日志
@@ -190,6 +191,10 @@ ace-agent/
 │   ├── releases/               #   逐版本更新介绍（RELEASE-NOTES-vX.md，可直接贴进 GitHub Release）
 │   ├── HANDOFF-R-03.md         #  R-03（双前端客户端合并）的交接提示词：自包含、可直接粘给另一个会话
 │   ├── HANDOFF-FRONTEND.md     #  Ink 前端（frontend/ + ace --serve）的交接提示词：自包含、含「未完成/未验证」清单
+│   ├── TUI-DESIGN-STUDY.md     #  TUI 设计研读：29 个 agent 仓库的界面实现对照（我们学什么 / 不学什么）
+│   ├── TUI-ENGINE.md           #  界面引擎决策：主屏两车道为什么赢、组件化全屏（Textual）为什么删
+│   ├── TUI-SWISS-SPEC.md       #  瑞士主义界面规范：六条不可协商 + 网格 + 层级工具箱 + 验收
+│   ├── CLAUDE-CODE-TUI-AND-SWATCH-PLAN.md #  早期方案稿：Claude Code TUI 与 Swatch 的移植计划
 │   ├── HOME-DESIGN.md          #  主页设计：分区顺序为什么是这样、每条信息为什么在这个位置
 │   ├── KEYMAP-CLAUDE-PARITY.md #  键位对照表（Claude Code ↔ HooH，逐条核实 + 不做的理由）
 │   ├── ARCHITECTURE.md         #   本文档：分层职责 + 权威目录树 + ADR 索引
@@ -230,6 +235,8 @@ ace-agent/
 │   │   ├── WP-6-AGENT-PRESETS.md    #   WP-6 立项卡（C4 要求单独立卡）：per-agent 权限预设 + **S-1 只许更严**
 │   │   ├── WP-9-SANDBOX-BACKEND.md  #   WP-9 立项卡（C6：**SEC-020**）：三层沙箱 + S-1 边界（可外包执行边界，不可外包决定权）
 │   │   └── ACE-MCP-SEC-SUBAGENT.md  #   WP-11 立项卡（**SEC-022**）：HooH 作为 MCP 安全子层 + 共用 CubeSandbox 底座
+│   │   ├── TUI-PRIOR-ART.md       #   同行研读：pi 与 Claude Code 的界面源码（控制层 / 设计系统 / 可搬清单）
+│   │   └── UI-OVERHAUL.md         #   界面重做立项书（现状取证 / 路线 A·B·C / 分期 / 可执行验收 / 明确不做）
 │   └── history/                #   会话纪要 / 调研 / 规范历史
 │       ├── SESSION-2026-09-06.md   #   评审会话纪要（风险清单→决策→提交→OPEN）
 │       ├── UI-CHAT-SCROLL.md       #   聊天内置滚动立项卡(引擎已实现,接线待真机)

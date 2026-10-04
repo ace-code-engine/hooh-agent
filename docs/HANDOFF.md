@@ -3,10 +3,14 @@
 > 从 README 迁出。这是**交接清单**，不是待办的第二份副本：每行只说一句"欠什么"，
 > 真正的证据、决定与边界都在那份**立项卡**里 —— **别把这张表当完整说明，点进去看卡**。
 >
-> **界面口径已经变过一次**（后加的注，见 [`docs/TUI-ENGINE.md`](TUI-ENGINE.md)）：
-> 组件化全屏界面（Textual）已废弃，现在是**主屏两车道引擎**（转录进终端原生 scrollback，
-> 状态行/输入行是帧缓冲 + 脏矩形），真终端下默认。下面"仍未验证"那节里提到的
-> Textual / 备用屏结论只对**当时**有效。
+> **界面口径变过两次**（后加的注）：
+> 1. 组件化全屏界面（Textual）已**整体删除**，换成**主屏两车道引擎**（转录进终端原生
+>    scrollback，状态行/输入行是帧缓冲），真终端下默认 —— 见 [`docs/TUI-ENGINE.md`](TUI-ENGINE.md)。
+> 2. v1.1.0 在**两个外壳**上统一到一份规范（[`docs/TUI-SWISS-SPEC.md`](TUI-SWISS-SPEC.md)）：
+>    不画边框、整宽细线、单强调色、三语成套；前端补了控制层（同步输出 / 备用屏 / 滚动视口）
+>    与设计系统（12 件，与终端侧逐值对拍）—— 见 [`docs/design/TUI-PRIOR-ART.md`](design/TUI-PRIOR-ART.md)
+>    与 [`docs/design/UI-OVERHAUL.md`](design/UI-OVERHAUL.md)。
+> 下面「仍未验证」那节里提到的 Textual 结论只对**当时**有效。
 
 ## 还没做完的（附权威记录）
 
@@ -14,11 +18,14 @@
 |---|---|---|
 | **验收门槛还剩收尾** | 四道 ACC 门槛的机器那一半、A0b（`measured_*` 聚合）、**阈值判据**（`token_verdict`，暂用阈值 50%）都已落地；**只剩** `benchmarks/results/` 接校验器（要等 WP-10 的"下沉前/后可复核数据"） | [`docs/design/ACC-GATES.md`](design/ACC-GATES.md) §7.5 / §8.6 / §10.4 |
 | **脊柱全落地（仅 HL-04 的 ACC 接线待 WP-10）** | `RL-01~04` · `DL-01~04` · `HL-01/02/03/05` 已落地；`HL-04` 的可判定机器也已落地（§9.14：`MaterialIncomplete` + `build_material` + `[73]` 五种偷换），只剩「接 ACC 门槛」仍被 WP-10 的 before/after 数据卡着 | [`docs/design/THREE-LAYERS.md`](design/THREE-LAYERS.md) §9 |
+| **界面按需补齐（v1.1.0 之后）** | 设计系统 12 件已就位并与终端逐值对拍；**未搬的是「没有真实场景」的那些**：`Pane`/`Tabs` 要有分页/分组需求的屏幕才值得落地；`ListItem` 换进菜单**会降级**（菜单已有列对齐 + 显示宽度截断，换过去说明会掉到第二行）。另：**30 秒自动消失的引导卡**（照 Claude Code `EffortCallout`）**等一个真实触发场景**再写 —— 编一个「启动就弹」纯属噪音 | [`docs/design/UI-OVERHAUL.md`](design/UI-OVERHAUL.md) · [`docs/design/TUI-PRIOR-ART.md`](design/TUI-PRIOR-ART.md) |
 | **只剩批次 6 与 WP-10** | 批次 −1…5 已关闭；**批次 6** = 非 URL 出网通道（WP-8 后半，**Linux seccomp 已落地**，Windows 仍待 WFP / macOS 仍待 seatbelt）＋ CubeSandbox 沙箱后端（WP-9）；**WP-10** = Rust 核心化（**快照哈希下沉已实测否决**，见 engine/README.md；**grep/glob 也已实测否决**——regex 语义 + 零依赖 + 非热路径；剩 **流式客户端 / LSP / 路径判定下沉**） | [`docs/ROADMAP.md`](ROADMAP.md) §7.2 |
 
 ## 仍未验证
 
-- **真 TTY 下的 Textual 全屏界面**、以及任何**非 Windows 控制台**。（CI 已装 `textual` 跑通 headless `run_test` 那几段；但"人在真终端里打字"这件事，无头 runner 验不了，仍需一台真机。）
+- **真终端里的备用屏（全屏）** —— 滚动视口/同步输出/进出 `?1049` 都有单测与对拍，但「人在真终端里翻历史、看滚动条」这件事无头 runner 验不了，仍需一台真机（本机 Windows 验过一台）。
+- **任何非 Windows 控制台**：设计系统与字形降级都按 cp936 的口径做过，但没在别的控制台上眼看过。
+- **模型的真实上下文窗口**：表里只放核过官方出处的条目（DeepSeek 1M / GLM-4.6 200K），其余走兜底并提示用户 `/window <n>` 校正 —— 兜底值**不是**「它大概多少」。
 - ~~darwin/amd64 执行器原生冒烟~~ —— 已补：`release-executor.yml` 的 `native-smoke` 加 `macos-13`（Intel runner）。
 
 ## 为什么停在这里

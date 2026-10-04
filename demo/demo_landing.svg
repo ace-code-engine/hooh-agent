@@ -64,7 +64,7 @@ text{white-space:pre;dominant-baseline:middle}
 <rect y="40" width="1007" height="706" fill="#11141b"/>
 <circle cx="22" cy="20" r="5.5" fill="#ff5f57"/><circle cx="40" cy="20" r="5.5" fill="#febc2e"/><circle cx="58" cy="20" r="5.5" fill="#28c840"/>
 <text x="503.5" y="21" text-anchor="middle" font-size="12.5" fill="#7d879c">hooh-agent — python ai_code.py --mock</text>
-<text class="r0" x="22" y="52" xml:space="preserve"><tspan fill="#d7dce5">HooH 1.0.0</tspan><tspan fill="#d7dce5"> · </tspan><tspan fill="#66cccc">目录 project</tspan><tspan fill="#d7dce5"> · </tspan><tspan fill="#7d879c">mock</tspan><tspan fill="#d7dce5"> · </tspan><tspan fill="#7d879c">readonly</tspan></text>
+<text class="r0" x="22" y="52" xml:space="preserve"><tspan fill="#d7dce5">HooH 1.1.0</tspan><tspan fill="#d7dce5"> · </tspan><tspan fill="#66cccc">目录 project</tspan><tspan fill="#d7dce5"> · </tspan><tspan fill="#7d879c">mock</tspan><tspan fill="#d7dce5"> · </tspan><tspan fill="#7d879c">readonly</tspan></text>
 <text class="r1" x="22" y="76" xml:space="preserve">&#160;</text>
 <text class="r2" x="22" y="100" xml:space="preserve"><tspan fill="#d7dce5">  接着上次</tspan></text>
 <text class="r3" x="22" y="124" xml:space="preserve"><tspan fill="#d7dce5">  ▶ 继续上次：09-17 23:07 · 1 轮 回车继续 / ↑↓ 选别的</tspan></text>
@@ -77,7 +77,7 @@ text{white-space:pre;dominant-baseline:middle}
 <text class="r10" x="22" y="292" xml:space="preserve"><tspan fill="#d7dce5">  能力（这里改，立刻生效）</tspan></text>
 <text class="r11" x="22" y="316" xml:space="preserve"><tspan fill="#d7dce5">    思考强度    auto      auto → 低 → 中 → 高 → 最高（Alt+T 循环）</tspan></text>
 <text class="r12" x="22" y="340" xml:space="preserve"><tspan fill="#d7dce5">    联网思考    on        回答前先搜网、列来源（Alt+W 切换）</tspan></text>
-<text class="r13" x="22" y="364" xml:space="preserve"><tspan fill="#d7dce5">    回答语言    zh        中文 / English / 日本語（Alt+L 切换）</tspan></text>
+<text class="r13" x="22" y="364" xml:space="preserve"><tspan fill="#d7dce5">    界面语言    zh        中文 / English / 日本語（Alt+L 切换）</tspan></text>
 <text class="r14" x="22" y="388" xml:space="preserve"><tspan fill="#d7dce5">    权限档      readonly  只读 → 可写 → 全权（Shift+Tab）</tspan></text>
 <text class="r15" x="22" y="412" xml:space="preserve"><tspan fill="#d7dce5">    模型        mock      换模型 / 换提供商（Alt+M）</tspan></text>
 <text class="r16" x="22" y="436" xml:space="preserve">&#160;</text>

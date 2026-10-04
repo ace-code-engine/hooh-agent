@@ -73,7 +73,7 @@
 | [`ROADMAP.md`](ROADMAP.md) | **能力路线图**：四支柱兼得定位 / 语言裁决 / 功能模块矩阵 / 缺口 / 工作面 WP-0~WP-10 / 批次 |
 | [`BACKLOG.md`](BACKLOG.md) | 战术待办（SEC- 安全 / Q- 快速项 / R- 结构 / REL- 发布） |
 | [`BACKLOG-P2.md`](BACKLOG-P2.md) | P2 重构立项卡（R-01~R-05 范围 / 验收 / 顺序） |
-| [`releases/`](releases/) | 逐版本更新介绍（36 篇，可直接贴进 GitHub Release） |
+| [`releases/`](releases/) | 逐版本更新介绍（37 篇，可直接贴进 GitHub Release） |
 
 ### 立项卡（`design/`）
 

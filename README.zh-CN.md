@@ -2,10 +2,10 @@
   <a href="https://github.com/ace-code-engine/hooh-agent/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/ace-code-engine/hooh-agent/actions/workflows/ci.yml/badge.svg"></a>
   <img alt="Python" src="https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue">
   <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-blue"></a>
-  <img alt="发布状态" src="https://img.shields.io/badge/release-v1.0.0%20Public%20Beta-brightgreen">
+  <img alt="发布状态" src="https://img.shields.io/badge/release-v1.1.0-brightgreen">
   <img alt="安全核心" src="https://img.shields.io/badge/safety%20core-zero--dep-orange">
   <img alt="模型调用" src="https://img.shields.io/badge/model%20API-requires%20requests-blue">
-  <a href="CHANGELOG.md"><img alt="Latest" src="https://img.shields.io/badge/latest-v1.0.0%20(2026--10--01)-brightgreen"></a>
+  <a href="CHANGELOG.md"><img alt="Latest" src="https://img.shields.io/badge/latest-v1.1.0%20(2026--10--04)-brightgreen"></a>
 </p>
 
 <h1 align="center">HooH · 互</h1>
@@ -62,6 +62,17 @@ Windows 没装 Python：去 [Releases](https://github.com/ace-code-engine/hooh-a
 <p align="center">
   <img src="demo/demo.svg" alt="一次录下来的离线 HooH 会话" width="820">
 </p>
+
+## 1.1.0 更新了什么
+
+- **界面按一份规范重做**：不画边框（改用整宽细线）、一屏一个强调色、左对齐；小零件（分隔线、
+  六态状态图标、八分之一块进度条、byline、快捷键提示）**与终端渲染器逐值对拍**，不许两种长相。
+- **中 / 英 / 日 三套齐全**：`/lang` 切的是**界面**语言 —— 斜杠菜单、对话框、报错、底栏一起换
+  （不再顺手改"回答用什么语言"）。
+- **上下文窗口跟着模型走**：DeepSeek → 1M，GLM-4.6/4.7 → 200K，表里条目带官方出处；表外模型走
+  安全兜底**并明确提示**。新增 `/window 1m` 一条命令校正。
+- **全屏真的能用**：`--fullscreen` 给转录一个自己的滚动视口（`PgUp/PgDn/↑↓/g/G` + 滚动条）；
+  另加**同步输出**（`\u001b[?2026`）治频闪、`<Static>` 让主屏保住真实回滚缓冲。
 
 ## 文档
 
