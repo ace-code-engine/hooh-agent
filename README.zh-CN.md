@@ -105,6 +105,25 @@ Windows 没装 Python：去 [Releases](https://github.com/ace-code-engine/hooh-a
 > 作者本人是米哈游长期玩家，这个名字是向《崩坏：星穹铁道》"均衡"星神致意。
 > 如果米哈游（或任何权利人）认为这个命名不妥，**提一个 issue 就会改**——不争辩、不拖延。
 
+## 我们用到了什么第三方
+
+**引入的代码（MIT）。** `frontend/vendor/dsh-ink/` 是 `@deepseek-harness-tui/dsh-tui` v0.12.0 的 Ink
+分支（MIT，Copyright (c) 2026, chimney），逐字节拷贝：135 文件 / 27,755 行，与上游 SHA256 全等。它带来
+cell 缓冲、damage 矩形、脏节点 blit、硬件滚动，以及自带的 `DEC2026` 同步输出；配套 React 19。逐文件
+来源见 [MANIFEST.md](frontend/vendor/dsh-ink/MANIFEST.md)；上游自己漏声明的两处（Ink、Meta Yoga）许可
+全文由我们补全，见 [`third_party/dsh-tui/`](third_party/dsh-tui/) 与
+[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)。
+
+**借鉴的设计（未拷文件）。** 读它的实现，在我们自己的组件里重写：版式几何（内容内缩、结构线出血）、
+代码块版式、diff 用**状态槽替代行号**（不编造行号）、语法色的防泄漏映射、键位注册表（声明 /
+平台别名 / 用户重映射 / 固定保留集 / 冲突检测）、`Ctrl+R` 历史搜索、大粘贴折叠、选择器与设置面板
+（声明式 schema + 分组 + 即时生效 + 设置内搜索）、会话树、全屏草稿编辑器 + `$EDITOR`。
+
+- 73 个语义色键不抄 → 我们只有 17 个 token，一屏一个强调色。
+- `─` 分隔线不抄 → 我们要走字形降级层，cp936 上得能降级。
+- 80ms 转轮不要 → 违我们「动画 ≤5Hz」；`highlight.js` 语法高亮不要 → 本仓零依赖。
+- 品牌 / 吉祥物 / 彩蛋一律不出现 → 界面文案全部是我们的，且三语齐备。
+
 ## 许可
 
 [MIT](LICENSE) © 2026 jincheng3870682453-hash

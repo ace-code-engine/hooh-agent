@@ -115,6 +115,26 @@ one spine, the 互 glyph, drawn from scratch. Nothing is traced, copied, or extr
 > Equilibrium in *Honkai: Star Rail*. If miHoYo (or anyone else) considers this naming
 > inappropriate, **open an issue and it will be changed** — no argument, no delay.
 
+## What we use from third parties
+
+**Vendored code — MIT.** `frontend/vendor/dsh-ink/` is the Ink fork of `@deepseek-harness-tui/dsh-tui`
+v0.12.0 (MIT, © 2026 chimney), copied byte for byte: 135 files / 27,755 lines, SHA256-equal to
+upstream — cell buffer, damage rectangles, dirty-node blit, hardware scroll, `DEC2026` sync output,
+React 19. Per-file provenance: [MANIFEST.md](frontend/vendor/dsh-ink/MANIFEST.md); the two licences
+dsh-TUI itself omits (Ink, Meta Yoga) are supplied in [`third_party/dsh-tui/`](third_party/dsh-tui/) —
+[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md).
+
+**Adapted designs — no files copied.** Read their code, rewrite the idea in ours: page-margin geometry
+(inset content, bleeding structural lines), code-block layout, diff **status slots instead of invented
+line numbers**, leak-proof syntax-colour mapping, the key registry (declaration, platform aliases,
+user remapping, reserved set, conflict detection), `Ctrl+R` history search, large-paste folding,
+picker / settings / session-tree / draft-editor shells and `$EDITOR`.
+
+- 73 semantic colour keys → we ship 17 tokens, one accent per screen.
+- `─` dividers → must degrade under cp936, so ours go through the glyph fallback.
+- An 80 ms spinner → breaks this repo's "animation ≤ 5 Hz"; `highlight.js` → we are zero-dependency.
+- Brand, mascot, easter eggs → none appear; UI copy is ours, complete in three languages.
+
 ## License
 
 [MIT](LICENSE) © 2026 jincheng3870682453-hash
