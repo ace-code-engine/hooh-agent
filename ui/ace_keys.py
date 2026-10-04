@@ -261,8 +261,12 @@ APP_KEYMAP: Tuple[ActionBinding, ...] = (
     ActionBinding("alt+w", "net_toggle", "key_net", "global"),
     ActionBinding("alt+l", "lang", "key_lang", "global"),
     ActionBinding("alt+1", "home", "key_home", "global"),
-    ActionBinding("alt+k", "tasks", "key_tasks", "global"),
-    ActionBinding("alt+t", "toggle_thinking", "key_thinking", "global"),
+    # `alt+t` 此前**绑了两次**（`:260` 的 effort 与这一段的 toggle_thinking）——
+    # 同键两义的后果是"按下去做哪件事取决于谁先查到"，而帮助面板会把两条都列出来。
+    # 思考开关改挂 `alt+k`（它同一段里被写给了 tasks，而 tasks 已有 `ctrl+t`），
+    # 于是两个动作各留一个键、一个键都不少。前端注册表（`frontend/src/keys/registry.ts`）
+    # 的默认表与此逐条一致。
+    ActionBinding("alt+k", "toggle_thinking", "key_thinking", "global"),
     ActionBinding("ctrl+l", "clear_transcript", "key_clear", "global"),
     ActionBinding("ctrl+c", "interrupt", "key_interrupt", "global"),
     ActionBinding("ctrl+d", "quit_if_empty", "key_quit", "global"),
@@ -279,7 +283,12 @@ APP_KEYMAP: Tuple[ActionBinding, ...] = (
     # 队列语义（对应 Claude 的 `Ctrl+X Enter` / `Ctrl+Enter`）：不打断 vs 立刻发
     ActionBinding("enter", "queue_submit", "key_queue_submit", "global", chord="ctrl+x"),
     ActionBinding("ctrl+s", "send_now", "key_send_now", "global", chord="ctrl+x"),
-    ActionBinding("ctrl+e", "external_editor", "key_editor", "global", chord="ctrl+x"),
+    # 这里原来还有一条 `ctrl+e`（chord `ctrl+x`）→ external_editor：那是 `ctrl+e` 的**第二个含义**。
+    # 实际跑的那条路（`ui/ace_engine_repl.py:177` 的行内热键 `c-e` → `/expandall`，与
+    # `docs/COMMANDS.md`、`docs/KEYMAP-CLAUDE-PARITY.md` 的口径）只有一个含义：Ctrl+E = 全部展开；
+    # 而且行编辑层没有和弦状态机，Ctrl+X Ctrl+E 根本到不了编辑器。留着它只会让帮助面板
+    # 写着一个按不出来的键（"帮助里有的键其实没绑"正是本表 docstring 要防的那件事）。
+    # 编辑器仍有 `ctrl+g`（`:256`），一个键都没少。
     ActionBinding("1", "dialog_1", "key_dialog_1", "dialog"),
     ActionBinding("2", "dialog_2", "key_dialog_2", "dialog"),
     ActionBinding("3", "dialog_3", "key_dialog_3", "dialog"),

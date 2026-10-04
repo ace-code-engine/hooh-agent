@@ -6165,6 +6165,22 @@ if _want("33"):
     check("界面上会画的字形都在 ASCII_FALLBACK 里（缺失 ⇒ cp936 上显示成 `?` 且不报错）",
           not _missing33, f"缺替身: {_missing33}")
 
+    # **前端会画的那一族字形**（状态图标六态）必须既在"发给前端的表"里、又有替身 —— 这条以前
+    # 没人盯：上面那条守卫只扫"Python 侧会画的字形"，而前端是按引擎发的表取字的 ⇒ 漏在表里 =
+    # 漏在实机上。实测漏了 `◌`（StatusIcon loading / LoadingState）与 `ℹ`（info）：cp936 上那两处
+    # 是 `?`，而当时测试全绿。
+    #
+    # 只看这一族，**不是**整张 `FRONTEND_GLYPHS`：那张表还含框线/块状字符（`─│╭╗█` 之类），
+    # 它们本来就没有 ASCII 替身 —— 它是"问控制台画不画得出"的清单，不是"必然要替身"的清单。
+    import ai_code as _ac33f  # noqa: E402
+    _fg33 = _ac33f.FRONTEND_GLYPHS
+    _draw33 = {_w33.status_icon(_s33)[0] for _s33 in _w33.STATUS_ICONS}
+    _missfg33 = sorted(_g33 for _g33 in _draw33
+                       if _g33 and (_g33 not in _fg33 or _g33 not in _af33))
+    check("★前端会画的状态字形既在发给前端的表里、又有替身（缺 ⇒ cp936 上成 `?` 且不报错）",
+          len(_draw33) >= 5 and not _missfg33,
+          f"这一族 {len(_draw33)} 个（退化即空跑），未覆盖: {_missfg33}")
+
     # —— 小零件（照 Claude Code / pi 的边角做法搬来的那几个）——
     # 集中一处 + 边界断言，免得"三处长三个样"（分隔线曾是 `"─" * 20`、进度只有数字）。
     _w33.demo()                                            # 模块自带的自检
@@ -11121,6 +11137,38 @@ if _want("60"):
     check("[60] 源码级：界面依赖里不再有 textual / rich（引擎路径零第三方界面库）",
           '"textual"' not in _setup60 and '"rich"' not in _setup60, "")
 
+    # —— 键位表的两条守卫：真双绑 + 说明文案三语齐全 ——
+    # 这两条从 `tui/` 退役段（[62]/[65]）搬过来：它们守的是 `ui/ace_keys.py`（引擎路径
+    # 与前端注册表共用的那份表），对象没有退役，断言就不该跟着退役。
+    #
+    # ① 同键两义：期望值从**表自己**推导（`(chord,key) → 动作集合`），不在这里另抄一份
+    #    键位清单 —— 抄的那份会跟着表一起漂。实测过的两处：`alt+t` 同时给了
+    #    `effort`/`toggle_thinking`，`ctrl+e` 既是"全部展开"（引擎行内热键）又挂在
+    #    `ctrl+x` 和弦上做"外部编辑器"（前端注册表只能把其中一义丢掉）。
+    from ui import ace_keys as _keys60  # noqa: E402
+    _binds60: dict = {}
+    for _b60 in _keys60.APP_KEYMAP:
+        _binds60.setdefault((_b60.chord, _b60.key), set()).add(_b60.action)
+    _dups60 = {k: sorted(v) for k, v in _binds60.items() if len(v) > 1}
+    check("[60] ★键位表：一个键序列只有一个动作（同键两义 = 按下去做哪件事取决于谁先查到）",
+          not _dups60, _dups60)
+    check("[60] ★键位表：`alt+t` 只归 effort、thinking 走 `alt+k`（与前端注册表同一口径）",
+          [b.action for b in _keys60.APP_KEYMAP if b.key == "alt+t"] == ["effort"]
+          and "toggle_thinking" in {b.action for b in _keys60.APP_KEYMAP
+                                    if b.key == "alt+k"},
+          [b.action for b in _keys60.APP_KEYMAP if b.key in ("alt+t", "alt+k")])
+    # ② 说明文案：**表里引用的每个 desc_key 三语都要在**。此前 4 个键
+    #    （key_del_word/key_del_line/key_word_left/key_word_right）只在表里、不在字典里，
+    #    于是帮助面板上那几行显示的是键名本身 —— 而 `t()` 认不出键就原样返回，不报错。
+    #    期望集合同样从表推导，不是手抄。
+    _dicts60 = {_lg60: json.loads((FOLDER / "locales" / f"{_lg60}.json")
+                                  .read_text(encoding="utf-8"))
+                for _lg60 in ("zh", "en", "ja")}
+    _miss60 = sorted({f"{b.desc_key}@{lg}" for b in _keys60.APP_KEYMAP
+                      for lg in _dicts60 if b.desc_key not in _dicts60[lg]})
+    check("[60] ★键位说明文案三语齐全（表里引用的 desc_key 不许只活在表里）",
+          not _miss60, _miss60)
+
     # ============================================================
 
 if _want("61"):
@@ -13271,6 +13319,25 @@ if _want("69"):
         check("--serve：本轮应同时有 tool_start 与 tool_call",
               False, _types69)
 
+    # CAP-03（§3.4）：`tool_result` 上"拒绝还是失败"必须由**机器通道**决定，不由中文文案决定。
+    # 期望值不在这里另写一张表：直接调 `tools/status.py` 那两处**唯一判定处**，与事件里的
+    # 字段对拍（[36] 已经守住了判定处本身的闭集与语义）。
+    from tools.status import (classify_refusal as _cr69,  # noqa: E402
+                              retryable_for as _rt69)
+    _tr69 = [f["event"] for f in _ev69 if f["event"]["type"] == "tool_result"]
+    check("[69/CAP-03] ★tool_result 带 refusal_class + retryable，且与 tools.status 唯一判定处一致",
+          bool(_tr69) and all(
+              e.get("refusal_class") == _cr69(str(e.get("status") or ""))
+              and e.get("retryable") is _rt69(e.get("refusal_class"))
+              and e.get("outcome") in ("success", "denied", "failed", "partial",
+                                       "deferred")
+              for e in _tr69),
+          [_tr69[:1], [e.get("status") for e in _tr69]])
+    check("[69/CAP-03] 源码级：两个新字段取自 `tools.status`（不许在发射点各判一遍）",
+          "classify_refusal(str(_st)" in (FOLDER / "ai_code.py").read_text(encoding="utf-8")
+          and "retryable_for(_cls80)" in (FOLDER / "ai_code.py").read_text(encoding="utf-8"),
+          "")
+
     # —— 流式增量与底栏分段：前端 **request 了就必须收得到** ——
     # 此前 `initialize` 的 `stream` 开关被记住、被回报，然后**没有任何地方读它**：
     # 前端等一个永远不来的 `model_delta`，整段回答只在 `final` 里出现一次
@@ -13385,6 +13452,58 @@ if _want("69"):
     # 为什么用真子进程而不是 StringIO：这三个不是纯搬运，它们要读**活的 AgentCLI**
     # （主页要最近会话、任务树要 goal/todos、状态要 cfg）。用假的服务端测不出真实形状。
     from core import ace_io as _io69b  # noqa: E402
+    # —— 新协议面（`DshShell-AceCapabilities.md` §3）的**夹具** ——
+    #
+    # 这些方法的唯一生产者都是既有的（guardian / ace_sessions / ace_sessionlog /
+    # ace_rules）。"断言要能自证"在这里的具体含义是：先把真数据造出来，再起服务进程，
+    # 然后拿协议输出与**同进程直调**那些生产者逐项对拍 —— 而不是在测试里再抄一份期望值
+    # （抄的那份会跟着协议一起漂，什么也守不住）。
+    from pathlib import Path as _P69c  # noqa: E402
+    from core.guardian import Guardian as _G69c  # noqa: E402
+    from cli import ace_sessions as _as69c  # noqa: E402
+    from cli.ace_sessionlog import (SessionLog as _SL69c,  # noqa: E402
+                                    active_head as _ah69c, branch_tips as _bt69c)
+    from core import ace_rules as _ar69c  # noqa: E402
+    import ui.ace_menu as _am69c  # noqa: E402
+
+    _root69c = _P69c(_pr69)
+    (_root69c / ".ace_sessions").mkdir(parents=True, exist_ok=True)
+    (_root69c / "probe_file.txt").write_text("hello from probe\n", encoding="utf-8")
+    (_root69c / "probe_big.txt").write_text("x" * 5000, encoding="utf-8")
+
+    # 会话浏览器：一段**已知内容**的历史会话（轮数/工具/压缩/拒绝都摆得明明白白）。
+    _sess69c = _root69c / ".ace_sessions" / "20261004-1930.jsonl"
+    _sess_evs69c = [
+        {"seq": 1, "ts": "2026-10-04 19:30:00", "kind": "session/start",
+         "project_root": str(_root69c), "cwd": str(_root69c), "model": "mock"},
+        {"seq": 2, "ts": "2026-10-04 19:30:01", "kind": "user/message",
+         "content": "帮我改一下 X"},
+        {"seq": 3, "ts": "2026-10-04 19:30:02", "kind": "assistant/message",
+         "content": "好的"},
+        {"seq": 4, "ts": "2026-10-04 19:30:03", "kind": "tool/result",
+         "tool": "file_read", "status": "SUCCESS", "message": "ok"},
+        {"seq": 5, "ts": "2026-10-04 19:30:04", "kind": "compaction/event",
+         "before": 10, "after": 5},
+        {"seq": 6, "ts": "2026-10-04 19:30:05", "kind": "security/denied",
+         "tool": "file_write", "reason": "越界"},
+        {"seq": 7, "ts": "2026-10-04 19:30:06", "kind": "user/message",
+         "content": "再来一次"},
+        {"seq": 8, "ts": "2026-10-04 19:30:07", "kind": "assistant/message",
+         "content": "好"},
+    ]
+    _sess69c.write_text("\n".join(_json69.dumps(e, ensure_ascii=False)
+                                  for e in _sess_evs69c) + "\n", encoding="utf-8")
+
+    # 快照：一个"精确"（带 touched ⇒ rollback_scope=paths）+ 一个整树（无 touched）。
+    _g69c = _G69c(str(_root69c))
+    _snap_ok69c = _g69c.snapshot("probe_precise", touched=["probe_file.txt"])
+    _snap_tree69c = _g69c.snapshot("probe_tree")
+
+    # 规则：项目作用域一条 deny（deny 不受"项目未受信任"影响，读回来是稳定的）。
+    (_root69c / ".ace").mkdir(parents=True, exist_ok=True)
+    (_root69c / ".ace" / "permissions.json").write_text(_json69.dumps(
+        {"version": 1, "rules": [{"tool": "file_write", "pattern": "src/**",
+                                  "action": "deny"}]}), encoding="utf-8")
 
     _p69c = _sp69.Popen(
         [sys.executable, str(FOLDER / "ai_code.py"), "--serve", "--mock",
@@ -13400,7 +13519,7 @@ if _want("69"):
         except Exception:  # noqa: BLE001
             pass
 
-    _wd69c = _th69.Timer(90, _kill69c_fn)
+    _wd69c = _th69.Timer(180, _kill69c_fn)
     _wd69c.daemon = True
     _wd69c.start()
 
@@ -13412,10 +13531,36 @@ if _want("69"):
             pass
 
     _send69c(_sv69.make_req("1", "initialize", {"protocol": 1}))
-    _send69c(_sv69.make_req("2", "home.request", {}))
-    _send69c(_sv69.make_req("3", "tasks.request", {}))
-    _send69c(_sv69.make_req("4", "config.request", {}))
-    _send69c(_sv69.make_req("5", "shutdown", {}))
+    # 先跑一轮（mock）：会话树/审计要点得有真消息才验得动。
+    _send69c(_sv69.make_req("2", "user.message", {"text": "第一轮：测试问题"}))
+    _send69c(_sv69.make_req("3", "home.request", {}))
+    _send69c(_sv69.make_req("4", "tasks.request", {}))
+    _send69c(_sv69.make_req("5", "config.request", {}))
+    # —— 新协议面：会话三件套 + CAP-01/02/03/04/06 ——
+    _send69c(_sv69.make_req("6", "sessions.request", {"limit": 20}))
+    _send69c(_sv69.make_req("7", "sessiontree.request", {"path": "", "preview": True}))
+    _send69c(_sv69.make_req("8", "settings.request", {}))
+    _send69c(_sv69.make_req("9", "snapshots.request", {"limit": 20}))
+    _send69c(_sv69.make_req("10", "rules.request", {"scopes": ["project"]}))
+    _send69c(_sv69.make_req("11", "audit.request", {"section": "stats"}))
+    _send69c(_sv69.make_req("12", "audit.request", {"section": "boundary"}))
+    _send69c(_sv69.make_req("13", "audit.request", {"n": 5}))
+    _send69c(_sv69.make_req("14", "mentions.request", {"kind": "session"}))
+    _send69c(_sv69.make_req("15", "mentions.request", {"kind": "lang"}))
+    _send69c(_sv69.make_req("16", "mentions.request", {"kind": "file"}))
+    # `@` 引用走 `command.exec`（CAP-04 的"路由缺口"：`user.message` 不经过 `_process_line`）
+    _send69c(_sv69.make_req("17", "command.exec", {"line": "@file probe_file.txt"}))
+    _send69c(_sv69.make_req("18", "command.exec", {"line": "@file probe_big.txt"}))
+    _send69c(_sv69.make_req("19", "mentions.request", {"kind": "file"}))
+    # 反例：同样的文本走 `user.message` —— 它**不该**改变已引用上下文（那就是今天的实况）
+    _send69c(_sv69.make_req("20", "user.message", {"text": "@file probe_file.txt"}))
+    _send69c(_sv69.make_req("21", "mentions.request", {"kind": "file"}))
+    # 切分支：`/tree @1` 之前/之后各取一次树，活跃头必须**跟着变**（有回报，不是盲发命令）
+    _send69c(_sv69.make_req("22", "sessiontree.request", {"path": ""}))
+    _send69c(_sv69.make_req("23", "command.exec", {"line": "/tree @1"}))
+    _send69c(_sv69.make_req("24", "sessiontree.request", {"path": ""}))
+    _send69c(_sv69.make_req("25", "mcp.request", {}))
+    _send69c(_sv69.make_req("26", "shutdown", {}))
 
     _resp69c = {}
     for _ln69c in _p69c.stdout:
@@ -13428,7 +13573,7 @@ if _want("69"):
             continue
         if _fr69c.get("type") == "resp":
             _resp69c[str(_fr69c.get("id"))] = _fr69c
-            if _fr69c.get("id") == "5":
+            if _fr69c.get("id") == "26":
                 break
     _wd69c.cancel()
     try:
@@ -13437,10 +13582,10 @@ if _want("69"):
         _kill69c_fn()
 
     check("三个取数据的方法都回了成功",
-          all(_resp69c.get(str(i), {}).get("ok") is True for i in (2, 3, 4)),
+          all(_resp69c.get(str(i), {}).get("ok") is True for i in (3, 4, 5)),
           {k: v.get("ok") for k, v in _resp69c.items()})
 
-    _home69 = (_resp69c.get("2") or {}).get("result") or {}
+    _home69 = (_resp69c.get("3") or {}).get("result") or {}
     _secs69 = _home69.get("sections") or []
     check("主页：返回结构化分区，每段带 title_key 与 items",
           bool(_secs69) and all("title_key" in s and "items" in s for s in _secs69),
@@ -13468,11 +13613,11 @@ if _want("69"):
               ("version", "model", "permission", "sandbox")),
           sorted((_home69.get("title") or {}).keys()))
 
-    _tasks69 = (_resp69c.get("3") or {}).get("result") or {}
+    _tasks69 = (_resp69c.get("4") or {}).get("result") or {}
     check("任务树：空树返回 tree=None（调用方据此不画空树）",
           "tree" in _tasks69, sorted(_tasks69.keys()))
 
-    _cfg69 = (_resp69c.get("4") or {}).get("result") or {}
+    _cfg69 = (_resp69c.get("5") or {}).get("result") or {}
     check("当前状态：含菜单「（当前 xxx）」要用的那几个字段",
           all(k in _cfg69 for k in ("model", "permission", "sandbox", "effort",
                                     "net", "lang", "vim")),
@@ -13480,6 +13625,266 @@ if _want("69"):
     check("当前状态：与主页顶行同源（permission 一致）",
           _cfg69.get("permission") == (_home69.get("title") or {}).get("permission"),
           (_cfg69.get("permission"), (_home69.get("title") or {}).get("permission")))
+
+    # ============================================================
+    # 新协议面（`docs/design/DshShell-AceCapabilities.md` §3 + §3.7 引擎先行项）
+    # ============================================================
+    # 通则：每条断言都拿**协议输出**与**同进程直调的唯一生产者**对拍。期望值不在这里
+    # 另抄一份 —— 抄的那份会跟着协议一起漂，等于没守（卡 §4 的"双向协议"要求）。
+    _new69 = ("sessiontree.request", "settings.request", "snapshots.request",
+              "rules.request", "audit.request", "mentions.request", "mcp.request")
+    check("[69/CAP] 7 个新方法都回了成功（握手清单里的方法必须真的答得出来）",
+          all(_resp69c.get(str(i), {}).get("ok") is True for i in range(6, 26)),
+          {k: (v.get("ok"), v.get("error", {}).get("code"))
+           for k, v in sorted(_resp69c.items(), key=lambda kv: int(kv[0]))
+           if not v.get("ok")})
+    check("[69/CAP] 新方法都在握手 methods 里（从注册表推导，不是手写第二份）",
+          set(_new69) <= set(_m69), sorted(set(_new69) - set(_m69)))
+
+    # —— CAP-01 快照清单：id 序列与 precise 与 guardian 直调对拍 ——
+    _snap69 = (_resp69c.get("9") or {}).get("result") or {}
+    _snap_direct69 = _g69c.list_snapshots()
+    check("[69/CAP-01] snapshots.request 的 id 序列 == 同进程直调 guardian.list_snapshots()",
+          [s["id"] for s in _snap69.get("snapshots") or []]
+          == [s["id"] for s in _snap_direct69],
+          ([s.get("id") for s in _snap69.get("snapshots") or []],
+           [s.get("id") for s in _snap_direct69]))
+    _snap_map69 = {s["id"]: s["precise"] for s in _snap69.get("snapshots") or []}
+    check("[69/CAP-01] ★precise 与快照自己记的 rollback_scope 一致（说不清的**不许**显示成精确）",
+          all(s.get("precise") is _ai69b._snapshot_precise(_g69c, s["id"])
+              for s in _snap69.get("snapshots") or [])
+          and _snap_map69.get(_snap_ok69c) is True
+          and _snap_map69.get(_snap_tree69c) is False,
+          sorted(_snap_map69.items()))
+    check("[69/CAP-01] snapshots.request 形状齐（total/limit/enabled + 逐条字段）",
+          {"snapshots", "total", "limit", "enabled"} == set(_snap69)
+          and all({"id", "tag", "created_iso", "file_count", "precise"} == set(s)
+                  for s in _snap69.get("snapshots") or []),
+          (_snap69.get("total"), _snap69.get("limit"), _snap69.get("enabled")))
+
+    # —— CAP-02 档位闭集：与 `ui/ace_menu.ARGUMENT_HINTS` 逐字对拍（防手抄第二份）——
+    _opts69 = _cfg69.get("option_sets") or {}
+    check("[69/CAP-02] config.request 带 option_sets（sandbox/net/permission/effort 四张闭集）",
+          set(_opts69) == {"sandbox", "net", "permission", "effort"}, sorted(_opts69))
+    check("[69/CAP-02] ★option_sets == ui/ace_menu.ARGUMENT_HINTS 逐字相等（闭集只有一个来源）",
+          all([tuple(x) for x in _opts69.get(_c.lstrip("/"), [])]
+              == list(_am69c.ARGUMENT_HINTS.get(_c, ()))
+              for _c in ("/sandbox", "/net", "/permission", "/effort")),
+          {_c: _opts69.get(_c) for _c in _opts69})
+
+    # —— §3.7c 设置面板：写通道指回真命令 + 凭据不回显 ——
+    _set69 = (_resp69c.get("8") or {}).get("result") or {}
+    _set_items69 = [it for s in _set69.get("sections") or [] for it in s.get("items") or []]
+    _bad_cmd69 = [it["write_cmd"] for it in _set_items69
+                  if it["write_cmd"] and it["write_cmd"].split()[0]
+                  not in _ai69b.AgentCLI.COMMAND_HANDLERS]
+    check("[69/§3.7c] 每个设置项的 write_cmd 首词 ∈ 命令表（或为空串 = 没有对应命令）",
+          bool(_set_items69) and not _bad_cmd69, _bad_cmd69)
+    _sec69 = [it for it in _set_items69 if it.get("secret")]
+    check("[69/§3.7c] ★凭据项不回传 current（只回 set: bool）—— 只读通道不漏凭据",
+          bool(_sec69) and all("current" not in it and isinstance(it.get("set"), bool)
+                               for it in _sec69),
+          [(it.get("key"), sorted(it)) for it in _sec69])
+    check("[69/§3.7c] enum 与 ARGUMENT_HINTS 对拍（与 CAP-02 共用同一条闭集来源）",
+          all([tuple(x) for x in it["enum"]]
+              == list(_am69c.ARGUMENT_HINTS.get("/" + it["key"], ()))
+              for it in _set_items69 if it["enum"]),
+          [(it["key"], it["enum"]) for it in _set_items69 if it["enum"]][:1])
+    check("[69/§3.7c] 每个 label_key 三语齐全（设置面板不许出现空标题）",
+          all(all(f'"{it["label_key"]}"' in (FOLDER / "locales" / f"{_lg}.json")
+                  .read_text(encoding="utf-8")
+                  for _lg in ("zh", "en", "ja"))
+              for it in _set_items69
+              + [{"label_key": s["label_key"]} for s in _set69.get("sections") or []]),
+          [it["label_key"] for it in _set_items69
+           if not all(f'"{it["label_key"]}"' in (FOLDER / "locales" / f"{_lg}.json")
+                      .read_text(encoding="utf-8")
+                      for _lg in ("zh", "en", "ja"))])
+
+    # —— CAP-03 规则 / 审计 ——
+    _rules69 = (_resp69c.get("10") or {}).get("result") or {}
+    _rules_direct69, _warns_direct69 = _ar69c.load_rules(
+        str(_root69c), scopes=["project"])
+    check("[69/CAP-03] rules.request(project) 与同进程直调 load_rules 对拍（同源、同序）",
+          [(r["scope"], r["tool"], r["pattern"], r["action"])
+           for r in _rules69.get("rules") or []]
+          == [(r.scope, r.tool, r.pattern, r.action) for r in _rules_direct69],
+          (_rules69.get("rules"),
+           [(r.scope, r.tool, r.pattern, r.action) for r in _rules_direct69]))
+    check("[69/CAP-03] rules.request 形状齐（rules/pending/warnings；pending 带签字用的 index）",
+          {"rules", "pending", "warnings"} == set(_rules69)
+          and all({"scope", "tool", "pattern", "action", "source"} <= set(r)
+                  for r in _rules69.get("rules") or []),
+          sorted(_rules69))
+
+    _audit_stats69 = (_resp69c.get("11") or {}).get("result") or {}
+    _audit_ev69 = (_resp69c.get("13") or {}).get("result") or {}
+    _audit_b69 = (_resp69c.get("12") or {}).get("result") or {}
+    _log_path69c = _root69c / ".ace_sessions" / str(_audit_ev69.get("file") or "x")
+    _log_evs69c = list(_SL69c(str(_log_path69c)).events())
+    # 与 `session_meta` 对拍要拿**当时那一刻**的日志：stats 是运行中途取的，而日志
+    # 之后还会长（`/tree @1` 会写 branch/switch）。所以按它自己报的条数切出前缀，
+    # 原样写到临时文件再直调 —— 这样比的是"同一段事件"，不受后续增长影响。
+    # 序列化必须与 `SessionLog.append` 逐字节一致（`separators=(",", ":")`）：
+    # `bytes.total` 是**字节账**，换一种空格写法会让体积对不上（实测差 176 字节）。
+    from core import ace_engine as _ae69  # noqa: E402
+    _n_ev69 = int(_audit_stats69.get("stats", {}).get("events") or 0)
+    _prefix69c = mktemp("meta69") / "prefix.jsonl"
+    _prefix69c.write_text(
+        "".join(_json69.dumps(e, ensure_ascii=False, separators=(",", ":")) + "\n"
+                for e in _log_evs69c[:_n_ev69]), encoding="utf-8")
+    _meta_direct69 = _ae69.session_meta(str(_prefix69c))
+    _stats69 = _audit_stats69.get("stats") or {}
+
+    def _meta_proj69(d):
+        """`session_meta` → 协议声明的那个子集（协议只发这些字段，比就该比这些）。"""
+        return (d.get("events"),
+                [(k.get("kind"), k.get("count")) for k in d.get("kinds") or []],
+                [(t.get("tool"), t.get("calls"), t.get("errors"))
+                 for t in d.get("tools") or []],
+                ((d.get("bytes") or {}).get("total"), (d.get("bytes") or {}).get("unique")),
+                ((d.get("seq") or {}).get("duplicates"), (d.get("seq") or {}).get("gaps")),
+                d.get("bad_json"), d.get("missing_fields"), d.get("source"))
+
+    check("[69/CAP-03] ★audit.request(stats) 与同进程直调 session_meta 逐字段相等（含来源声明）",
+          _meta_proj69(_stats69) == _meta_proj69(_meta_direct69)
+          and _n_ev69 > 0
+          and _stats69.get("source") in ("ace-engine", "python"),
+          (_meta_proj69(_stats69), _meta_proj69(_meta_direct69)))
+    check("[69/CAP-03] audit.request(默认) 回最近 n 条事件，total == 日志实际条数",
+          _audit_ev69.get("section") == "events"
+          and _audit_ev69.get("total") == _n_ev69
+          and len(_audit_ev69.get("events") or []) == min(5, _n_ev69),
+          (_audit_ev69.get("total"), _n_ev69,
+           len(_audit_ev69.get("events") or [])))
+    check("[69/CAP-03] audit.request(boundary) 的链体检三态与同进程 verify_chain 一致",
+          _audit_b69.get("section") == "boundary"
+          and _audit_b69.get("boundary", {}).get("chain", {}).get("status")
+          == _SL69c(str(_log_path69c)).verify_chain()[0],
+          _audit_b69.get("boundary", {}).get("chain"))
+
+    # —— §3.7a 会话浏览器：字段到齐 + 与 summarize() 同源 + id 稳定 ——
+    _sess_proto69 = (_resp69c.get("6") or {}).get("result") or {}
+    _want_keys69 = {"id", "path", "when", "turns", "label", "project", "root",
+                    "bytes", "mtime_iso", "tools", "compactions", "security_denied",
+                    "first_user", "has_prompt"}
+    _row69 = next((r for r in _sess_proto69.get("sessions") or []
+                   if r.get("id") == "20261004-1930"), None)
+    _info69 = _as69c.summarize(_sess_evs69c)
+    check("[69/§3.7a] sessions.request 每项键集合 == 声明集合（无 undefined、无多余）",
+          bool(_sess_proto69.get("sessions"))
+          and all(set(r) == _want_keys69 for r in _sess_proto69.get("sessions") or []),
+          [sorted(set(r) ^ _want_keys69) for r in _sess_proto69.get("sessions") or []][:2])
+    check("[69/§3.7a] ★turns/tools/compactions/security_denied/first_user == 直调 summarize()",
+          _row69 is not None
+          and (_row69["turns"], _row69["tools"], _row69["compactions"],
+               _row69["security_denied"], _row69["first_user"])
+          == (_info69["turns"], _info69["tools"], _info69["compactions"],
+              _info69["security_denied"], _info69["first_user"]),
+          (_row69, {k: _info69[k] for k in ("turns", "tools", "compactions",
+                                            "security_denied", "first_user")}))
+    _sess_proto69b = (_resp69c.get("6") or {}).get("result") or {}
+    check("[69/§3.7a] id 稳定且与文件名同源（path 随项目根变，当不了身份；id 才是）",
+          all(r["id"] == _P69c(r["path"]).stem
+              for r in _sess_proto69.get("sessions") or [])
+          and len({r["id"] for r in _sess_proto69.get("sessions") or []})
+          == len(_sess_proto69.get("sessions") or [])
+          and _row69 is not None and _row69["id"] == "20261004-1930",
+          [r.get("id") for r in _sess_proto69.get("sessions") or []])
+    check("[69/§3.7a] bytes/mtime_iso 与同一个文件对拍（同一次 stat）",
+          _row69 is not None
+          and _row69["bytes"] == _sess69c.stat().st_size
+          and _row69["mtime_iso"].startswith("20"),
+          ((_row69 or {}).get("bytes"), _sess69c.stat().st_size))
+
+    # —— §3.7b 会话树：tips/active_head 与直调对拍；切分支**有回报** ——
+    # 对拍用的是**最后一次**取树（id 24，进程已收工）：那时日志不再增长，直调读到的
+    # 与协议读到的是同一份。拿中途那次去比终态日志只会比出"日志之后又长了"。
+    _tree69 = (_resp69c.get("22") or {}).get("result") or {}      # `/tree @1` 之前
+    _tree69b = (_resp69c.get("24") or {}).get("result") or {}     # 之后
+    _tree69c = (_resp69c.get("7") or {}).get("result") or {}
+    _cur_log69c = _SL69c(str(_root69c / ".ace_sessions"
+                             / str(_audit_ev69.get("file") or "x")))
+    _cur_evs69c = list(_cur_log69c.events())
+    check("[69/§3.7b] ★sessiontree.request 的 tips/active_head == 直调 branch_tips()/active_head()",
+          [n["seq"] for n in _tree69b.get("nodes") or [] if n.get("tip")]
+          == [t["seq"] for t in _bt69c(_cur_evs69c)]
+          and _tree69b.get("active_head") == _ah69c(_cur_evs69c)
+          and _tree69b.get("tips") == [t["seq"] for t in _bt69c(_cur_evs69c)],
+          (_tree69b.get("tips"), [t["seq"] for t in _bt69c(_cur_evs69c)],
+           _tree69b.get("active_head"), _ah69c(_cur_evs69c)))
+    check("[69/§3.7b] ★`/tree @1` 之后重取：active_head 从「当前头」变成第 1 轮的落点"
+          "（有回报，不是盲发命令）",
+          _tree69.get("active_head") != _tree69b.get("active_head")
+          and _tree69b.get("active_head") == _ai69b.AgentCLI._last_msg_seq_of_turn(
+              _cur_evs69c, 1)
+          and _tree69b.get("active_head", 0) > 0,
+          (_tree69.get("active_head"), _tree69b.get("active_head"),
+           _ai69b.AgentCLI._last_msg_seq_of_turn(_cur_evs69c, 1)))
+    check("[69/§3.7b] parent_session 字段存在且恒为 ''（跨文件父子无生产者 → 如实空，不造）",
+          _tree69c.get("parent_session") == "" and "parent_session" in _tree69b,
+          _tree69c.get("parent_session"))
+    check("[69/§3.7b] 节点形状齐（seq/kind/parent/tip/turn/preview/active）",
+          bool(_tree69.get("nodes"))
+          and all({"seq", "kind", "parent", "tip", "turn", "preview", "active"} == set(n)
+                  for n in _tree69.get("nodes") or []),
+          (_tree69.get("nodes") or [])[:1])
+
+    # —— CAP-04 `@` 体系：候选唯一来源 + `@` 行走 command.exec 才真的挂上上下文 ——
+    _men_sess69 = (_resp69c.get("14") or {}).get("result") or {}
+    _men_lang69 = (_resp69c.get("15") or {}).get("result") or {}
+    _men_file69 = (_resp69c.get("16") or {}).get("result") or {}
+    check("[69/CAP-04] ★mentions(kind=session) 的 label 序列 == sessions.request 的 label 序列",
+          [it["label"] for it in _men_sess69.get("items") or []]
+          == [r["label"] for r in _sess_proto69.get("sessions") or []],
+          ([it["label"] for it in _men_sess69.get("items") or []],
+           [r["label"] for r in _sess_proto69.get("sessions") or []]))
+    check("[69/CAP-04] mentions 的 items/limits 形状齐，limits 来自既有常量",
+          all({"label", "insert", "desc", "kind", "disabled_reason"} == set(it)
+              for it in (_men_sess69.get("items") or []) + (_men_lang69.get("items") or []))
+          and _men_lang69.get("limits", {}).get("file") == _ai69b.AT_FILE_MAX_CHARS
+          and _men_lang69.get("limits", {}).get("session")
+          == _ai69b.AT_SESSION_MAX_CHARS,
+          _men_lang69.get("limits"))
+    check("[69/CAP-04] @lang 候选来自引擎（zh/en/ja 三个都在）",
+          {it["label"] for it in _men_lang69.get("items") or []}
+          == set(_ai69b.LANG_NAMES), _men_lang69.get("items"))
+    check("[69/CAP-04] @file/@folder 的 items 为空（路径取值是外壳的文件系统补全——设计如此）",
+          _men_file69.get("items") == [], _men_file69.get("items"))
+    _refs69 = (((_resp69c.get("19") or {}).get("result") or {}).get("refs") or [])
+    check("[69/CAP-04] ★`@file <路径>` 走 command.exec 后 refs 真的有两条（含截断标记）",
+          len(_refs69) == 2
+          and {r["kind"] for r in _refs69} == {"file"}
+          and any(r["truncated"] for r in _refs69)
+          and all(r["chars"] > 0 and r["target"] for r in _refs69),
+          _refs69)
+    _refs69b = (((_resp69c.get("21") or {}).get("result") or {}).get("refs") or [])
+    check("[69/CAP-04] ★同样的文本走 user.message **不改** refs（所以外壳必须把 `@` 行改走 "
+          "command.exec——卡点名的路由缺口）",
+          len(_refs69b) == len(_refs69), (len(_refs69), len(_refs69b)))
+
+    # —— CAP-06 MCP：配了就逐字段，没配就说"未配置"（不许沿用上游空态说谎）——
+    _mcp69 = (_resp69c.get("25") or {}).get("result") or {}
+    check("[69/CAP-06] mcp.request：configured=false 时 servers == []（显示「未配置」而非空态）",
+          _mcp69.get("configured") is False and _mcp69.get("servers") == []
+          and "error" in _mcp69, _mcp69)
+    _src69c = (FOLDER / "ai_code.py").read_text(encoding="utf-8")
+    check("[69/CAP-06] 源码级：mcp.request 的每一行都来自 `el.mcp.status()`（不另造一份状态）",
+          "mgr.status()" in _src69c
+          and '"tool_names"' in _src69c and '"configured"' in _src69c, "")
+
+    # —— CAP-07b 队列/暂存：段由引擎发（外壳只画）——
+    # 直接问那份"底栏分段"的生产者：排了队/存了草稿之后，段名里必须真的多出 queue/stash。
+    _cli69d = _ai69b.AgentCLI({"project_root": str(mktemp("q69d")), "permission": "readonly",
+                               "bait": False, "base_url": "", "api_key": "", "model": "m1"},
+                              mock=True)
+    _names69d = {s.name for s in _cli69d._status_segments()}
+    _cli69d._queued = ["排一条"]
+    _cli69d._stash = ["存一条"]
+    _names69d2 = {s.name for s in _cli69d._status_segments()}
+    check("[69/CAP-07b] ★queue/stash 段真的随排队出现（数字来自引擎，外壳不自己造）",
+          "queue" not in _names69d and "stash" not in _names69d
+          and {"queue", "stash"} <= _names69d2, (sorted(_names69d), sorted(_names69d2)))
 
     # —— 字形降级表：**只有引擎知道控制台编码**，所以必须由它下发 ——
     #

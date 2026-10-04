@@ -15,7 +15,7 @@
 | `model_request` | `round` `messages_count` `system_len` | 每次模型请求的 envelope |
 | `tool_start` | `tool` | 工具**即将**执行（另有 `target` 可选；见下方"两个时刻"） |
 | `tool_call` | `tool` `params` | 工具执行**之后**的审计记录 |
-| `tool_result` | `tool` `status` `elapsed` `message` | 工具结果（`data` 可能很大）；**`outcome` = 机器通道的闭集**（`denied`/`failed`/`deferred`…，见 `tools.status.OUTCOMES`）—— "被拒"与"失败"由此分开，消费者不必解析中文散文 |
+| `tool_result` | `tool` `status` `elapsed` `message` | 工具结果（`data` 可能很大）；**`outcome` = 机器通道的闭集**（`denied`/`failed`/`deferred`…，见 `tools.status.OUTCOMES`）—— "被拒"与"失败"由此分开，消费者不必解析中文散文；**`refusal_class` + `retryable`** = RL-02 的拒绝六分类与"该不该重试"（同 `tools.status` 的唯一判定处）—— 没有它们，外壳只能把 denied 一律画成"失败" |
 | `permission_request` | `tool` `reason` | 需要审批（非交互下随后会被拒） |
 | `choice_request` | `kind` `title` | 需要用户做一次选择（`kind` = choose / confirm / text）；**`secret: true` = 凭据输入，外壳不许回显**（H-33） |
 | `notice` | `text` | 人看的输出被转成事件（这样"人话"也不会丢） |

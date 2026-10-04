@@ -83,7 +83,10 @@ from core import ace_styles  # noqa: E402  （输出风格预设：提示词 + �
 from core import ace_effort  # noqa: E402  （思考强度：档位 + 提示词增量，纯逻辑）
 from core import ace_prefix  # noqa: E402  （WP-3：前缀指纹/归因/drift + 工具面预算，纯逻辑）
 from core import ace_rules  # noqa: E402  （持久授权规则：查/增/删与作用域）
-from tools.status import outcome_for  # noqa: E402  （RL-01：拒绝 vs 失败的唯一判定处）
+# RL-01/RL-02：`outcome`（拒绝 vs 失败）与 `refusal_class`（拒绝六分类）+ `retryable`
+# 三者的**唯一判定处**都在 `tools/status.py` —— 这里只取结果往外发，不自己判一遍。
+from tools.status import (classify_refusal,  # noqa: E402
+                          outcome_for, retryable_for)
 from tools.skill_tools import (discover_skill_roots,  # noqa: E402
                                get_skill_loader, render_skill_content)
 # WP-7：技能 = 广告面（只有 name+description）+ 正文（按需）。扫描器/包封在 tools/skill_tools。
@@ -460,7 +463,10 @@ ARG_COMMANDS = {"/search", "/open", "/edit", "/model", "/provider",
 # 而用户看到的是"界面坏了"。Python 侧一直有这套降级（`ace_io.glyph`），
 # 前端漏接了。
 FRONTEND_GLYPHS = (
-    "❯◈▏▌▐▶✓✗◐◓◑◒◉○●◇◆▁▃▅▇▖▘▝▗·˙•…⚠"
+    # ``（StatusIcon 的 loading / LoadingState 默认图标）与 `ℹ`（info）是前一路审计时
+    # 发现的漏项：`ASCII_FALLBACK` 里一直有 `o`/`i`，只是没进这张"发给前端"的表 ⇒
+    # cp936 上这两处在实机是 `?`，而测试全绿（守卫只扫 Python 侧会画的字形）。
+    "❯◈▏▌▐▶✓✗◐◓◑◒◉○●◇◆▁▃▅▇▖▘▝▗·˙•…⚠◌ℹ"
     "╭╮╰╯─│├└"      # 框线与树形连接线（多数控制台画得出，但别赌）
     "█╗╔╝╚═║"      # 首屏 logo 的块状字符
 )
@@ -473,6 +479,11 @@ AT_SESSION_LIST_LIMIT = 20
 # （大量是来回对话），4000 字符在会话里可能只有两三轮。
 # 超了就取**尾部**并说明截断 —— 会话的价值主要在近几轮。
 AT_SESSION_MAX_CHARS = 6000
+# `@file` 单次引用上限与 `@folder` 的条目上限。这两个数此前是 `_at_file` / `_at_folder`
+# 里的**字面量**；`mentions.request` 要把它们当"边界"发给外壳（§3.5 的 `limits`），
+# 于是必须先有个名字 —— 否则协议层只能再抄一份数字，而那正是会漂的第二份。
+AT_FILE_MAX_CHARS = 4000
+AT_FOLDER_MAX_ITEMS = 30
 # WP-7：一个技能正文最多往上下文里塞多少字符（超了就**说一声**再截断）。
 # 技能正文可以长到 64KB（tools/skill_tools 的上限），而它是进**系统提示词**的 ——
 # 不设上限就等于让一次 `/skill:` 把窗口吃掉一半。8000 ≈ 一次中等长度的规程。
@@ -1550,10 +1561,12 @@ class _AtCommands:
         except Exception as e:
             print(c("red", t("at_read_failed", err=e)))
             return
-        if len(content) > 4000:
-            content = content[:4000] + "\n…(已截断)"
-        self.context_refs.append(f"{p}\n{content}")
-        self.context_refs = self.context_refs[-3:]
+        # 截断与否**在截断之前**记下来：截断后的正文长度已经不能反推这件事
+        # （多出来的那 7 个字符正是截断标记本身）。芯片行上"已截断"要看得见。
+        _trunc = len(content) > AT_FILE_MAX_CHARS
+        if _trunc:
+            content = content[:AT_FILE_MAX_CHARS] + "\n…(已截断)"
+        self._add_context_ref("file", str(p), f"{p}\n{content}", truncated=_trunc)
         self._note_prefix_change(ace_prefix.FIELD_SYSTEM, f"@file 注入 {p}（已引用上下文段）",
                                  detail=f"chars={len(content)}")
         print(c("green", t("at_file_added", path=p, n=len(content))))
@@ -1644,8 +1657,8 @@ class _AtCommands:
         # 块首自带**出处**：`wrap_untrusted` 那句 source 是粗标签，
         # 模型要判断"这段是什么"靠的是块内这一行。
         _header = t("at_session_header", when=_when, label=_label)
-        self.context_refs.append(f"{_header}\n{_body}")
-        self.context_refs = self.context_refs[-3:]
+        self._add_context_ref("session", _label or _header, f"{_header}\n{_body}",
+                              truncated=bool(_dropped))
         self._note_prefix_change(ace_prefix.FIELD_SYSTEM, "@session 注入会话片段（已引用上下文段）",
                                  detail=_label[:80])
         print(c("green", t("at_session_added", n=len(_msgs), label=_label[:40])))
@@ -1665,10 +1678,11 @@ class _AtCommands:
         except Exception as e:
             print(c("red", t("at_read_failed", err=e)))
             return
-        if len(items) > 30:
-            items = items[:30] + ["…(更多)"]
-        self.context_refs.append(f"{p}\n" + "\n".join(items))
-        self.context_refs = self.context_refs[-3:]
+        _trunc_dir = len(items) > AT_FOLDER_MAX_ITEMS
+        if _trunc_dir:
+            items = items[:AT_FOLDER_MAX_ITEMS] + ["…(更多)"]
+        self._add_context_ref("folder", str(p), f"{p}\n" + "\n".join(items),
+                              truncated=_trunc_dir)
         self._note_prefix_change(ace_prefix.FIELD_SYSTEM, f"@folder 注入 {p}（已引用上下文段）",
                                  detail=f"items={len(items)}")
         print(c("green", t("at_folder_added", path=p, n=len(items))))
@@ -1694,6 +1708,33 @@ class _AtCommands:
         print(c("green", t("at_image_added", n=len(self._pending_images),
                            name=Path(path).name)))
         print(c("dim", t("at_image_notice")))
+
+    def _add_context_ref(self, kind: str, target: str, text: str,
+                         truncated: bool = False) -> None:
+        """登记一条 `@` 引用（`@file` / `@folder` / `@session` 三处**唯一**的入口）。
+
+        为什么要多一个台账：芯片行（`mentions.request.refs`）要回答"引用了什么、多长、
+        有没有被截断"，而 `context_refs` 里存的是**给模型看的整段正文**（首行是标题、
+        其余是内容）—— 从它反推 kind 只能去解析那行 i18n 文案，而那正是
+        `CAP-NG1` 点名禁止的"解析自然语言造结构"。截断尤其反推不出来：正文里没有标记。
+        所以这三件事在**产出它的那一刻**记下来。
+
+        两张表一起截到最近 3 条（原来是各个调用点各写一遍 `[-3:]`）—— 口径只此一处，
+        免得哪天只截了一张、两张表长度对不上。
+        """
+        self.context_refs.append(text)
+        self.context_refs = self.context_refs[-3:]
+        self._ref_meta.append({"kind": str(kind), "target": str(target),
+                               "chars": len(str(text)),
+                               "truncated": bool(truncated)})
+        # 懒对齐：`context_refs` 会被 `@clear` / 开新会话直接清掉，而这里不去改那些
+        # 清空点（它们不认识台账，改了就是两处耦合）。取尾部对齐，长度永远一致。
+        self._ref_meta = self._ref_meta[-len(self.context_refs):]
+
+    def _context_ref_rows(self) -> List[Dict[str, object]]:
+        """已引用上下文 → 芯片行的数据行（与 `context_refs` 逐条对齐、同序）。"""
+        rows = self._ref_meta[-len(self.context_refs):] if self.context_refs else []
+        return [dict(r) for r in rows]
 
     def _at_refs(self) -> None:
         if not self.context_refs:
@@ -2415,7 +2456,7 @@ class _SlashCommands:
         print(t("mcp_title", n=len(rows)))
         for r in rows:
             mark, color = ("✓", "green") if r["status"] == "就绪" else (
-                ("◌", "dim") if r["status"] == "已禁用" else ("✗", "red"))
+                ("", "dim") if r["status"] == "已禁用" else ("✗", "red"))
             print(f"  {c(color, mark)} {c('bold', r['name'])}  "
                   f"{r['status']}  {t('mcp_tools_count', n=r['tools'])}")
             print(c("dim", f"      $ {r['command']}"))
@@ -3458,13 +3499,12 @@ class _SlashCommands:
                        tout=_usage.get("out_tokens", 0)))
         print(c("dim", t("audit_file", path=str(p))))
 
-    def _show_audit_boundary(self) -> None:
-        """`/audit boundary`：本会话的**执行边界证据链** —— 一张可核验的"我被什么约束了"自证。
+    def _audit_boundary_data(self) -> Dict[str, object]:
+        """`/audit boundary` 的**数据**形态（打印与 `audit.request` 共用这一份聚合）。
 
-        与 `/audit`（逐事件回放）和 `/audit stats`（日志元信息）的分工：这个回答的是
-        **边界证据**。它不是新数据，是同一份 HMAC 链式台账（`cli/ace_sessionlog.py`）的
-        聚合视图：权限裁决 / 安全拦截 / 守卫 / 快照各命中几次，整链是否可核验 ——
-        这就是"执行边界证据链"（复用现成 HMAC + 台账，往上长一层）。
+        为什么先取数据再打印：协议侧（`audit.request{section:"boundary"}`）要的是同一份
+        边界证据。让两边各数一遍，迟早出现"屏上 3 次拦截、协议里 4 次"—— 而这份东西的
+        全部价值就是"可核验"。聚合只此一处，打印只是它的一种读法。
         """
         from collections import Counter
         from cli.ace_sessionlog import chain_notice
@@ -3484,16 +3524,38 @@ class _SlashCommands:
             elif kind in ("snapshot/create", "snapshot/rollback", "snapshot/unavailable"):
                 hits[kind] += 1
         n_calls = sum(1 for e in events if e.get("kind") == "tool/call")
+        _chain, _chain_why = self.session_log.verify_chain()
+        return {
+            "file": self.session_log.path.name,
+            # 整链体检**三态**都要发（`ok`/`broken`/`unverifiable`）：把"验不了"混进
+            # "验过没问题"正是这类机制最常见的失效方式（见 `chain_notice` 的 docstring）。
+            "chain": {"status": str(_chain), "detail": str(_chain_why)},
+            "chain_notice": chain_notice(self.session_log),
+            "calls": n_calls,
+            "tally": dict(sorted(hits.items())),
+            "denies": [{"seq": s, "tool": str(tl), "reason": str(rs)[:200]}
+                       for s, tl, rs in denies],
+        }
 
-        print(c("bold", t("audit_boundary_title", file=self.session_log.path.name)))
-        print("  " + chain_notice(self.session_log))
-        print("  " + t("audit_boundary_calls", n=n_calls))
+    def _show_audit_boundary(self) -> None:
+        """`/audit boundary`：本会话的**执行边界证据链** —— 一张可核验的"我被什么约束了"自证。
+
+        与 `/audit`（逐事件回放）和 `/audit stats`（日志元信息）的分工：这个回答的是
+        **边界证据**。它不是新数据，是同一份 HMAC 链式台账（`cli/ace_sessionlog.py`）的
+        聚合视图：权限裁决 / 安全拦截 / 守卫 / 快照各命中几次，整链是否可核验 ——
+        这就是"执行边界证据链"（复用现成 HMAC + 台账，往上长一层）。
+        """
+        d = self._audit_boundary_data()
+        hits = d["tally"] or {}
+        print(c("bold", t("audit_boundary_title", file=d["file"])))
+        print("  " + str(d["chain_notice"]))
+        print("  " + t("audit_boundary_calls", n=d["calls"]))
         tally = "  ".join(f"{k}={v}" for k, v in sorted(hits.items())) or "—"
         print("  " + t("audit_boundary_tally") + " " + tally)
-        if denies:
-            print(c("yellow", t("audit_boundary_denies", n=len(denies))))
-            for seq, tool, reason in denies:
-                print(f"    #{seq} {tool}: {str(reason)[:72]}")
+        if d["denies"]:
+            print(c("yellow", t("audit_boundary_denies", n=len(d["denies"]))))
+            for _row in d["denies"]:
+                print(f"    #{_row['seq']} {_row['tool']}: {str(_row['reason'])[:72]}")
 
     @staticmethod
     def _audit_summary(kind: str, ev: Dict) -> str:
@@ -4319,6 +4381,9 @@ class AgentCLI(_AtCommands, _SlashCommands, _LandingUI):
         # 非 git 仓库/无 git 的如实声明（HL-03②）：一次会话只声明一次，不刷屏。
         self._autocommit_note = ""
         self.context_refs: List[str] = []
+        # `@` 引用的台账（kind/target/chars/truncated），与 `context_refs` 逐条对齐。
+        # 芯片行（`mentions.request.refs`）读它 —— 详见 `_add_context_ref` 的 docstring。
+        self._ref_meta: List[Dict[str, object]] = []
         # 自定义斜杠命令（.ace/commands/*.md + 插件提供的）：{名字: CustomCommand}
         self.custom_commands: Dict[str, Any] = {}
         self._load_custom_commands()
@@ -5512,18 +5577,39 @@ class AgentCLI(_AtCommands, _SlashCommands, _LandingUI):
                 info = _sess.summarize(evs)
             except Exception:      # noqa: BLE001 —— 坏文件跳过，不让主页崩
                 continue
+            # `bytes` / `mtime_iso` 与下面那句 `when` 共用**同一次** `stat()`：
+            # 会话浏览器（`sessions.request`，§3.7a）要的这两个字段今天就算得出来，
+            # 只是此前没往外发；多调一次 stat 只会多一个"两次之间文件变了"的窗口。
+            try:
+                _st = path.stat() if path.exists() else None
+            except OSError:      # noqa: BLE001 —— 文件刚被删/被占用：如实留空，不编数字
+                _st = None
             rows.append({
                 "path": str(path),
+                # **稳定身份 = 会话文件名主干**：`path` 随项目根变（换目录打开同一段会话，
+                # 路径就变了），当不了身份。单源 = `_session_files()` 的文件名。
+                "id": str(path.stem),
                 # 这里原来读的是 `summarize` 的 `when` / `first` —— **那两个键它从来不产出**
                 # （它给的是 `first_user` / `last_assistant` / `turns` / `root` / `project`）。
                 # 后果是主页「继续上次」那行的**时间和首句一直是空的**，而且不报错。
                 # 改成与 `/sessions` 同一套口径：时间取文件 mtime，首句用 `label()`（带文件名兜底）。
-                "when": ace_panel.format_when(path.stat().st_mtime, time.time())
-                        if path.exists() else "",
+                "when": ace_panel.format_when(_st.st_mtime, time.time())
+                        if _st is not None else "",
                 "turns": int(info.get("turns") or 0),
                 "project": str(info.get("project") or ""),
                 "root": str(info.get("root") or ""),
                 "label": str(_sess.label(evs, path.stem))[:60],
+                # `summarize()` 早就算出来的四个数：`/sessions` 的打印路径今天在读它们，
+                # 会话浏览器此前读不到 —— 同一份摘要喂两个消费者，不许各算一份。
+                "bytes": int(_st.st_size) if _st is not None else 0,
+                "mtime_iso": (time.strftime("%Y-%m-%dT%H:%M:%S",
+                                           time.localtime(_st.st_mtime))
+                              if _st is not None else ""),
+                "tools": int(info.get("tools") or 0),
+                "compactions": int(info.get("compactions") or 0),
+                "security_denied": int(info.get("security_denied") or 0),
+                "first_user": str(info.get("first_user") or "")[:200],
+                "has_prompt": bool(str(info.get("first_user") or "").strip()),
             })
         return rows
 
@@ -7806,9 +7892,17 @@ class AgentCLI(_AtCommands, _SlashCommands, _LandingUI):
                     # `outcome` = RL-01 的**机器通道**：外壳与驱动层据此区分
                     # "被拒（此路不通）"与"失败（该升级了）"，不必去解析中文散文。
                     # 推导只在 `tools.status.outcome_for` 一处（此处按外发词表算）。
+                    #
+                    # `refusal_class` + `retryable`（RL-02，本卡 CAP-03）：没有分类，外壳只能
+                    # 把 denied 一律画成"失败"，用户看到的是"工具坏了"而不是"这里过不去"。
+                    # 字段名用 `refusal_class` 不用 `class`（后者是 Python 关键字）。
+                    # **零新逻辑**：两个值都取自 `tools/status` 那张唯一判定表。
+                    _cls80 = classify_refusal(str(_st),
+                                              str(result.get("error_code") or ""))
                     self.events.emit(
                         "tool_result", tool=result.get("tool", ""), status=_st,
                         outcome=outcome_for(str(_st), str(result.get("error_code") or "")),
+                        refusal_class=_cls80, retryable=retryable_for(_cls80),
                         elapsed=round(_elapsed_f, 3), exit_code=_exit_code,
                         message=str(result.get("message") or "")[:500],
                         data=result.get("data") if _st == "SUCCESS" else None)
@@ -8588,6 +8682,77 @@ SERVE_METHODS: Tuple[str, ...] = (
     "tasks.request",
     "config.request",
     "sessions.request",  # ← 本次 bug 漏报的就是它
+    # ↓ 会话三件套 + CAP-01/02/03/04/06 的新协议面（`docs/design/DshShell-AceCapabilities.md` §3）
+    "sessiontree.request",
+    "settings.request",
+    "snapshots.request",
+    "rules.request",
+    "audit.request",
+    "mentions.request",
+    "mcp.request",
+)
+
+
+# ============================================================
+# `settings.request` 的键表（CAP-03 §3.7c）
+# ============================================================
+# 为什么要在 Python 侧**声明**一遍：设置面板要回答"有哪些键、什么类型、当前值、
+# 改它要发哪条命令"。这套信息今天散在 `self.cfg.get(...)`（实测 195 处）与
+# `_config_steps()` 的向导里 —— 前端读不到，只能自己抄一份，那就是第二个会漂的地方。
+#
+# **写通道不新增方法**（NG4）：每个 item 带 `write_cmd` 模板，面板把人点的值填进去发
+# `command.exec`。没有对应斜杠命令的键标 `write_cmd: ""` + `hot: false`（界面据此显示
+# "此项需在 /config 向导里改"，**不许静默吞掉点击**）。
+#
+# `enum` **不在这里手抄**：一律引用 `ui/ace_menu.ARGUMENT_HINTS`（与 `config.request`
+# 的 `option_sets` 同一单源）。`current` 一律取 `home_state()` / `cfg`，不另算。
+#
+# 字段：`key`（配置键名，也是发给外壳的身份）、`type`（enum/str/bool）、`scope`
+# （global/session）、`label_key`（i18n 键，不发译文）、`write_cmd`（"{value}" 占位）、
+# `hot`（改完是否当场生效）、`secret`（**不回传 current**，只回 `set`）、`default`。
+_SETTINGS_SECTIONS: Tuple[Dict[str, Any], ...] = (
+    {"id": "security", "label_key": "set_sec", "items": (
+        {"key": "permission", "type": "enum", "scope": "global",
+         "label_key": "set_permission", "hints": "/permission", "hot": True,
+         "default": "readonly"},
+        {"key": "sandbox", "type": "enum", "scope": "global",
+         "label_key": "set_sandbox", "hints": "/sandbox", "hot": True,
+         "default": "off"},
+        {"key": "net", "type": "enum", "scope": "global",
+         "label_key": "set_net", "hints": "/net", "hot": True, "default": "on"},
+        # 凭据：`secret: True` ⇒ **不发 `current`**（H-33 / CREDENTIAL-HANDLING.md 的
+        # 回显边界）。只回一个 `set` 布尔回答"配过没有"。写通道是 `/config` 向导
+        # （它带 hidden 输入，凭据不回显到终端）。
+        {"key": "api_key", "type": "str", "scope": "global",
+         "label_key": "set_api_key", "write_cmd": "/config", "hot": True,
+         "secret": True, "default": ""},
+    )},
+    {"id": "model", "label_key": "set_model_sec", "items": (
+        {"key": "model", "type": "str", "scope": "global",
+         "label_key": "set_model", "write_cmd": "/model {value}", "hot": True,
+         "default": ""},
+        {"key": "effort", "type": "enum", "scope": "global",
+         "label_key": "set_effort", "hints": "/effort", "hot": True,
+         "default": "auto"},
+        {"key": "mock", "type": "enum", "scope": "session",
+         "label_key": "set_mock", "hints": "/mock", "hot": True,
+         "default": "off"},
+    )},
+    {"id": "interface", "label_key": "set_ui", "items": (
+        {"key": "lang", "type": "enum", "scope": "global",
+         "label_key": "set_lang", "hints": "/lang", "hot": True, "default": "zh"},
+        {"key": "vim", "type": "bool", "scope": "global",
+         "label_key": "set_vim", "hints": "/vim", "hot": True, "default": "off"},
+        {"key": "fullscreen", "type": "bool", "scope": "session",
+         "label_key": "set_fullscreen", "hints": "/fullscreen", "hot": True,
+         "default": "off"},
+        # **已知上限的实例**：`/expandall` 是**开关**（不接受取值），所以没有"填值即改"的
+        # 命令可指。如实标 `write_cmd: ""` + `hot: false`，界面显示"此项需在 /config 向导里改"——
+        # 静默吞掉这次点击比不可点更坏（用户以为改了）。
+        {"key": "expandall", "type": "bool", "scope": "session",
+         "label_key": "set_expandall", "write_cmd": "", "hot": False,
+         "default": "off"},
+    )},
 )
 
 #: 属于协议、但**不注册**进 `_handlers` 的方法。它们仍要出现在握手清单里
@@ -8614,6 +8779,32 @@ def serve_handshake_methods(registered: Iterable[str]) -> List[str]:
     """
     return ([m for m in registered if m not in SERVE_HANDSHAKE_EXCLUDED]
             + list(SERVE_UNREGISTERED_METHODS))
+
+
+def _option_set(command: str) -> List[List[str]]:
+    """某条命令的参数闭集 → `[[值, i18n键], ...]`。
+
+    **只认 `ui/ace_menu.ARGUMENT_HINTS` 这一处**（CAP-02：闭集不许在新壳或协议层手抄
+    第二份 —— 今天它只活在补全菜单里，那正是"用户不知道自己有没有边界"的根因）。
+    发 `(值, 键)` 对而**不发译文**：与 `initialize.commands` 同一口径（切语言时外壳
+    自己重渲，不跟着握手那一瞬的语言钉死）。
+    """
+    return [[str(v), str(k)] for v, k in ace_menu.ARGUMENT_HINTS.get(str(command), ())]
+
+
+def _snapshot_precise(guardian: Any, snap_id: str) -> bool:
+    """这次快照有没有**精确的目标集**（H-08 的 `rollback_scope`）。
+
+    判据与 `core/guardian.rollback` 读的是**同一个键**：`paths` 才是精确（那一轮动过
+    哪些路径说得清），`tree`/缺键都是整树还原。读不到一律按 `False`（= "仅尽力"）——
+    把说不清的回滚显示成"已精确回滚"，正是本卡要修的那个"看起来成功其实没回滚"。
+    """
+    try:
+        meta = json.loads((Path(guardian.snap_dir) / str(snap_id) / "meta.json")
+                          .read_text(encoding="utf-8"))
+        return str(meta.get("rollback_scope") or "") == "paths"
+    except Exception:      # noqa: BLE001 —— 读不到 = 说不清，保守取"仅尽力"
+        return False
 
 
 def _run_serve(cli: "AgentCLI", srv) -> int:
@@ -8797,10 +8988,17 @@ def _run_serve(cli: "AgentCLI", srv) -> int:
         # `/fullscreen` 改的也是引擎的 cfg，而**备用屏是外壳的事**（谁能进 1049 只有它知道）。
         # 不把这个字段发出去，用户敲 `/fullscreen on` 就是空转 —— 实测投诉过。
         st["fullscreen"] = bool(cli.cfg.get("fullscreen", False))
+        # 档位**闭集**（CAP-02 §3.2）：状态行上能直接切档的前提，是外壳知道"有哪些档"。
+        # 来源只有 `ui/ace_menu.ARGUMENT_HINTS` 一处（经 `_option_set`），不手抄第二份 ——
+        # 手抄的那份会在加档时静默过期，而这正是"用户不知道自己有没有边界"的根因。
+        st["option_sets"] = {"sandbox": _option_set("/sandbox"),
+                             "net": _option_set("/net"),
+                             "permission": _option_set("/permission"),
+                             "effort": _option_set("/effort")}
         return st
 
-    def _h_sessions(_params: Dict) -> Dict:
-        """可引用的历史会话列表（`@session` 菜单的候选）。
+    def _h_sessions(params: Dict) -> Dict:
+        """会话浏览器（`@session` 菜单的候选 + 会话三件套的数据源）。
 
         **复用 `_sessions_brief`** —— 主页「继续上次」、`/sessions`、`@session`
         和这里的菜单候选，全部是同一份摘要。四份各自去读盘、各自算，迟早会出现
@@ -8808,16 +9006,352 @@ def _run_serve(cli: "AgentCLI", srv) -> int:
 
         调用方是补全菜单：**每次按键都会问一次**，所以这里只做读取、不做任何
         解析或格式化（格式化留给定稿的文案层）。
+
+        字段（§3.7a）：`id/path/when/turns/label/project/root/bytes/mtime_iso/tools/
+        compactions/security_denied/first_user/has_prompt` —— 全部来自上面那一份摘要，
+        这里一个数都不新算。**不发**外壳 `SessionSummary` 里那些 ace 没有生产者的字段
+        （`kind`/`createdAt`/`agentPreset`/`branch`/`childCount`）：无源就如实不出现，
+        塞 `undefined` 假装有比空着更坏（口径 3）。
         """
         try:
-            rows = cli._sessions_brief(limit=AT_SESSION_LIST_LIMIT)
+            limit = int(params.get("limit") or AT_SESSION_LIST_LIMIT)
+        except (TypeError, ValueError):
+            limit = AT_SESSION_LIST_LIMIT
+        limit = max(1, min(limit, AT_SESSION_LIST_LIMIT))
+        try:
+            rows = cli._sessions_brief(limit=limit)
         except Exception:      # noqa: BLE001 —— 读不到就给空列表，不让菜单崩
             rows = []
-        return {"sessions": [{"path": str(r.get("path") or ""),
+        try:
+            total = len(cli._session_files())
+        except Exception:      # noqa: BLE001
+            total = len(rows)
+        return {"sessions": [{"id": str(r.get("id") or ""),
+                              "path": str(r.get("path") or ""),
                               "when": str(r.get("when") or ""),
                               "turns": int(r.get("turns") or 0),
-                              "label": str(r.get("label") or "")}
-                             for r in rows]}
+                              "label": str(r.get("label") or ""),
+                              "project": str(r.get("project") or ""),
+                              "root": str(r.get("root") or ""),
+                              "bytes": int(r.get("bytes") or 0),
+                              "mtime_iso": str(r.get("mtime_iso") or ""),
+                              "tools": int(r.get("tools") or 0),
+                              "compactions": int(r.get("compactions") or 0),
+                              "security_denied": int(r.get("security_denied") or 0),
+                              "first_user": str(r.get("first_user") or ""),
+                              "has_prompt": bool(r.get("has_prompt"))}
+                             for r in rows],
+                "total": total, "limit": limit}
+
+    # ---------- 新协议面（CAP-01/02/03/04/06 + 会话三件套） ----------
+    # 三条贯穿全部新增方法的纪律（卡 §3）：
+    #   ① **全部只读**；所有动作一律复用 `command.exec`（NG4：少一条写方法就少一条会漂的路）；
+    #   ② **零新逻辑**：每个字段的唯一生产者在既有引擎里，这里只做搬运与形状转换
+    #      （"各算各的必然会漂"—— `home_state()` 的 docstring）；
+    #   ③ 没有数据源的字段如实留空/关闭，**不许**造空实现顶类型（口径 3 / HL-03②）。
+
+    def _settings_payload() -> Dict:
+        """`settings.request` 的数据（`_SETTINGS_SECTIONS` + 当前值）。
+
+        `current` 取 `home_state()`（"现在是什么状态"的唯一来源）；`enum` 取
+        `ARGUMENT_HINTS`；`write_cmd` 是从 item 的 `hints`/`write_cmd` 派生的**模板**，
+        外壳把人点的值填进 `{value}` 再发 `command.exec` —— 协议里**没有写方法**。
+        `secret: true` 的项**只回 `set`**、不回 `current`（凭据回显边界）。
+        """
+        st = cli.home_state()
+        cur = {
+            "permission": str(st.get("permission") or ""),
+            "sandbox": str(st.get("sandbox") or "off"),
+            "net": "on" if st.get("net") else "off",
+            "model": str(st.get("model") or ""),
+            "effort": str(st.get("effort") or ""),
+            "lang": str(st.get("lang") or "zh"),
+            "vim": "on" if cli.cfg.get("vim_mode") else "off",
+            "fullscreen": "on" if cli.cfg.get("fullscreen") else "off",
+            "expandall": "on" if cli.cfg.get("expand_all") else "off",
+            "mock": "on" if cli.client.mock else "off",
+        }
+        sections: List[Dict[str, Any]] = []
+        for sec in _SETTINGS_SECTIONS:
+            items: List[Dict[str, Any]] = []
+            for spec in sec["items"]:
+                key = str(spec["key"])
+                hints = str(spec.get("hints") or "")
+                item: Dict[str, Any] = {
+                    "key": key,
+                    "type": str(spec["type"]),
+                    "scope": str(spec["scope"]),
+                    "label_key": str(spec["label_key"]),
+                    "hot": bool(spec.get("hot")),
+                    "default": str(spec.get("default") or ""),
+                    "secret": bool(spec.get("secret")),
+                    "enum": _option_set(hints) if hints else [],
+                    # 有 `hints` 的项由闭集那条命令派生模板（值与键都在 `enum` 里）；
+                    # 其余用表里写死的模板；两者都没有 = 空串（界面据此显示"改不了"）。
+                    "write_cmd": (f"{hints} {{value}}" if hints
+                                  else str(spec.get("write_cmd") or "")),
+                }
+                if spec.get("secret"):
+                    # **不回传明文**：只回答"配过没有"。没有 `current` 键 ——
+                    # 这是"只读通道不许把凭据漏出去"的判据（H-33）。
+                    item["set"] = bool(cli.cfg.get(key))
+                else:
+                    item["current"] = str(cur.get(key) or "")
+                items.append(item)
+            sections.append({"id": str(sec["id"]),
+                             "label_key": str(sec["label_key"]),
+                             "items": items})
+        return {"sections": sections}
+
+    def _h_settings(params: Dict) -> Dict:
+        """设置面板的数据源（§3.7c）。只读；写通道 = 每个 item 的 `write_cmd`。"""
+        payload = _settings_payload()
+        want = str(params.get("section") or "").strip()
+        if want:      # 只发被点名的那一节（面板可以只取一节，省一次全量组装）
+            payload["sections"] = [s for s in payload["sections"] if s["id"] == want]
+        return payload
+
+    def _h_snapshots(params: Dict) -> Dict:
+        """快照清单（CAP-01 §3.1）。唯一生产者 = `guardian.list_snapshots()`。
+
+        `enabled=false`（guardian 关掉）时外壳显示"快照未启用"，**不是**空列表 ——
+        "没有快照"与"这个功能关着"是两件不同的事，混起来用户会去查为什么没有快照。
+        `precise` = 这次快照有没有精确的目标集；不精确时外壳必须显示"仅尽力"。
+        """
+        g = getattr(cli.el, "guardian", None)
+        try:
+            limit = int(params.get("limit") or 20)
+        except (TypeError, ValueError):
+            limit = 20
+        limit = max(1, min(limit, 200))
+        rows: List[Dict] = []
+        if g is not None:
+            try:
+                rows = list(g.list_snapshots())
+            except Exception:      # noqa: BLE001 —— 读不到就如实空（配合 enabled 说话）
+                rows = []
+        return {"snapshots": [{"id": str(r.get("id") or ""),
+                               "tag": str(r.get("tag") or ""),
+                               "created_iso": str(r.get("created_iso") or ""),
+                               "file_count": int(r.get("file_count") or 0),
+                               "precise": _snapshot_precise(g, str(r.get("id") or ""))}
+                              # `list_snapshots()` 按目录名升序 = 时间升序，"最近 N 条"取尾部。
+                              for r in rows[-limit:]],
+                "total": len(rows), "limit": limit, "enabled": g is not None}
+
+    def _h_sessiontree(params: Dict) -> Dict:
+        """会话树（§3.7b）。数据源 = `cli/ace_sessionlog` 的 WP-5 entry 树。
+
+        **不是没有数据源，是没接出去**：`/tree` 今天就在用 `message_chain` /
+        `branch_tips` / `active_head` 渲染文本。这里只是把同一份结构发出去。
+        切分支**不新增方法**：复用 `command.exec{line:"/tree <编号>"}`，之后重取本方法
+        （"有回报，不是盲发命令"）。
+
+        `parent_session` 恒为 `""`：跨文件 fork/clone 的父子关系只在内存里
+        （`_resumed_from`，没落日志）—— 无生产者就如实空，不许编。
+        """
+        from cli.ace_sessionlog import active_head, branch_tips, message_chain
+
+        want = str(params.get("path") or "").strip()
+        if want:
+            path = Path(want)
+            evs = cli._load_session_events(path)
+            sid = path.stem
+        else:
+            log = getattr(cli, "session_log", None)
+            evs = list(log.events()) if log is not None else []
+            sid = log.path.stem if log is not None else ""
+        _preview_on = bool(params.get("preview", True))
+        chain = message_chain(evs)
+        tips = [int(t.get("seq") or 0) for t in branch_tips(evs)]
+        head = int(active_head(evs))
+        # 轮次归属：用户消息的出现次序就是轮号（与 `ace_sessions.turn_count` 同一口径）。
+        # 一条用户消息之后的助手/工具条目都算在**这一轮**里。
+        turn_of: Dict[int, int] = {}
+        _n = 0
+        for seq, ev, _p in chain:
+            if str(ev.get("kind") or "") == "user/message":
+                _n += 1
+            turn_of[int(seq)] = _n
+        nodes = []
+        for seq, ev, parent in chain:
+            _seq = int(seq)
+            nodes.append({
+                "seq": _seq, "kind": str(ev.get("kind") or ""),
+                "parent": int(parent), "tip": _seq in tips,
+                "turn": int(turn_of.get(_seq, 0)),
+                "preview": (" ".join(str(ev.get("content") or "").split())[:60]
+                            if _preview_on else ""),
+                "active": _seq == head,
+            })
+        return {"session_id": sid, "nodes": nodes, "active_head": head,
+                "tips": tips, "single": len(tips) <= 1, "parent_session": ""}
+
+    def _h_rules(params: Dict) -> Dict:
+        """持久规则 + 待签字提议（CAP-03 §3.3）。
+
+        唯一生产者：`el.rules`（`core/ace_rules.load_rules` 的产物）与
+        `el.refusal_ledger.proposals`。`shadowed_by` = **遮挡它的那条规则的编号**
+        （1 起，与 `/rules` 列出的编号同一套），没有遮挡就是 `null`。
+        签字动作**不在这里**：复用 `command.exec{line:"/rules accept <n>"}`
+        （人签字必须是人敲命令 —— DL-04 / NG6）。
+        """
+        rules = list(getattr(cli.el, "rules", []) or [])
+        warns = list(getattr(cli, "_rule_warnings", []) or
+                     getattr(cli.el, "rule_warnings", []) or [])
+        scopes = params.get("scopes")
+        want = {str(x) for x in scopes} if isinstance(scopes, (list, tuple)) and scopes \
+            else set()
+        _shadow = {int(i): int(j) for i, j in ace_rules.shadowed_rules(rules)}
+        rows = []
+        for i, r in enumerate(rules):
+            if want and str(r.scope) not in want:
+                continue
+            _by = _shadow.get(i)
+            rows.append({"scope": str(r.scope), "tool": str(r.tool),
+                         "pattern": str(r.pattern), "action": str(r.action),
+                         "source": str(r.source),
+                         "shadowed_by": (int(_by) + 1) if _by is not None else None})
+        props = list(getattr(getattr(cli.el, "refusal_ledger", None),
+                             "proposals", []) or [])
+        pending = []
+        for i, p in enumerate(props, 1):
+            _key = getattr(p, "key", None)
+            _ev = getattr(p, "evidence", None) or {}
+            pending.append({
+                "index": i, "action": str(getattr(p, "action", "")),
+                "tool": str(getattr(p, "tool", "")),
+                "pattern": str(getattr(p, "pattern", "")),
+                "scope": str(getattr(p, "scope", "")),
+                "count": int(getattr(p, "count", 0) or 0),
+                "fingerprint": str(getattr(_key, "fingerprint", "") or "")[:12],
+                "refusal_class": str(getattr(_key, "refusal_class", "") or ""),
+                # 证据是**给机器看的**：JSON 文本（不在这里替人总结，那会引入第二份口径）。
+                "evidence": json.dumps(_ev, ensure_ascii=False, default=str)[:300]
+                            if _ev else "",
+            })
+        return {"rules": rows, "pending": pending,
+                "warnings": [str(w) for w in warns]}
+
+    def _h_audit(params: Dict) -> Dict:
+        """审计（CAP-03 §3.3）：`stats` / `boundary` / 默认最近 N 条事件。
+
+        `stats` **直接复用** `ace_engine.session_meta(path)`（与 `/audit stats` 同源，
+        不另算），`source` 如实标 `ace-engine` / `python`（引擎不在时的降级声明）。
+        `boundary` 复用 `_audit_boundary_data()`（与 `/audit boundary` 同一份聚合）。
+        """
+        from core import ace_engine as _ae  # noqa: PLC0415 —— 只有用到时才 import
+
+        section = str(params.get("section") or "").strip().lower()
+        p = cli.session_log.path
+        if section in ("stats", "meta"):
+            meta = _ae.session_meta(p)
+            _seq = meta.get("seq") or {}
+            _by = meta.get("bytes") or {}
+            return {"section": "stats", "stats": {
+                "events": int(meta.get("events") or 0),
+                "kinds": [{"kind": str(k.get("kind") or ""),
+                           "count": int(k.get("count") or 0)}
+                          for k in (meta.get("kinds") or [])],
+                "tools": [{"tool": str(t.get("tool") or ""),
+                           "calls": int(t.get("calls") or 0),
+                           "errors": int(t.get("errors") or 0)}
+                          for t in (meta.get("tools") or [])],
+                "bytes": {"total": int(_by.get("total") or 0),
+                          "unique": int(_by.get("unique") or 0)},
+                "seq": {"duplicates": list(_seq.get("duplicates") or []),
+                        "gaps": list(_seq.get("gaps") or [])},
+                "bad_json": int(meta.get("bad_json") or 0),
+                "missing_fields": int(meta.get("missing_fields") or 0),
+                # 如实标来源：`ace-engine` = 元处理引擎，`python` = 同口径的降级实现
+                "source": str(meta.get("source") or "python")}}
+        if section in ("boundary", "receipt", "evidence"):
+            return {"section": "boundary", "boundary": cli._audit_boundary_data()}
+        try:
+            n = int(params.get("n") or 20)
+        except (TypeError, ValueError):
+            n = 20
+        n = max(1, min(n, 500))
+        kind = str(params.get("kind") or "")
+        events = list(cli.session_log.events())
+        if kind:
+            events = [e for e in events if kind in str(e.get("kind") or "")]
+        return {"section": "events", "events": events[-n:], "total": len(events),
+                "n": n, "kind": kind, "file": p.name}
+
+    def _h_mentions(params: Dict) -> Dict:
+        """`@` 提及候选 + 已引用上下文 + 各面边界（CAP-04 §3.5）。
+
+        候选**复用 `_menu_state`**（"此刻该弹什么"的唯一判定处，装了 prompt_toolkit
+        与没装共用它）；`@session` 的取值走 `_sessions_brief`（与 `sessions.request`
+        同一份摘要）。`@file`/`@folder` 的**路径取值由外壳自己的文件系统补全产出**
+        （文件系统的事不塞进引擎 —— `_build_ace_completer` 的原话），所以这两类的
+        `items` 为空是**设计如此**，不是缺数据。
+        `limits` 里的数字全部来自既有常量，不发手抄副本。
+        """
+        kind = str(params.get("kind") or "").strip().lstrip("@")
+        query = str(params.get("query") or "")
+        try:
+            limit = int(params.get("limit") or 20)
+        except (TypeError, ValueError):
+            limit = 20
+        limit = max(1, min(limit, 100))
+        items: List[Dict[str, Any]] = []
+        if kind in ("lang", "skill", "session"):
+            if kind == "session":
+                # 取值 = `_sessions_brief`（唯一来源）；`label` 保持**原样**（未加编号与轮数），
+                # 编号进 `insert`（`@session <编号>` 认的是编号），时间/轮数进 `desc`。
+                rows = cli._sessions_brief(limit=AT_SESSION_LIST_LIMIT)
+                vals: List[Any] = [(str(r.get("label") or ""), str(i))
+                                   for i, r in enumerate(rows, 1)]
+                descs = [f"{r.get('when') or ''} · {t('sessions_turns', n=int(r.get('turns') or 0))}"
+                         for r in rows]
+            else:
+                vals = (sorted(LANG_NAMES.keys()) if kind == "lang"
+                        else sorted(SKILLS.keys()))
+                descs = [""] * len(vals)
+            for _mi, _desc in zip(ace_menu.mention_items(kind, t, vals), descs):
+                items.append({"label": _mi.label, "insert": _mi.insert,
+                              "desc": _desc or _mi.desc, "kind": _mi.kind,
+                              "disabled_reason": ""})
+            items = items[:limit]
+        return {"kind": kind, "items": items,
+                "refs": cli._context_ref_rows(),
+                "limits": {"file": AT_FILE_MAX_CHARS, "session": AT_SESSION_MAX_CHARS,
+                           "folder_items": AT_FOLDER_MAX_ITEMS,
+                           "skill_chars": _SKILL_REF_MAX_CHARS,
+                           "images": {"staged": len(cli._pending_images),
+                                      "max": ace_model.MAX_IMAGES_PER_TURN}}}
+
+    def _h_mcp(params: Dict) -> Dict:
+        """MCP server 状态与工具清单（CAP-06 §3.6）。唯一生产者 = `el.mcp.status()`。
+
+        `configured=false` 时 `servers` 为空 —— 外壳**必须**显示"未配置 MCP"
+        （`_cmd_mcp` 的 `mcp_none` 语义），不许沿用上游那套空态文案：那会显示
+        "未配置"而 ace 明明配了（撒谎比空着更坏）。
+        """
+        mgr = getattr(cli.el, "mcp", None)
+        if mgr is None:
+            # 没配就如实说没配，并把**启动失败的原因**带上（配置写错/命令不存在/对面崩了，
+            # 处置方式完全不同 —— 这是 `/mcp` 存在的理由）。
+            return {"servers": [], "configured": False,
+                    "error": str(getattr(cli.el, "mcp_error", "") or "")}
+        try:
+            rows = list(mgr.status() or [])
+        except Exception as e:      # noqa: BLE001 —— 取不到如实报，不假装"没有 server"
+            return {"servers": [], "configured": False,
+                    "error": f"{type(e).__name__}: {e}"}
+        want_tools = params.get("tools", True) is not False
+        return {"servers": [{"name": str(r.get("name") or ""),
+                             "status": str(r.get("status") or ""),
+                             "tools": int(r.get("tools") or 0),
+                             "command": str(r.get("command") or ""),
+                             "error": str(r.get("error") or ""),
+                             # 与 `/mcp` 的打印口径一致：每个 server 最多 20 个工具名
+                             "tool_names": ([str(x) for x in (r.get("tool_names") or [])][:20]
+                                            if want_tools else [])}
+                            for r in rows],
+                "configured": True, "error": ""}
 
     # 注册表 = 握手清单的**唯一真相源**。注册与承诺（`SERVE_METHODS`）必须是同一个
     # 集合：少一个 ⇒ 前端发了收到 E_UNKNOWN_METHOD；多一个 ⇒ 前端永远不会发它，
@@ -8832,6 +9366,14 @@ def _run_serve(cli: "AgentCLI", srv) -> int:
         "tasks.request": _requires_init(_h_tasks),
         "config.request": _requires_init(_h_config),
         "sessions.request": _requires_init(_h_sessions),
+        # 会话三件套 + CAP-01/02/03/04/06：全部只读，动作一律复用 `command.exec`（NG4）。
+        "sessiontree.request": _requires_init(_h_sessiontree),
+        "settings.request": _requires_init(_h_settings),
+        "snapshots.request": _requires_init(_h_snapshots),
+        "rules.request": _requires_init(_h_rules),
+        "audit.request": _requires_init(_h_audit),
+        "mentions.request": _requires_init(_h_mentions),
+        "mcp.request": _requires_init(_h_mcp),
     }
     if set(_handlers) != set(SERVE_METHODS):
         raise RuntimeError(
