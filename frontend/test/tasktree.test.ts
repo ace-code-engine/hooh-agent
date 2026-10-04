@@ -83,9 +83,12 @@ describe('渲染与 Python 逐行一致', () => {
     expect(mine).toEqual(py);
   });
 
-  it('根节点不带连接线，子节点带 `├─` / `└─`', () => {
+  it('根节点不带连接线（但带小进度条），子节点带 `├─` / `└─`', () => {
     const lines = flattenTaskTree(TREE).map((l) => l.text);
-    expect(lines[0]).toBe('▶ 目标 [R1/3] 把前端做完');
+    // 根行 = `▶ 根文本  <进度条> 已完成/总数`（排版与 Python 侧逐行对拍，见上一组用例）
+    expect(lines[0]).toContain('▶ 目标 [R1/3] 把前端做完');
+    expect(lines[0]).toContain('1/2');
+    expect(lines[0]).not.toContain('├─');
     expect(lines[1]).toContain('├─ ✓ #1 补全菜单');
     expect(lines[2]).toContain('└─ ✗ #2 任务树');
   });

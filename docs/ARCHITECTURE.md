@@ -77,11 +77,14 @@ ace-agent/
 │   ├── ace_vim.py              #   vim 子集：motions/operators/text objects + 行编辑器（纯函数）
 │   ├── ace_term.py             #   终端能力探测（自动判定）+ 自检向导步骤
 │   ├── ace_chatscroll.py       #   聊天内置滚动引擎(方案 C:视口只滚会话行)
+│   ├── ace_cell.py             #   **唯一渲染目标**：Segment/Line/Screen + 网格常量 + problems()（规范验收）
+│   ├── ace_canvas.py           #   帧缓冲 + 脏矩形：Cell/Canvas/diff/encode（"游戏引擎"那层，纯数据）
+│   ├── ace_render.py           #   三个后端：终端 / 纯文本(golden) / SVG 预览；色深四档在这里
+│   ├── ace_screen.py           #   主屏两车道：转录只写一次 + 底部区走脏矩形；会话主循环 run_session
+│   ├── ace_host.py             #   引擎宿主：权限/确认/文本问答 → 内联面板（Question 状态机 + 跨线程泵）
+│   ├── ace_engine_repl.py      #   把 REPL 接到引擎上（`--engine`，真终端下默认）：worker 跑轮次 + 队列回收输出
+│   ├── ace_swatches.py         #   风格词典屏（瑞士风格试点）+ 13 组断言（含 golden 与帧预算）
 │   └── i18n.py                 #   轻量国际化（zh / en / ja 字典在根级 locales/）
-├── tui/                        # 组件化全屏界面（Textual）：四区骨架，唯一可选重依赖
-│   ├── __init__.py             #   包入口：tui_available() 能力探测 + 惰性导出（没装时不炸）
-│   ├── bridge.py               #   引擎↔界面桥接（纯逻辑，不依赖 Textual）：按行入队、丢 \r 重绘、剥 ANSI
-│   └── app.py                  #   四区布局（Header/转写区/状态行/输入栏）+ 后台线程跑引擎 + 队列排空
 ├── frontend/                   # 主前端（TypeScript + Ink，独立进程）：经 `ace --serve` 的双向 NDJSON 协议驱动引擎；与 ui/ 并存，内部结构见 frontend/README.md
 ├── cli/                        # 操作者侧工具：自检 / 上下文 / 会话日志
 │   ├── __init__.py             #   包入口

@@ -405,8 +405,12 @@ def audit_metric_declaration(templates: Mapping[str, str]) -> List[str]:
 #
 # 实测（见 `WP-0` 卡 P-01）：权限渲染器是 **3 份**，不是 `ROADMAP` S-2 的「×4」。
 # 第 4 个候选（`ui/ace_dialog.run_dialog` + `ui/ace_selector`）是 REPL 的**选择**浮层，不渲染
-# 权限请求；`ChoiceScreen`（tui）与 `ChoiceDialog`（ink）同理是选择/确认；`ServeUIHost` 是**桥**，
+# 权限请求；`ChoiceDialog`（ink）同理是选择/确认；`ServeUIHost` 是**桥**，
 # 只发事件等答案。这些**不是**权限渲染器，不在这张表里 —— 混进来会把计数越数越乱（P-01 结论）。
+#
+# 2026 修订：Textual 那条路（`tui/`）已整体删除，第三份换成**引擎界面的内联面板**
+# （`ui/ace_host.py`，主屏两车道里顶替输入行的那块）。**数量仍然是 3** —— 换了一份实现，
+# 不是多了一份；这条注释就是"为什么这次改名单不需要解释成第 4 份"的依据。
 #
 # 纪律与 `EVENT_TYPES ↔ EVENT_REQUIRED` 同一条：**新增一个权限渲染器 = 先在这里登记**，
 # 然后 `test_all` 的"数量钉住"断言会红，逼你把「为什么是第 4 份」写清楚 ——
@@ -414,8 +418,8 @@ def audit_metric_declaration(templates: Mapping[str, str]) -> List[str]:
 PERMISSION_RENDERERS = (
     {"id": "repl", "role": "REPL 权限渲染器（行式）",
      "file": "agent_runner.py", "symbol": "def ask_grant"},
-    {"id": "tui", "role": "Textual 权限渲染器",
-     "file": "tui/app.py", "symbol": "class PermissionScreen"},
+    {"id": "engine", "role": "引擎界面权限渲染器（内联面板，主屏两车道）",
+     "file": "ui/ace_host.py", "symbol": "class EngineHost"},
     {"id": "ink", "role": "Ink 权限渲染器",
      "file": "frontend/src/components/PermissionDialog.tsx",
      "symbol": "export function PermissionDialog"},

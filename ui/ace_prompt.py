@@ -102,10 +102,15 @@ class KeySource:
             self._restore = None
 
     def _read_raw_char(self) -> str:
-        """读一个字符；没有任何输入时返回空串（EOF 也返回空串，由调用方判 EOF）。"""
+        """读一个字符；没有任何输入时返回空串（EOF 也返回空串，由调用方判 EOF）。
+
+        **注入了 `stream` 就以流为准**，不再走 `msvcrt`：不然在真终端里跑测试时，
+        `msvcrt.getwch()` 会越过注入的流去等真键盘，整个测试当场挂死（实测踩到过，
+        症状是"检查跑了两分钟没输出"）。
+        """
         if self._pushback:
             return self._pushback.pop(0)
-        if self._isatty and os.name == "nt":
+        if self.stream is None and self._isatty and os.name == "nt":
             try:
                 import msvcrt
                 ch = msvcrt.getwch()
@@ -126,36 +131,80 @@ class KeySource:
             return ""
         return "" if ch is None else str(ch)
 
-    def read(self) -> str:
-        """读一个键（已解析成键名/字符）；返回空串表示 EOF。
+    def _pending(self) -> bool:
+        """真终端上"现在有没有键可读"（不消费）。注入流与管道不适用——那边 read 立刻返回。"""
+        if self._pushback:
+            return True
+        if self._isatty and os.name == "nt":
+            try:
+                import msvcrt
+                return bool(msvcrt.kbhit())
+            except Exception:  # noqa: BLE001 —— 问不出来就当有，交给读去阻塞
+                return True
+        return False
+
+    def _read_key(self) -> str:
+        """读一个键（已解析成键名/字符）；返回空串表示 EOF。**不管原始模式**。
 
         转义序列的读法要小心：**不能盲读第三个字符**。旧写法在"单独一个 Esc 后面紧跟
         回车"时会把回车吃掉，于是用户按 Esc 关菜单、再按回车，界面却当成了 EOF
         （探针里当场复现）。现在的规则是：ESC 后面只有 `[`/`O` 才继续往后读，
         否则把多读的那个字符**放回缓冲**，按单独的 Esc 处理。
         """
+        first = self._read_raw_char()
+        if not first:
+            return ""
+        if first != "\x1b":
+            return parse_key(first)
+        nxt = self._read_raw_char()
+        if not nxt:
+            return "esc"
+        if nxt not in ("[", "O"):
+            self._pushback.insert(0, nxt)     # 不是转义序列：字符还给下一键
+            return "esc"
+        third = self._read_raw_char()
+        seq = "\x1b" + nxt + third
+        if seq in ESCAPES:
+            return parse_key(seq)
+        fourth = self._read_raw_char()
+        seq2 = seq + fourth
+        if seq2 in ESCAPES:
+            return parse_key(seq2)
+        return "esc"
+
+    def read(self, timeout: Optional[float] = None) -> Optional[str]:
+        """读一个键。`timeout=None` 阻塞（老行为）；给了秒数就等这么久。
+
+        超时**返回 None**，而 EOF 仍然返回空串——两者必须分得开：引擎的主循环
+        （`ui/ace_screen.run_session`）要在"没有输入"时继续推帧，在"输入断了"时退出。
+
+        注入的 `stream` 永远走阻塞分支：管道/测试流里没有"等待"这回事。
+        """
+        if timeout is None or self.stream is not None or not self._isatty:
+            self._enter_raw()
+            try:
+                return self._read_key()
+            finally:
+                self._exit_raw()
+        if os.name == "nt":
+            deadline = time.monotonic() + max(0.0, float(timeout))
+            while True:
+                if self._pending():
+                    return self.read()
+                if time.monotonic() >= deadline:
+                    return None
+                time.sleep(0.01)
         self._enter_raw()
         try:
-            first = self._read_raw_char()
-            if not first:
-                return ""
-            if first != "\x1b":
-                return parse_key(first)
-            nxt = self._read_raw_char()
-            if not nxt:
-                return "esc"
-            if nxt not in ("[", "O"):
-                self._pushback.insert(0, nxt)     # 不是转义序列：字符还给下一键
-                return "esc"
-            third = self._read_raw_char()
-            seq = "\x1b" + nxt + third
-            if seq in ESCAPES:
-                return parse_key(seq)
-            fourth = self._read_raw_char()
-            seq2 = seq + fourth
-            if seq2 in ESCAPES:
-                return parse_key(seq2)
-            return "esc"
+            import select
+            fd = sys.stdin.fileno()
+            deadline = time.monotonic() + max(0.0, float(timeout))
+            while True:
+                left = max(0.0, deadline - time.monotonic())
+                if self._pushback or select.select([fd], [], [], left)[0]:
+                    return self._read_key()
+                if time.monotonic() >= deadline:
+                    return None
         finally:
             self._exit_raw()
 
@@ -338,125 +387,138 @@ class LineEditor:
         self._refresh_menu()
         self._paint()
         while True:
-            key = self.keys.read()
-            if key == "":
-                self._erase()
-                return None
-            if self._search and key not in ("enter", "esc", "c-c", "backspace"):
-                if len(key) == 1:
-                    self._search += key
-                    hits = [h for h in self.history if self._search.lower() in h.lower()]
-                    if hits:
-                        self.text = hits[-1]
-                        self.cursor = len(self.text)
-                self._paint()
-                continue
-            if key in ("enter",):
-                if self.menu.open and self._history_pick:
-                    # 历史选择器：回车=填入输入行（不发送），再回车才是发送
-                    self.text = str(self.menu.current.insert if self.menu.current else "")
-                    self.cursor = len(self.text)
-                    self._history_pick = False
-                    self._menu_suppressed = True
-                    self.menu = ace_menu.MenuState()
-                    self._paint()
-                    continue
-                if self.menu.open and ace_menu.accepts_on_enter(self.menu, self.text):
-                    self.accept_menu()
-                    self._paint()
-                    continue
+            act = self.step(self.keys.read())
+            if act == "submit":
                 self._erase()
                 if self.draw:
                     sys.stdout.write("\r\x1b[2K" + self.prompt + self.text + "\n")
                     sys.stdout.flush()
                 return self.text
-            if key == "tab":
-                if self.menu.open:
-                    self.accept_menu()
-                elif not self.text:
-                    self.insert("/")        # 空输入按 Tab：直接起个命令（少打一个字符）
-                self._paint()
-                continue
-            if key == "esc":
-                if self.menu.open:
-                    self._menu_suppressed = True
-                    self._history_pick = False
-                    self.menu = ace_menu.MenuState()
-                elif self.text:
-                    self.text, self.cursor = "", 0
-                    self.notes.append("cleared")
-                elif self._last_esc and (time.monotonic() - self._last_esc) < 0.8:
-                    # 空输入下双击 Esc：打开历史选择器（Esc 的第四层语义）
-                    if self.open_history_menu():
-                        self.notes.append("history-menu")
-                    self._last_esc = 0.0
-                    self._paint()
-                    continue
-                else:
-                    self._last_esc = time.monotonic()
-                self._paint()
-                continue
-            if key == "c-c":
-                if self.text:
-                    self.text, self.cursor = "", 0
-                    self.notes.append("cleared")
-                    self._refresh_menu()
-                    self._paint()
-                    continue
-                # 空输入：**双击确认**才退出（与浮层路径同一条纪律）。
-                # 一次误按就杀掉一个跑了十分钟的会话，比"多按一次"贵得多。
-                now = time.monotonic()
-                if now - self._last_ctrl_c < 1.0:
-                    self._erase()
-                    raise KeyboardInterrupt
-                self._last_ctrl_c = now
-                self.notes.append("ctrl-c-once")
-                self._hint = self.translate("exit_again_hint")
-                self._paint()
-                continue
-            if key == "c-d":
-                if not self.text:
-                    self._erase()
-                    return None
-                self.delete()
-            elif key == "backspace":
-                self.backspace()
-            elif key == "delete":
-                self.delete()
-            elif key == "left":
-                self.cursor = max(0, self.cursor - 1)
-            elif key == "right":
-                self.cursor = min(len(self.text), self.cursor + 1)
-            elif key == "home":
-                self.cursor = 0
-            elif key == "end":
-                self.cursor = len(self.text)
-            elif key == "up":
-                if self.menu.open:
-                    self.menu.move(-1)
-                else:
-                    self.history_move(+1)
-            elif key == "down":
-                if self.menu.open:
-                    self.menu.move(+1)
-                else:
-                    self.history_move(-1)
-            elif key == "c-r":
-                self.history_search()
-            elif key == "c-l":
+            if act == "eof":
                 self._erase()
-                if self.on_ctrl_l is not None:
-                    self.on_ctrl_l()
-            elif key in self.hotkeys:
+                return None
+            if act == "interrupt":
                 self._erase()
-                return "\x00MENU:" + self.hotkeys[key]
-            elif len(key) == 1 and key.isprintable():
-                self.insert(key)
-                self._menu_suppressed = False   # 打字 = 重新开始给建议
-            else:
-                continue
-            self._refresh_menu()
+                raise KeyboardInterrupt
+            if act.startswith("menu:"):
+                self._erase()
+                return "\x00MENU:" + act[5:]
             self._paint()
+
+    # ---- 单步：按键 → 动作（不读、不画；两条路共用这一份分派） ----
+    def step(self, key: str) -> str:
+        """处理一个按键，返回动作：
+
+        - `"continue"`：状态已改，继续；
+        - `"submit"`：提交（文本在 `self.text`）；
+        - `"eof"` / `"interrupt"`：Ctrl+D / Ctrl+C 双击确认；
+        - `"menu:<命令>"`：热键，交上层执行。
+
+        **这里不画任何东西**，也不读键：浮层路径（`read_line`）自己重画，引擎路径
+        （`ui/ace_screen`）由底部区重画。分派只有这一份，两条路不会两套脾气。
+        """
+        if key == "":
+            return "eof"
+        if self._search and key not in ("enter", "esc", "c-c", "backspace"):
+            if len(key) == 1:
+                self._search += key
+                hits = [h for h in self.history if self._search.lower() in h.lower()]
+                if hits:
+                    self.text = hits[-1]
+                    self.cursor = len(self.text)
+            return "continue"
+        if key in ("enter",):
+            if self.menu.open and self._history_pick:
+                # 历史选择器：回车=填入输入行（不发送），再回车才是发送
+                self.text = str(self.menu.current.insert if self.menu.current else "")
+                self.cursor = len(self.text)
+                self._history_pick = False
+                self._menu_suppressed = True
+                self.menu = ace_menu.MenuState()
+                return "continue"
+            if self.menu.open and ace_menu.accepts_on_enter(self.menu, self.text):
+                self.accept_menu()
+                return "continue"
+            return "submit"
+        if key == "tab":
+            if self.menu.open:
+                self.accept_menu()
+            elif not self.text:
+                self.insert("/")            # 空输入按 Tab：直接起个命令（少打一个字符）
+            return "continue"
+        if key == "esc":
+            if self.menu.open:
+                self._menu_suppressed = True
+                self._history_pick = False
+                self.menu = ace_menu.MenuState()
+            elif self.text:
+                self.text, self.cursor = "", 0
+                self.notes.append("cleared")
+            elif self._last_esc and (time.monotonic() - self._last_esc) < 0.8:
+                # 空输入下双击 Esc：打开历史选择器（Esc 的第四层语义）
+                if self.open_history_menu():
+                    self.notes.append("history-menu")
+                self._last_esc = 0.0
+            else:
+                self._last_esc = time.monotonic()
+            return "continue"
+        if key == "c-c":
+            if self.text:
+                self.text, self.cursor = "", 0
+                self.notes.append("cleared")
+                self._refresh_menu()
+                return "continue"
+            # 空输入：**双击确认**才退出（与浮层路径同一条纪律）。
+            # 一次误按就杀掉一个跑了十分钟的会话，比"多按一次"贵得多。
+            now = time.monotonic()
+            if now - self._last_ctrl_c < 1.0:
+                return "interrupt"
+            self._last_ctrl_c = now
+            self.notes.append("ctrl-c-once")
+            self._hint = self.translate("exit_again_hint")
+            return "continue"
+        if key == "c-d":
+            if not self.text:
+                return "eof"
+            self.delete()
+        elif key == "backspace":
+            self.backspace()
+        elif key == "delete":
+            self.delete()
+        elif key == "left":
+            self.cursor = max(0, self.cursor - 1)
+        elif key == "right":
+            self.cursor = min(len(self.text), self.cursor + 1)
+        elif key == "home":
+            self.cursor = 0
+        elif key == "end":
+            self.cursor = len(self.text)
+        elif key == "up":
+            if self.menu.open:
+                self.menu.move(-1)
+            else:
+                self.history_move(+1)
+        elif key == "down":
+            if self.menu.open:
+                self.menu.move(+1)
+            else:
+                self.history_move(-1)
+        elif key == "c-r":
+            self.history_search()
+        elif key == "c-l":
+            self._erase()
+            if self.on_ctrl_l is not None:
+                self.on_ctrl_l()
+        elif key in self.hotkeys:
+            self._erase()
+            return "menu:" + self.hotkeys[key]
+        elif len(key) == 1 and key.isprintable():
+            self.insert(key)
+            self._menu_suppressed = False   # 打字 = 重新开始给建议
+        else:
+            return "continue"
+        self._refresh_menu()
+        return "continue"
 
 
 def read_line(prompt: str = "▊ ", **kw: Any) -> Optional[str]:

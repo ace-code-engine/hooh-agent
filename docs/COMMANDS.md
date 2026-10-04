@@ -14,7 +14,7 @@
 | 会话 | `/help` `/keys` `/stash` `/queue` `/clear` `/status` `/statusline` `/tasks` `/fullscreen` `/stats` `/audit` `/history` `/sessions` `/resume` `/fork` `/rewind` `/todo` `/expand` `/mcp` `/exit` |
 | 扩展 | `/hooks`（事件钩子与上次结果） `/plugins`（插件与它们贡献的命令/钩子） `/vim`（vi 模式与自定义键位） `/keys`（键位表与冲突警告） `/term`（终端能力与自检） `/rules`（持久授权规则） |
 | 安全 | `/permission [level]` `/snapshots` `/undo` `/rollback <id>` `/sandbox [档]` `/net [on\|off]` `/replay` |
-| 模型 | `/provider [名称\|编号] [key]` `/model <名称>` `/config` `/mock` `/thinking [on\|off]` `/style [id]` |
+| 模型 | `/provider [名称\|编号] [key]` `/model <名称>` `/window [tokens\|auto]` `/config` `/mock` `/thinking [on\|off]` `/style [id]` |
 | 工具 | `/open <路径>` `/edit <路径>` `/review` `/diff [序号]` `/search <关键词>` `/memory` `/report` `/goal [动作]` |
 
 ```bash
@@ -220,7 +220,12 @@
 - `--max-history N` — 只保留最近 N 轮，防本地小模型上下文溢出
 - `--context-window N` — 告诉 HooH 模型窗口有多大（默认 32768），压缩阈值按它算
 - `--no-compact` — 关掉上下文压缩，退回纯硬截断（会丢早期对话）
-- `--install-ui` / `--setup` — 准备运行环境：装 `requests`（模型调用必需）+ `prompt_toolkit` / `textual` / `rich`（界面增强），多镜像自动回退
+- `--install-ui` / `--setup` — 准备运行环境：装 `requests`（模型调用必需）+ `prompt_toolkit`（普通 REPL 的输入行），多镜像自动回退
+- `--engine` / `--no-engine` — 引擎界面（主屏两车道：转录进终端原生 scrollback，状态行/输入行走帧缓冲增量重画、问答内联）。**真终端下默认就是它**；`--no-engine` 回退普通 REPL。见 [`docs/TUI-ENGINE.md`](TUI-ENGINE.md)
+- `/tools [关键词]` — **列出全部工具**（按只读/可写/高危分档，标出当前权限看不看得见、哪些被折叠）。工具面会按权限档裁剪，这条命令是唯一能一眼看全的地方
+- `/key` — **一步改 API 密钥**（输入不回显、不进转录区）。`/config` 是"提供商→密钥→模型"三步向导，`/provider <n>` 只换端点不问密钥——想单独换
+- `/window` — **看/改上下文窗口**。**每个模型的窗口都不一样，而"不知道"是常态**：引擎表里只放**核过出处**的条目（DeepSeek 1M / GLM-4.6 200K），表外的模型一律按兜底 **32768** 算并**明确提示**（"不知道"不等于"窗口小"，猜大了会直接发超被接口拒）。所以给你一条命令：`/window 1m` 设成 1M（支持 `200k` 这种写法）、`/window auto` 交还自动判断、裸 `/window` 显示当前值与**来源**（你设的 / 已知表 / 未知兜底）。设完写进 `~/.ai_code.json` 的 `context_window`。**额度看得见才有意义**：底栏那个百分比就是拿这个当分母的。密钥就用这条
+- **裸敲就弹选择器**：`/lang` `/effort` `/style` `/sandbox` `/todo`（另有 `/permission` `/net` `/provider` `/model` `/preset`）——打命令本身就把取值摆成选择框，与选服务商同一套交互，不必自己打参数。裸形态是**动作**的命令（`/vim` `/mock` `/thinking` `/stash` 裸敲是翻转/存一次）不在此列，否则动作会被做两遍
 - `--install-executor` — 下载官方预编译执行器（无需本机 Go；`--sandbox job` 前置）
 - `--sandbox job` — Windows Job Object：进程树/内存上限 + 受限令牌（拿不到边界一律 503，不静默回退）
 - `--sandbox docker` — 一次性容器：--network none + --read-only + cap-drop ALL + --init + 只挂工作目录。镜像**缺失时自动拉官方预编译镜像**（`ghcr.io/ace-code-engine/hooh-sandbox`，公开可匿名拉，无需 `docker login`；本地已有的镜像永远优先）；不想自动拉就 `ACE_SANDBOX_PULL=0` 并自己 `docker build -t ace-sandbox:latest -f docker/Dockerfile.sandbox .`，`--sandbox-image <ref>@sha256:<digest>` 可固定摘要

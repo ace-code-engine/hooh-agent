@@ -25,6 +25,56 @@ from typing import Callable, Dict, List, Optional, Sequence
 # 上一次的摘要并把它一起纳入新摘要，而不是把摘要当普通对话堆积下去。
 SUMMARY_MARKER = "[上下文摘要]"
 
+#: 认不出模型时的兜底窗口（也是改动前的旧行为，保持不变）。
+DEFAULT_CONTEXT_WINDOW = 32768
+
+#: **模型前缀 → 上下文窗口（token）。**
+#:
+#: 一条纪律：**只放"今天核过出处"的条目**。放猜测（比如"gpt-4o 大概是 128K"）等于用今天的
+#: 认知换明天的腐烂 —— 旗舰模型的窗口几个月就翻一倍，而一个错的数字比没有数字更糟：
+#: 猜小了白扔容量，猜大了直接发超被接口拒。
+#:
+#: 出处（改表必须附出处 + 日期）：
+#:   - DeepSeek 官方 Models & Pricing: https://api-docs.deepseek.com/quick_start/pricing
+#:     `deepseek-flash` / `deepseek-v4-flash` / `deepseek-v4-pro` → CONTEXT LENGTH **1M**（2026-10-04 核）
+#:   - 智谱官方 GLM-4.6 文档: https://docs.bigmodel.cn/cn/guide/models/text/glm-4.6
+#:     → 上下文窗口 **200K**（2026-10-04 核）
+#:
+#: 不在表里的模型**不是"小窗口"，是"不知道"** —— 走兜底，并且启动时**明确告诉用户
+#: "窗口未知、按 32K 算、用 /window <n> 校正"**。宁可少装一点，也不要发超被拒；
+#: 而校正这件事必须显眼，否则用户永远在 3% 的容量里干活。
+MODEL_WINDOWS = (
+    ("deepseek", 1_000_000),   # DeepSeek 官方：1M
+    ("glm-4.7", 200_000),      # 智谱官方 GLM-4.6 文档：200K（4.7 沿用，未单独核）
+    ("glm-4.6", 200_000),      # 智谱官方：200K
+)
+
+#: 窗口值的来源（给用户看的：这个数字是怎么来的）
+WINDOW_SOURCE_USER = "user"          # 用户显式设的（配置 / --context-window / /window）
+WINDOW_SOURCE_TABLE = "table"        # 表里有出处的条目
+WINDOW_SOURCE_FALLBACK = "fallback"  # **不知道**（不是"小"，是没核过）
+
+
+def window_for(model: str, *, override: int = 0) -> int:
+    """这个模型的上下文窗口。优先级：**用户显式配置 > 前缀表 > 兜底 32768**。
+
+    `override` 来自 `--context-window` 或配置里的 `context_window`：用户说了算 ——
+    表只是"帮不知道的人省事"，不是"覆盖用户"。
+    """
+    return window_with_source(model, override=override)[0]
+
+
+def window_with_source(model: str, *, override: int = 0) -> "tuple[int, str]":
+    """`(窗口, 来源)` —— 来源用来决定"要不要提示用户校正"。"""
+    if int(override or 0) > 0:
+        return int(override), WINDOW_SOURCE_USER
+    name = str(model or "").strip().lower()
+    for prefix, window in MODEL_WINDOWS:
+        if name.startswith(prefix):
+            return int(window), WINDOW_SOURCE_TABLE
+    return DEFAULT_CONTEXT_WINDOW, WINDOW_SOURCE_FALLBACK
+
+
 # 摘要失败时兜底用的提示。宁可让模型知道"这里丢了东西"，也不要静默失忆。
 TRUNCATION_NOTICE = "[上下文因超长被截断，早期对话已丢失]"
 

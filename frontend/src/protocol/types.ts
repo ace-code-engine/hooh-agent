@@ -27,6 +27,7 @@ export const EVENT_TYPES = [
   'model_delta',
   'status',
   'agent_preset',
+  'language',
 ] as const;
 
 export type EventType = (typeof EVENT_TYPES)[number];
@@ -269,6 +270,13 @@ export interface InitializeResult {
   /** vim 子集开关（`/vim` 可改；改完用 `config.request` 重读）。 */
   vim?: boolean;
   /**
+   * 界面语言（`zh` / `en` / `ja`）—— 引擎当前用的那本字典。
+   *
+   * 前端**自己有一份字典**，所以起步要知道该用哪本：只认命令行 `--lang` 的话，
+   * 配置里写了 `en` 也会是中文。切换时引擎还会发 `language` 事件（见 `AceEvent`）。
+   */
+  lang?: string;
+  /**
    * 字形降级表 `{原字: 替身}`，只含**这台控制台画不出**的那些。
    *
    * 由引擎算（只有它知道控制台编码，Node 判断不了 legacy 编码）。空表 = 画得出全部。
@@ -283,6 +291,8 @@ export interface InitializeResult {
  * **同一个答案**。各算各的必然会漂（主页说沙箱是 job、菜单说 off，用户不知道该信哪个）。
  */
 export interface ConfigData {
+  /** `/fullscreen` 的引擎侧取值 —— 外壳据此进出备用屏（它才知道能不能进 1049）。 */
+  fullscreen?: boolean;
   model?: string;
   permission?: string;
   sandbox?: string;

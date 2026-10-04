@@ -107,9 +107,26 @@ describe('受控子集的边界行为（真正会咬人的地方）', () => {
   });
 
   it('不认识的行当普通段落文字（**不丢内容**）', () => {
-    const weird = '| 表 | 头 |\n| --- | --- |';
+    // 注：`| 表 | 头 |` + 分隔行**现在**是表格（见下面的表格用例）——这里换成一条
+    // 真正不受支持的构造（脚注定义），保住这条测试的本意：不认识也要留着。
+    const weird = '[^1]: 脚注定义不是受支持的块';
     const bs = parseMarkdown(weird);
-    expect(toPlainText(bs)).toContain('| 表 | 头 |');
+    expect(toPlainText(bs)).toContain('[^1]: 脚注定义不是受支持的块');
+  });
+
+  it('表格：表头 + 分隔行 + 数据行 → 一个 table 块（分隔行不进数据）', () => {
+    const bs = parseMarkdown('| 名 | 值 |\n|---|:--:|\n| 甲 | 1 |\n| 乙 | 2 |');
+    expect(kinds(bs)).toEqual(['table']);
+    const t = bs[0];
+    if (t?.kind !== 'table') throw new Error('不是 table');
+    expect(t.rows).toHaveLength(3);
+    expect(t.rows.map((r) => r.length)).toEqual([2, 2, 2]);
+    expect(toPlainText(bs)).toContain('甲');
+  });
+
+  it('表格：**只有竖线不算表**（正文里随手一个 `|` 不该被误判）', () => {
+    expect(kinds(parseMarkdown('a | b 只是一行普通文本'))).toEqual(['paragraph']);
+    expect(kinds(parseMarkdown('| 只有表头没有分隔行 |'))).toEqual(['paragraph']);
   });
 
   it('空输入不产出块', () => {

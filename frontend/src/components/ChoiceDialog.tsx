@@ -10,6 +10,8 @@
  */
 
 import { Box, Text, useInput } from 'ink';
+
+import { Divider } from './design-system/index.js';
 import React, { useMemo, useState } from 'react';
 
 import { gstr } from '../render/glyphs.js';
@@ -145,10 +147,12 @@ export function ChoiceDialog({
   );
 
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor={color('accent')} paddingX={1}>
+    <Box flexDirection="column" paddingX={1}>
+      {/* 无边框：标题 + 整宽细线（见 PermissionDialog 同款说明） */}
       <Text bold color={color('accent')}>
         {title}
       </Text>
+      <Divider color={color} />
 
       {kind === 'choose' ? (
         <>

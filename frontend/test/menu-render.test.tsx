@@ -133,8 +133,10 @@ describe('渲染本身', () => {
       commands: many,
       groupOf: () => 'group_more',
       translate: t,
-      limit: 30, // 别被默认的 12 条上限截掉
     });
+    // 默认**不截断**：30 条全在菜单状态里（此前默认只留 12 条，滚到底也看不见后面的，
+    // 用户会以为命令就只有这么多）。窗口由 Menu 组件负责，不在这里砍。
+    expect(st.items.length).toBe(30);
     st.selected = 25;
     const { lastFrame, unmount } = render(
       <Menu state={st} t={t} color={noColor} width={100} height={8} />,

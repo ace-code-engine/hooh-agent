@@ -36,7 +36,7 @@ jobs:
           pip install requests textual
 
       - name: Compile check
-        run: python -m compileall -q ai_code.py agent_runner.py execution_layer.py setup_env.py test_all.py gateway_v2 tools e2e benchmarks cli core ui tui demo docker packaging engine skills
+        run: python -m compileall -q ai_code.py agent_runner.py execution_layer.py setup_env.py test_all.py gateway_v2 tools e2e benchmarks cli core ui demo docker packaging engine skills
 
       # 失败时把失败项打成 GitHub **注解**：注解不需要登录就能读（REST 的 job log
       # 要 admin 权限），本机复现不了平台差异时，这是唯一能拿到原因的路子。

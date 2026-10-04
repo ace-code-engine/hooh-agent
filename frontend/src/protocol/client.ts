@@ -279,7 +279,7 @@ export class AceClient extends EventEmitter {
     const frame = { v: PROTOCOL_VERSION, type: 'req' as const, id, method, params };
     return new Promise<unknown>((resolve, reject) => {
       if (!this.child) {
-        reject(new Error('引擎没起来（先调 start()）'));
+        reject(new Error('engine not started (call start() first)'));
         return;
       }
       this.pending.set(id, { resolve, reject });
@@ -396,7 +396,7 @@ export class AceClient extends EventEmitter {
     if (frame.ok) {
       p.resolve(frame.result ?? {});
     } else {
-      const err = new Error(frame.error?.message || '引擎返回了失败');
+      const err = new Error(frame.error?.message || 'engine returned a failure');
       Object.assign(err, { code: frame.error?.code ?? 'E_UNKNOWN' });
       p.reject(err);
     }

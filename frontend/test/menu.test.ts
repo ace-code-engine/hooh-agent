@@ -9,6 +9,7 @@ import {
   MENTION_TRIGGERS,
   acceptedText,
   buildMenu,
+  commandItems,
   describeWithCurrent,
   menuHintKey,
   tokenUnderCursor,
@@ -35,8 +36,21 @@ describe('开合规则', () => {
 
   it('**命令已打全 → 菜单关闭**（用户不必按 Esc 关它，回车直接发送）', () => {
     const m = build('/help');
-    // 仍会列出自己，但选中项与输入一致 → 回车即发送（见下一条用例）
+    // 菜单是**关**的：命令名已经和目标一致，没有东西可补
+    expect(m.open).toBe(false);
+    // 且回车语义确实是"发送"（补全结果与输入一致）
     expect(acceptedText(m, '/help')).toBe('/help');
+  });
+
+  it('**参数已选好 → 菜单关闭**（否则回车只会一直再补一个参数，永远发不出去）', () => {
+    const m = build('/permission readonly ');
+    expect(m.open).toBe(false);
+    expect(acceptedText(m, '/permission readonly ')).toBe('/permission readonly ');
+  });
+
+  it('已用过的参数不再出现在候选里（不给"重复填同一个参数"的机会）', () => {
+    const labels = build('/permission readonly w').items.map((i) => i.label);
+    expect(labels).not.toContain('readonly');
   });
 
   it('普通文本 → 菜单关闭', () => {
@@ -56,6 +70,26 @@ describe('开合规则', () => {
     expect(m.kind).toBe('/permission ');
     expect(m.items.map((i) => i.label)).toEqual(
       ARGUMENT_HINTS['/permission']!.map(([a]) => a),
+    );
+  });
+
+  it('有固定取值的命令，打「前缀 + 空格」就把取值摆出来（不必自己抄）', () => {
+    expect(build('/lang ').items.map((i) => i.label)).toEqual(['zh', 'en', 'ja']);
+    expect(build('/effort ').items.map((i) => i.label)).toEqual([
+      'auto', 'low', 'medium', 'high', 'max',
+    ]);
+    expect(build('/vim ').items.map((i) => i.label)).toEqual(['on', 'off']);
+  });
+
+  it('**选中命令后下一层立刻出来**：有取值表的命令，补全插进输入框时带上那个空格', () => {
+    const items = commandItems({ '/todo': 'cmd_todo', '/status': 'cmd_status' }, {});
+    const ins = Object.fromEntries(items.map((i) => [i.label, i.insert]));
+    // 带空格 → 输入里已经有分隔符 → 菜单自然落到下一层（参数菜单）
+    expect(ins['/todo']).toBe('/todo ');
+    // 没有取值表的命令不带空格：打完回车直接发送
+    expect(ins['/status']).toBe('/status');
+    expect(buildMenu('/todo ', 6, OPTS).items.map((i) => i.label)).toEqual(
+      ARGUMENT_HINTS['/todo']!.map(([a]) => a),
     );
   });
 

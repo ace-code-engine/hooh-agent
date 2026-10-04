@@ -28,7 +28,7 @@
  */
 
 import { Box, Text, useInput } from 'ink';
-import React, { useCallback, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
 
 import {
   acceptedText,
@@ -123,6 +123,21 @@ export function Input({
     setVimMode(ed.mode);
     recomputeMenu(ed.text);
   }, [recomputeMenu]);
+
+  /**
+   * **"已排队 N 条"必须有人收尾。**
+   *
+   * 忙的时候按回车，那行消息**其实已经发出去了**（引擎侧串行处理：它处理完当前轮才会
+   * 读到下一条请求，见 `_h_user_message`）；这里的数组只是给用户看"还有几条在排"。
+   * 此前它**只增不减** —— 底栏永远挂着"已排队 1 条"，而屏幕上一切正常，
+   * 用户只会觉得"它卡住了"（实测截图就是这个）。
+   *
+   * 一轮结束（`busy` 落回 false）即清零：那一刻排在它前面的都已经轮到过了；
+   * 后面还没轮到的会在下一轮把 `busy` 再置真，于是重新计。
+   */
+  useEffect(() => {
+    if (!busy && queued.length > 0) setQueued([]);
+  }, [busy, queued.length]);
 
   const moveSelection = useCallback((delta: number) => {
     const cur = menuRef.current;

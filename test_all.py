@@ -51,6 +51,13 @@ TEST_TMP.mkdir(exist_ok=True)
 # `ai_code.py` 子进程此前只给了 cwd、没给 `--project-root`，于是把测试会话写了进去
 # （实测每跑一次全量 +8 个文件，累计涨到 1200+）。这里记下跑前的数量，整跑末尾对比。
 _SESS_DIR = FOLDER / ".ace_sessions"
+
+# **H-26 的姊妹闸门：子进程也不许写开发者的真实配置。**
+# 进程内那把桩（H-31）挡不住 `ai_code.py` 子进程 —— 而本套件会起好几个。实测
+# 2026-10-04 15:18：一次全量把 `~/.ai_code.json` 覆盖成测试用的空壳
+# （model=m1、base_url/api_key 全空、project_root 指向临时目录），用户的密钥与
+# 历史会话一起丢。这里给整个进程树声明"不落盘"。
+os.environ["ACE_NO_SAVE_CONFIG"] = "1"
 _SESS_BASELINE = (len(list(_SESS_DIR.glob("*.jsonl"))) if _SESS_DIR.is_dir() else 0)
 
 
@@ -193,6 +200,21 @@ def _parse_section_args(argv):
 
 _ONLY, _SKIP, _UPTO, _LIST = _parse_section_args(sys.argv)
 
+# 已退役的段落：**测的对象不存在了**，跑它们只会红或崩。
+# 起因：Textual 那条界面路（`tui/`）整体删除，改由主屏两车道引擎承担（docs/TUI-ENGINE.md）。
+# 为什么保留段号而不是删掉整块：这些编号被 `--only` 和段间依赖声明引用，删段要连依赖图
+# 一起改；退役是**如实标注**（结尾的"跳过项"里有名字和原因），不是静默不跑。
+# 新功能一律落在引擎路径上，断言由 `ui/ace_*` 自己的 `check()` + 本套件第 60 段守着。
+_RETIRED = {
+    "62": "组件界面：排队 / 两段式中断 / 授权模态 / 档位环",
+    "63": "组件界面：和弦第二段与热键",
+    "64": "组件界面：被 Textual 抢走的键",
+    "65": "组件界面：主页 / 回溯 / 输入编辑（tui/app.py 源码级）",
+    "66": "组件界面：HomeIcon 点击与 effort 键位（tui/app.py 源码级）",
+    "74": "组件界面：TextScreen 等（tui/app.py）",
+}
+_SEEN_RETIRED: set = set()
+
 
 def _tools_src(*names: str) -> str:
     """把 tools/ 下若干模块的源码拼起来——供"源码守卫"类断言读。
@@ -212,6 +234,11 @@ def _want(num: str) -> bool:
     if num not in _SEEN_SECTIONS:
         _SEEN_SECTIONS.append(num)
     if _LIST:
+        return False
+    if num in _RETIRED:                      # 见 _RETIRED：测的对象已随 tui/ 一起删掉
+        if num not in _SEEN_RETIRED:
+            _SEEN_RETIRED.add(num)
+            skip(f"段 {num}（{_RETIRED[num]}）", "tui/ 已删除：这条界面路整体退役")
         return False
     if num in _SKIP:
         return False
@@ -1179,8 +1206,9 @@ if _want("9"):
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         cli_at._handle_at_command("@lang en")
-    check("@lang en 切换英文",
-          cli_at.lang == "en" and "English" in cli_at._build_system_prompt(),
+    check("@lang en 切**界面语言**（不再往系统提示词塞回答语言指令）",
+          cli_at.lang == "en" and "English" in buf.getvalue()
+          and "语言指令" not in cli_at._build_system_prompt(),
           buf.getvalue()[:100])
     with contextlib.redirect_stdout(io.StringIO()):
         cli_at._handle_at_command("@lang zh")
@@ -1473,7 +1501,11 @@ if _want("9"):
         # —— mock 可来回切换 + 聊天退出回主界面 ——
         cli_toggle = ai_code.AgentCLI({"project_root": str(mktemp()), "permission": "write",
                                        "bait": False, "base_url": "https://api.deepseek.com/v1",
-                                       "api_key": "sk-test", "model": "deepseek-chat"}, mock=True)
+                                       "api_key": "sk-test", "model": "deepseek-chat",
+                                       # 本段测的是**阈值逻辑**，需要一个已知窗口：显式钉住。
+                                       # （不钉的话窗口会跟着模型表走 —— `deepseek-*` 现在是 1M，
+                                       #   19000 字根本到不了触发点，阈值断言全失效。）
+                                       "context_window": 32768}, mock=True)
         buf = io.StringIO()
         with contextlib.redirect_stdout(buf):
             cli_toggle._toggle_mock()
@@ -2164,15 +2196,17 @@ if _want("10"):
           ("frontend in spec:", "frontend" in _spec73d, "Node in spec:", "Node" in _spec73d,
            "Ink in exe.md:", "Ink" in _exe73d, "Node in exe.md:", "Node" in _exe73d))
 
-    # WP-0 W0-C（`ROADMAP` §8 R-3 的另半）：`frontend/` 是主外壳，`ui/`+`tui/` 降为 fallback。
+    # WP-0 W0-C（`ROADMAP` §8 R-3 的另半）：`frontend/` 是主外壳，Python 侧降为 fallback。
     # 依据 docs/design/WP-0-FRONTEND-CONVERGENCE.md §2 W0-C（P-08 / P-09）。
+    # 2026 修订：`tui/`（Textual）已整体删除 —— 于是"两份 fallback 都带冻结标记"这条
+    # 变成"`ui/` 带冻结标记 + `tui/` 确实不在了"（后者是更强的陈述：退役必须真的发生）。
     _ui_frz = (FOLDER / "ui" / "__init__.py").read_text(encoding="utf-8")
-    _tui_frz = (FOLDER / "tui" / "__init__.py").read_text(encoding="utf-8")
-    check("WP-0 W0-C P-08 ★`ui/` 与 `tui/` 都有'冻结：只修 bug 不加功能、新功能落 frontend/'"
-          "的显式标记（标记不是说说，`[10]` 钉着这句话在不在）",
-          all(("只修 bug" in f and "frontend/" in f) for f in (_ui_frz, _tui_frz)),
+    check("WP-0 W0-C P-08 ★`ui/` 有'冻结：只修 bug 不加功能、新功能落 frontend/'的显式标记；"
+          "且 `tui/`（Textual）已删除（P-08 的另一半随实现退役）",
+          "只修 bug" in _ui_frz and "frontend/" in _ui_frz
+          and not (FOLDER / "tui").exists(),
           ("ui 有 '只修 bug':", "只修 bug" in _ui_frz,
-           "tui 有 '只修 bug':", "只修 bug" in _tui_frz))
+           "tui 还在:", (FOLDER / "tui").exists()))
 
     # P-09：回落必须**说出缺了什么**（`ace.cmd:66-81` 已实现）。本卡只把它写成契约不许回退：
     # 两条回落路径各一条专属提示，缺了哪条都是"静默回落"的回归。
@@ -3129,7 +3163,7 @@ if _want("11"):
     with contextlib.redirect_stdout(buf):
         cli_i18n._handle_at_command("@lang en")
     check("@lang en 界面同步英文",
-          "Reply language switched" in buf.getvalue(), buf.getvalue()[:100])
+          "UI language switched" in buf.getvalue(), buf.getvalue()[:100])
     buf = io.StringIO()
     with contextlib.redirect_stdout(buf):
         cli_i18n._handle_at_command("@")
@@ -6086,17 +6120,95 @@ if _want("33"):
     # 否则 cp936 控制台上 `glyph()` 找不到替身就返回 `?`：屏幕上出现一个问号，
     # 而**没有任何报错**（`core/ace_io.py` 头部讲的就是这个）。WP-0 收敛时实测到的：
     # `status_mark` 的 pending 标记 `◌` 一直不在表里，而表里有 `◐`（spinner 那一套）。
+    # ★**三语成套**（引擎侧）：代码里 `t("key")` 引用的每个键，zh/en/ja 三份字典都要有。
+    # 前端那份守卫在 `frontend/test/i18n-complete.test.ts`；两条合起来才叫"全都做了一套"。
+    import json as _json_i18n  # noqa: E402
+    import re as _re_i18n  # noqa: E402
+
+    _dicts_i18n = {}
+    for _lang_i18n in ("zh", "en", "ja"):
+        _dicts_i18n[_lang_i18n] = _json_i18n.loads(
+            (FOLDER / "locales" / f"{_lang_i18n}.json").read_text(encoding="utf-8"))
+    _used_i18n = set()
+    for _pat_i18n in ("ai_code.py", "ui/*.py", "core/*.py", "cli/*.py"):
+        for _f_i18n in FOLDER.glob(_pat_i18n):
+            _src_i18n = _f_i18n.read_text(encoding="utf-8", errors="replace")
+            _used_i18n |= set(_re_i18n.findall(r"""\bt\(\s*['"]([A-Za-z0-9_]+)['"]""", _src_i18n))
+    _missing_i18n = []
+    for _k_i18n in sorted(_used_i18n):
+        if _k_i18n.endswith("_"):      # 拼出来的前缀（如 `t("window_src_" + src)`）
+            if not any(_kk_i18n.startswith(_k_i18n) for _kk_i18n in _dicts_i18n["zh"]):
+                _missing_i18n.append(_k_i18n + "*")
+            continue
+        _missing_i18n += [f"{_k_i18n}@{_l_i18n}" for _l_i18n in ("zh", "en", "ja")
+                          if _k_i18n not in _dicts_i18n[_l_i18n]]
+    check("★三语成套：引擎代码里 `t(\"key\")` 引用的键 zh/en/ja 三份字典都有",
+          not _missing_i18n and len(_used_i18n) > 200, _missing_i18n[:8])
     from core.ace_io import ASCII_FALLBACK as _af33  # noqa: E402
     from ui import ace_spinner as _sp33  # noqa: E402
     from ui import ace_tools as _tb33  # noqa: E402
+    from ui import ace_widgets as _w33  # noqa: E402
     _glyphs33 = {status_mark(_s33)[0] for _s33 in ("SUCCESS", "pending", "500", "403")}
     _glyphs33 |= set(_tb33.DOT.values()) | set(_tb33.RUN_FRAMES)
+    # 小零件那层（`ui/ace_widgets`）：状态图标 + 进度条的子格块
+    # （空格不算字形 —— 它不需要替身，加进集合会把守卫误报成"缺 ` ` 的替身"）
+    _glyphs33 |= {_w33.status_icon(_s33)[0] for _s33 in _w33.STATUS_ICONS}
+    _glyphs33 |= {_b33 for _b33 in _w33.BLOCKS if _b33.strip()} | {"█"}
+    # 方块小人（四分块拼的 2×9 网格）+ 思考标记
+    _glyphs33 |= {_ch33 for _f33 in _w33.BLOCK_FIGURE.values() for _r33 in _f33
+                  for _ch33 in _r33 if _ch33.strip()}
+    _glyphs33.add(_w33.THINK_MARK)
     # spinner 的字形表是模块私有的（`_GLYPHS`）—— 这里读它正是为了"**画得出来的都得有替身**"
     for _frames33, _iv33 in _sp33._GLYPHS.values():
         _glyphs33 |= set(_frames33)
     _missing33 = sorted(_g for _g in _glyphs33 if _g and _g not in _af33)
     check("界面上会画的字形都在 ASCII_FALLBACK 里（缺失 ⇒ cp936 上显示成 `?` 且不报错）",
           not _missing33, f"缺替身: {_missing33}")
+
+    # —— 小零件（照 Claude Code / pi 的边角做法搬来的那几个）——
+    # 集中一处 + 边界断言，免得"三处长三个样"（分隔线曾是 `"─" * 20`、进度只有数字）。
+    _w33.demo()                                            # 模块自带的自检
+    check("★分隔线整宽（宽终端不留半截、窄终端不溢出）且可把标题居中嵌进线里",
+          all(_w33.display_width(_w33.divider(_n33, title="状态")) == _n33
+              for _n33 in (9, 11, 12, 24))
+          and len(_w33.divider(24)) == 24 and _w33.divider(0) == "─"
+          and "状态" in _w33.divider(11, title="状态"),
+          [_w33.divider(_n33, title="状态") for _n33 in (11, 12)])
+    check("★进度条用**八分之一块**（整格方案下 1/16 会一直显示 0）",
+          _w33.progress_bar(0, 4) == "────" and _w33.progress_bar(1, 4) == "████"
+          and len(_w33.progress_bar(0.31, 9)) == 9
+          and _w33.progress_bar(0.5, 8) == "████────"
+          and _w33.progress_bar(-3, 4) == _w33.progress_bar(0, 4),
+          [_w33.progress_bar(0.5, 8), _w33.progress_bar(0.131, 8)])
+    check("★状态图标六态归一（`ok`/`running`/`500`/认不出的都有确定结果）",
+          _w33.status_icon("ok") == ("✓", "success")
+          and _w33.status_icon("RUNNING") == ("◌", "tool_pending")
+          and _w33.status_icon("500") == ("⚠", "warn")
+          and _w33.status_icon("完全看不懂") == ("○", "dim"),
+          [_w33.status_icon(x) for x in ("ok", "RUNNING", "500", "完全看不懂")])
+    check("★快捷键提示走 i18n 语序（中文不写 `to`；组合键 `+`、二选一用 `/`）",
+          _w33.format_key("↑/↓") == "↑/↓"
+          and _w33.format_key("alt+P", darwin=True) == "option+P"
+          and "to" not in _w33.key_hint("ctrl+o", "展开"),
+          _w33.key_hint("ctrl+o", "展开"))
+    check("★byline 用 ` · ` 连元数据（空项丢掉、首尾不留分隔符）",
+          _w33.byline(["模型", "", "上下文 12%"]) == "模型 · 上下文 12%",
+          _w33.byline(["模型", "", "上下文 12%"]))
+    # 方块小人：照 Claude Code `Clawd` 的三条做法（分段拼 / 同宽同高 / 四分块）。
+    # **同宽同高**是硬要求：换姿势让布局跳一下，比不做动画还糟（第一版手绘就差了 1 格）。
+    _figs33 = [_w33.block_figure(_p33) for _p33 in _w33.BLOCK_FIGURE]
+    check("★方块小人：所有姿势**同宽同高**（换姿势不许挤动布局），认不出的姿势回退默认",
+          all(len(_f33) == 2 for _f33 in _figs33)
+          and len({_w33.display_width(_r33) for _f33 in _figs33 for _r33 in _f33}) == 1
+          and _w33.block_figure("乱写的姿势") == _w33.BLOCK_FIGURE["default"],
+          [(_w33.display_width(_r33), _r33) for _f33 in _figs33 for _r33 in _f33][:4])
+    check("★姿势表示思考强度（low 蹲 / high·max 举臂 / auto 站）+ 思考行带 `∴` 与强度符号",
+          _w33.pose_for_effort("low") == "crouch"
+          and _w33.pose_for_effort("max") == "arms-up"
+          and _w33.pose_for_effort("auto") == "default"
+          and _w33.think_label("high", "思考中") == "∴ 思考中 ◉"
+          and _w33.think_label().startswith("∴"),
+          [_w33.pose_for_effort(_x33) for _x33 in ("low", "high", "max", "auto")])
 
     # —— collapse_lines：纯函数折叠 / 不超限原样 / 空输入 ——
     _cl10 = collapse_lines([f"行{i}" for i in range(10)], 4)
@@ -8952,6 +9064,347 @@ if _want("50"):
     check("向导 H-33：非隐藏步不许被误标（否则普通输入也会被遮住）",
           _model50 is None or not _model50["kw"].get("hidden"), _host50_log)
 
+    # H-31 追加：`save_cli_config` 只许落**用户配置** —— `--serve` 把 ServeServer 等运行时
+    # 对象挂在 `cfg["_serve"]` 上，而这里原先是直接 dump 整个 dict，于是前端里**任何会存
+    # 配置的命令**（/provider、/model、/lang…）都炸成
+    # `命令执行失败: Object of type ServeServer is not JSON serializable`。
+    # 顺带：那些对象要是可序列化，就会被写进 ~/.ai_code.json —— 那是配置污染。
+    import json as _json50  # noqa: E402
+
+    _tmp_cfg50 = mktemp("cfg50") / "cfg.json"
+    _orig_path50 = _ai50.CONFIG_PATH
+    _ai50.CONFIG_PATH = _tmp_cfg50
+
+    class _NotJson50:                      # 故意不可序列化：模拟 ServeServer
+        pass
+
+    try:
+        # 闸门 `ACE_NO_SAVE_CONFIG=1` 只挡**真实**配置路径；这里已重定向到临时文件，
+        # 所以照常写 —— 这正是 H-31 的原意：写临时可以、写真实不行。
+        _ai50.save_cli_config({"model": "m", "permission": "write",
+                               "_serve": _NotJson50(), "_events": _NotJson50()})
+        _saved50 = _json50.loads(_tmp_cfg50.read_text(encoding="utf-8"))
+    finally:
+        _ai50.CONFIG_PATH = _orig_path50
+    check("H-31 ★存配置滤掉运行时键（`_serve` 这类对象进 JSON 必炸：--serve 下 /provider 全废）",
+          _saved50 == {"model": "m", "permission": "write"}, _saved50)
+
+    # `/key`：一步改密钥。此前"改密钥"只有 `/config` 那条三步向导（提供商→密钥→模型），
+    # 而 `/provider <n>` 根本不问密钥 —— 前端里于是没有直接入口。
+    _tmp_key50 = mktemp("key50") / "cfg.json"
+    _ai50.CONFIG_PATH = _tmp_key50
+    _orig_ask50 = _cli50._ask_text
+    _orig_reload50k = _cli50._reload_client_for
+    _ask_seen50: list = []
+
+    def _ask50(prompt, default="", *, hidden=False, **_kw):
+        _ask_seen50.append((str(prompt), bool(hidden)))
+        return "sk-one-step"
+
+    _cli50._ask_text = _ask50
+    _cli50._reload_client_for = lambda _why: None
+    try:
+        with _cl50.redirect_stdout(_io50.StringIO()):
+            _cli50._cmd_key(["/key"])
+        _saved50k = _json50.loads(_tmp_key50.read_text(encoding="utf-8"))
+    finally:
+        _cli50._ask_text = _orig_ask50
+        _cli50._reload_client_for = _orig_reload50k
+        _ai50.CONFIG_PATH = _orig_path50
+    check("H-31 ★/key 一步改密钥：提示必须 hidden（不回显）、且真的落盘并重建连接",
+          _saved50k.get("api_key") == "sk-one-step"
+          and _ask_seen50 and _ask_seen50[0][1] is True,
+          (_ask_seen50, _saved50k.get("api_key")))
+
+    # `/config` 的**选择步必须弹选择框**（与 `/provider` 同一套交互），而不是"打印一份
+    # 可选值清单、再让用户手输编号"。此前 `WizardStep.choices` 只用于展示（docstring 自己
+    # 写着），于是同一件"选提供商"在两处是两种交互 —— 用户当然会说"这里怎么不能选"。
+    _cli50w = _ai50.AgentCLI({"project_root": str(_root50), "permission": "write",
+                              "bait": False, "base_url": _ai50.PROVIDERS[0]["base_url"],
+                              "api_key": "", "model": _ai50.PROVIDERS[0]["models"][0]},
+                             mock=True)
+
+    class _Host50W:
+        """假外壳：`choose` 按真实契约返回**选中的那一条文本**（见 ServeUIHost.choose）。"""
+
+        def __init__(self):
+            self.calls: list = []
+
+        def choose(self, title, options, with_effort=False):
+            opts = list(options)
+            self.calls.append(("choose", str(title), opts))
+            n = 1 if len(self.calls) == 1 else 0      # 提供商选第 2 项；模型选第 1 项
+            return opts[n] if 0 <= n < len(opts) else None
+
+        def confirm(self, _q):
+            return False
+
+        def ask_text(self, prompt, default="", hidden=False):
+            self.calls.append(("text", str(prompt), bool(hidden)))
+            return "sk-wiz"
+
+    _h50w = _Host50W()
+    _cli50w.attach_ui(_h50w)
+    _orig_save50w, _orig_reload50w = _ai50.save_cli_config, _cli50w._reload_client_for
+    _ai50.save_cli_config = lambda _c: None
+    _cli50w._reload_client_for = lambda _why: None
+    try:
+        with _cl50.redirect_stdout(_io50.StringIO()):
+            _cli50w._config_wizard()
+    finally:
+        _ai50.save_cli_config = _orig_save50w
+        _cli50w._reload_client_for = _orig_reload50w
+    check("★/config 的提供商与模型步走**选择框**（不是打印清单再让人手输编号）",
+          [c[0] for c in _h50w.calls] == ["choose", "text", "choose"]
+          and _h50w.calls[1][2] is True
+          and _cli50w.cfg.get("base_url") == _ai50.PROVIDERS[1]["base_url"]
+          and _cli50w.cfg.get("model") == _ai50.PROVIDERS[1]["models"][0],
+          (_h50w.calls, _cli50w.cfg.get("base_url"), _cli50w.cfg.get("model")))
+
+    # ★H-31 追加（**子进程也守**）：`ACE_NO_SAVE_CONFIG=1` 时真实配置一个字节都不落盘。
+    # 上面那把桩只在进程内生效，而本套件会 spawn `ai_code.py` —— 光靠桩挡不住子进程；
+    # 实测 2026-10-04 15:18 一次全量就把真实配置覆盖成了测试用的空壳。
+    # 注意这里要用 `_REAL_CONFIG_PATH`：本段之前的用例会把 `CONFIG_PATH` 重定向到临时文件，
+    # 跟着那个走就变成"校验一份测试自己写的临时配置"，测不到真正要守的东西。
+    _cfg50p = _ai50._REAL_CONFIG_PATH
+    _before50c = _cfg50p.read_bytes() if _cfg50p.exists() else b""
+    _path50k = _ai50.CONFIG_PATH
+    _old50g = os.environ.get("ACE_NO_SAVE_CONFIG")
+    _ai50.CONFIG_PATH = _cfg50p               # 目标对准真实路径 —— 闸门才该拦住它
+    os.environ["ACE_NO_SAVE_CONFIG"] = "1"
+    try:
+        _ai50.save_cli_config({"model": "SHOULD-NOT-LAND", "api_key": "x"})
+    finally:
+        _ai50.CONFIG_PATH = _path50k
+        if _old50g is None:
+            os.environ.pop("ACE_NO_SAVE_CONFIG", None)
+        else:
+            os.environ["ACE_NO_SAVE_CONFIG"] = _old50g
+    _after50c = _cfg50p.read_bytes() if _cfg50p.exists() else b""
+    check("★H-31 子进程也守：`ACE_NO_SAVE_CONFIG=1` 时真实配置一个字节都不变",
+          _before50c == _after50c, (_before50c[:40], _after50c[:40]))
+
+    # ★**窗口跟模型走**：此前是一个全局 32768，于是 1M 窗口的模型只装 3% 对话。
+    # 表里**只放核过出处的条目**（DeepSeek 官方 Models & Pricing: CONTEXT LENGTH 1M；
+    # 智谱官方 GLM-4.6 文档: 上下文窗口 200K）；其余**不猜** —— 猜了就是用今天的认知
+    # 换明天的腐烂，而且猜大了直接发超被接口拒。不认识的一律走兜底 + 提示用户校正。
+    from cli import ace_context as _ctx50  # noqa: E402
+
+    _want50 = {"deepseek-v4-flash": 1_000_000, "deepseek-v4-pro": 1_000_000,
+               "glm-4.6": 200_000, "glm-4.7": 200_000}
+    _badwin50 = {m: _ctx50.window_for(m) for m, want in _want50.items()
+                 if _ctx50.window_for(m) != want}
+    check("★窗口跟模型走：表里**有出处**的模型给对（DeepSeek 1M / GLM-4.6 200K）",
+          not _badwin50, _badwin50)
+    _src50 = {m: _ctx50.window_with_source(m)[1] for m in
+              ("deepseek-v4-flash", "glm-4.6", "gpt-4o", "claude-3-5-sonnet", "m1")}
+    check("★**不知道就说不知道**：表外的模型走兜底并标成 fallback（不拿猜测当答案）",
+          _src50["gpt-4o"] == "fallback" and _src50["claude-3-5-sonnet"] == "fallback"
+          and _src50["m1"] == "fallback" and _src50["deepseek-v4-flash"] == "table"
+          and _ctx50.window_for("gpt-4o") == _ctx50.DEFAULT_CONTEXT_WINDOW,
+          _src50)
+    check("★用户显式配置压过模型表（表是省事，不是覆盖用户）",
+          _ctx50.window_for("deepseek-flash", override=65536) == 65536
+          and _ctx50.window_for("deepseek-flash") == 1_000_000
+          and _ctx50.window_with_source("m1", override=65536)[1] == "user", "")
+
+    # `/window`：**看得见 + 一条命令能改**。表外的模型（比如 gpt-4o）不该让用户
+    # 一辈子用兜底值干活 —— 所以他自己的旋钮必须真的能设、能落盘、能交还自动。
+    _cli50w = _ai50.AgentCLI({"project_root": str(mktemp("win50")), "permission": "readonly",
+                              "bait": False, "base_url": "", "api_key": "",
+                              "model": "deepseek-v4-flash"}, mock=True)
+    _w50a = _cli50w.context_window
+    _tmpw50 = mktemp("wincfg50") / "cfg.json"
+    _origw50 = _ai50.CONFIG_PATH
+    _ai50.CONFIG_PATH = _tmpw50                # 落盘指到临时文件（H-31：写临时可以）
+    try:
+        _bufw50 = _io50.StringIO()
+        with _cl50.redirect_stdout(_bufw50):
+            _cli50w._cmd_window(["/window"])
+        _bare50 = _bufw50.getvalue()
+        with _cl50.redirect_stdout(_io50.StringIO()):
+            _cli50w._cmd_window(["/window", "1m"])
+        _set50 = _cli50w.context_window
+        _saved50w = _json50.loads(_tmpw50.read_text(encoding="utf-8")).get("context_window")
+        with _cl50.redirect_stdout(_io50.StringIO()):
+            _cli50w._cmd_window(["/window", "auto"])
+        _auto50 = _cli50w.context_window
+        _bufbad50 = _io50.StringIO()
+        with _cl50.redirect_stdout(_bufbad50):
+            _cli50w._cmd_window(["/window", "很大很大"])
+    finally:
+        _ai50.CONFIG_PATH = _origw50
+    check("★`/window` 裸命令报出窗口与**来源**（用户设的/已知表/未知兜底）",
+          "1000000" in _bare50 or "1,000,000" in _bare50, _bare50[:160])
+    check("★`/window 1m` 真的改窗口并落盘；`/window auto` 交还自动判断",
+          _set50 == 1_000_000 and _saved50w == 1_000_000 and _auto50 == 1_000_000,
+          (_set50, _saved50w, _auto50))
+    check("★`/window <胡写>` 明确报错而不是静默当成数字",
+          "很大很大" in _bufbad50.getvalue(), _bufbad50.getvalue()[:120])
+
+    _cli50w.cfg["model"] = "glm-4.6"
+    with _cl50.redirect_stdout(_io50.StringIO()):
+        _cli50w._reload_client_for("测试：换模型")
+    check("★换模型就重算窗口（DeepSeek 1M → GLM 200K），不留着旧值白扔容量",
+          _w50a == 1_000_000 and _cli50w.context_window == 200_000,
+          (_w50a, _cli50w.context_window))
+
+    # —— 裸命令 + 闭集取值 ⇒ 弹选择器（"打前缀就跳出来挑"），与 /provider 同一套 ——
+    from ui import ace_menu as _mn50  # noqa: E402
+
+    class _Host50P:
+        def __init__(self, pick):
+            self.pick = pick
+            self.calls: list = []
+
+        def choose(self, title, options, **_kw):
+            opts = list(options)
+            self.calls.append((str(title), opts))
+            return opts[self.pick] if 0 <= self.pick < len(opts) else None
+
+        def confirm(self, _q):
+            return False
+
+        def ask_text(self, prompt, default="", hidden=False):
+            return ""
+
+    _cli50p = _ai50.AgentCLI({"project_root": str(_root50), "permission": "readonly",
+                              "bait": False, "base_url": "", "api_key": "",
+                              "model": "m1"}, mock=True)
+    _h50p = _Host50P(1)
+    _cli50p.attach_ui(_h50p)
+    with _cl50.redirect_stdout(_io50.StringIO()):
+        _cli50p.run_command("/lang")
+    # `/lang` = **界面语言**（设计定调）：选第 2 项后界面语言变 en，且**不许**去动
+    # "模型用什么语言回答"这件事 —— 后者不是界面开关的职责。
+    _lang_ok50 = (bool(_h50p.calls)
+                  and _h50p.calls[0][1][:2] == ["zh  中文", "en  English"]
+                  and _cli50p.lang == "en"
+                  and not _cli50p.cfg.get("reply_lang"))
+    # **必须还原界面语言**：`/lang` 改的是全局 UI 语言，切到英文后本段后面那些
+    # 断言中文文案的检查会全红 —— 那是测试没收尾，不是功能坏了。
+    _cli50p._set_lang("zh")
+    check("★裸命令弹选择器：/lang 列出 zh/en/ja 并切**界面语言**（不动回答语言）",
+          _lang_ok50, (_h50p.calls, _cli50p.lang, _cli50p.cfg.get("reply_lang")))
+    _src50lang = (FOLDER / "ai_code.py").read_text(encoding="utf-8")
+    check("★界面语言 ≠ 回答语言：源码里已无 `reply_lang`，系统提示词里也没有"
+          "'请始终使用 X 回答'那种语言指令（想让模型换语言，在对话里自己说）",
+          "reply_lang" not in _src50lang
+          and "语言指令" not in _cli50p._build_system_prompt(), "")
+
+    _h50v = _Host50P(0)
+    _cli50p.attach_ui(_h50v)
+    with _cl50.redirect_stdout(_io50.StringIO()):
+        _cli50p.run_command("/vim")
+    check("★裸命令弹选择器：`/vim` 裸敲是**翻转动作**，不许被截成选择器（否则动作做两遍）",
+          _h50v.calls == [] and _cli50p.cfg.get("vim_mode") is True,
+          (_h50v.calls, _cli50p.cfg.get("vim_mode")))
+    _cli50p.attach_ui(None)
+    _cli50w.attach_ui(None)
+
+    _bad50p = [c for c in _ai50.AgentCLI.ARG_PICK_BARE
+               if c not in _ai50.AgentCLI.COMMANDS
+               or len(_mn50.ARGUMENT_HINTS.get(c, ())) < 2]
+    check("★裸命令弹选择器：表里每条命令都真实存在且有 ≥2 个取值（表不许腐化）",
+          not _bad50p, _bad50p)
+
+    # ★进聊天**不许清屏**：`\x1b[2J` 会把终端**回滚缓冲**一起清掉 —— 首屏那张卡（HooH 标）
+    # 与进聊天前刚打的东西（`/resume` 的历史预览）全没了，用户往上翻只能翻到清屏那一刻
+    # 之后（实测投诉："图标没了、划不上去"）。首屏该像开场字幕一样自然滚上去。
+    import inspect as _inspect50  # noqa: E402
+    _repl_src50 = _inspect50.getsource(_ai50.AgentCLI.repl)
+    # 判据要**剥掉注释**再看：上面那段解释本身就写着"原来这里有 `self._clear_screen()`"。
+    # 而且只盯**函数体直系**那句（8 空格缩进）—— `repl` 里还给 Ctrl+L 绑了一个嵌套的
+    # `_clear_screen(event)`，那是用户主动清屏，合法。
+    _repl_code50 = "\n".join(_l50.split("#", 1)[0] for _l50 in _repl_src50.splitlines())
+    _direct50 = [_l50 for _l50 in _repl_code50.splitlines()
+                 if _l50.strip() == "self._clear_screen()"
+                 and len(_l50) - len(_l50.lstrip()) == 8]
+    check("★进聊天不清屏（清屏会连终端回滚缓冲一起清掉：HooH 标与召回预览都会消失）",
+          not _direct50, _direct50[:2])
+
+    # —— 第二层：下一层的可选项**取决于上一层选了什么** ——
+    class _Host50T:
+        """假外壳：`choose` 返回选中文本；`ask_text` 记住 hidden 并给一个密钥。"""
+
+        def __init__(self):
+            self.calls: list = []
+            self.answer = "sk-2nd"
+
+        def choose(self, title, options, **_kw):
+            opts = list(options)
+            self.calls.append(("choose", str(title), opts))
+            if not opts:
+                return None
+            return opts[1] if len(opts) > 1 else opts[0]
+
+        def confirm(self, _q):
+            return False
+
+        def ask_text(self, prompt, default="", hidden=False):
+            self.calls.append(("text", str(prompt), bool(hidden)))
+            return self.answer
+
+    _cli50t = _ai50.AgentCLI({"project_root": str(_root50), "permission": "readonly",
+                              "bait": False, "base_url": _ai50.PROVIDERS[0]["base_url"],
+                              "api_key": "", "model": _ai50.PROVIDERS[0]["models"][0]},
+                             mock=True)
+    _cli50t.el.todos.add("先写测试")
+    _cli50t.el.todos.add("再改实现")
+    _h50t = _Host50T()
+    _cli50t.attach_ui(_h50t)
+    with _cl50.redirect_stdout(_io50.StringIO()):
+        _cli50t.run_command("/todo start")
+    _todo50t = [(i.id, i.status) for i in _cli50t.el.todos.items]
+    check("★第二层：`/todo start` 弹**哪一条待办**（第一层选了动作，第二层挑对象）",
+          bool(_h50t.calls) and _h50t.calls[0][2][:2] == ["#1 先写测试", "#2 再改实现"]
+          and _todo50t == [(1, "pending"), (2, "in_progress")],
+          (_h50t.calls[:1], _todo50t))
+
+    _orig_save50t, _orig_reload50t = _ai50.save_cli_config, _cli50t._reload_client_for
+    _ai50.save_cli_config = lambda _c: None
+    _cli50t._reload_client_for = lambda _why: None
+    _h50t2 = _Host50T()
+    _cli50t.attach_ui(_h50t2)
+    try:
+        with _cl50.redirect_stdout(_io50.StringIO()):
+            _cli50t.run_command("/provider 2")
+    finally:
+        _ai50.save_cli_config = _orig_save50t
+        _cli50t._reload_client_for = _orig_reload50t
+    check("★第二层：`/provider` 换到没有密钥的家就**当场问**（hidden 输入），并真的落库",
+          any(c[0] == "text" and c[2] is True for c in _h50t2.calls)
+          and _cli50t.cfg.get("base_url") == _ai50.PROVIDERS[1]["base_url"]
+          and _cli50t.cfg.get("api_key") == "sk-2nd",
+          (_h50t2.calls, _cli50t.cfg.get("base_url"), _cli50t.cfg.get("api_key")))
+
+    # —— 第二层：**手打序号**的命令改成弹出清单（/diff 挑改动、/rewind 挑轮次）——
+    _h50d = _Host50T()
+    _cli50t.attach_ui(_h50d)
+    _diff_item50 = {"tool": "file_write", "path": "a.py",
+                    "diff": "--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-old\n+new\n"}
+    _cli50t._diff_history = [_diff_item50]
+    with _cl50.redirect_stdout(_io50.StringIO()):
+        _cli50t.run_command("/diff")
+    check("★第二层：`/diff` 先给清单、再弹**挑哪一处**（选中即铺该条的逐行 diff）",
+          bool(_h50d.calls) and len(_h50d.calls[0][2]) == 1
+          and "a.py" in _h50d.calls[0][2][0],
+          _h50d.calls[:1])
+
+    for _n50 in ("user/message", "user/message"):
+        try:
+            _cli50t.session_log.append(_n50, {"text": "x"})
+        except Exception:      # noqa: BLE001 —— 日志不可用时这条检查自行退化
+            break
+    _h50r = _Host50T()
+    _cli50t.attach_ui(_h50r)
+    with _cl50.redirect_stdout(_io50.StringIO()):
+        _cli50t.run_command("/rewind")
+    check("★第二层：`/rewind` 不带轮次时弹**退到第几轮**（候选不含'退到最后一轮'这种空操作）",
+          (not _h50r.calls) or all("rewind_option" not in c[1][0] for c in _h50r.calls),
+          _h50r.calls[:1])
+    _cli50t.attach_ui(None)
+
     # 路径 B：宿主**有 `choose`、没有 `ask_text`** ⇒ 今天会掉进明文 `input()`
     _seen_input50: list = []
     _answers50_b = ["1", "sk-plain-leak", "m-host"]
@@ -9828,6 +10281,57 @@ if _want("53"):
     check("真 CLI：非交互终端提示如实说明内置输入行可用",
           "内置输入行" in _out53, _out53[:1200])
 
+    # —— 参数提示表：**跨语言同表** + 词条齐全 + 命令真实存在 ——
+    # 为什么值得一条跨语言断言：这张表在 Python（`ui/ace_menu.ARGUMENT_HINTS`）与 TS
+    # （`render/menu.ts`）各有一份，此前**没有任何东西钉住它们**。补全菜单是"两个外壳各
+    # 画一遍"的界面，一边加了另一边没加的症状是"同一台机器，换个外壳就找不到那个选项"。
+    import ai_code as _ai53  # noqa: E402
+
+    _ts53 = (FOLDER / "frontend" / "src" / "render" / "menu.ts").read_text(encoding="utf-8")
+    _block53 = _ts53.split("ARGUMENT_HINTS", 1)[1].split("\n};", 1)[0]
+    # 按"下一个命令"切块，而不是正则贪婪/懒惰匹配方括号 —— 表里既有跨行的条目
+    # （`/permission`）也有单行三层的（`'/queue': [['clear', 'arg_clear']],`），
+    # 拿 `\[(.*?)\]` 去匹配只会在单行那条上截到第一个值。
+    _chunks53 = re.split(r"\n\s*'(/[a-z]+)':", _block53)
+    _ts_hints53 = {_chunks53[_i53]: re.findall(r"\['([^']+)'", _chunks53[_i53 + 1])
+                   for _i53 in range(1, len(_chunks53) - 1, 2)}
+    _py_hints53 = {k: [v for v, _dk in vals]
+                   for k, vals in _mn53.ARGUMENT_HINTS.items()}
+    check("菜单参数表：Python 与 TS **同命令、同取值**（跨语言对拍；补一边另一边就红）",
+          _py_hints53 == _ts_hints53,
+          {k: (_py_hints53.get(k), _ts_hints53.get(k))
+           for k in sorted(set(_py_hints53) | set(_ts_hints53))
+           if _py_hints53.get(k) != _ts_hints53.get(k)})
+    check("菜单参数表：每条命令都真实存在（表里不许有野命令）",
+          all(k in _ai53.AgentCLI.COMMANDS for k in _py_hints53),
+          [k for k in _py_hints53 if k not in _ai53.AgentCLI.COMMANDS])
+    # 用户看得见的那一步：打「命令 + 空格」就把取值摆出来，不必去背 `readonly/write/full`。
+    _lang53 = [i.label for i in _mn53.build_menu("/lang ", 6, _CMDS53 | {"/lang": "cmd_lang"},
+                                                 translate=lambda k: k).items]
+    _eff53 = [i.label for i in _mn53.build_menu("/effort ", 8,
+                                                _CMDS53 | {"/effort": "cmd_effort"},
+                                                translate=lambda k: k).items]
+    check("菜单：/lang 空格后列出 zh/en/ja（前缀一打就弹，不用自己抄取值）",
+          _lang53 == ["zh", "en", "ja"], _lang53)
+    check("菜单：/effort 空格后列出五档强度",
+          _eff53 == ["auto", "low", "medium", "high", "max"], _eff53)
+    # **选中命令 → 下一层立刻出来**：有取值表的命令，补全插进输入框时要带上那个空格。
+    # 不带空格的后果（实测）：命令名一打全，菜单按"不弹就是关"关闭，第二层永远不出现。
+    _ins53 = {i.label: i.insert for i in
+              _mn53.command_items({"/todo": "cmd_todo", "/status": "cmd_status"},
+                                  translate=lambda k: k)}
+    check("菜单：有取值表的命令补全时带上空格（选中 /todo 后第二层才出得来）",
+          _ins53.get("/todo") == "/todo " and _ins53.get("/status") == "/status", _ins53)
+    check("菜单：选中 /todo 之后（输入 '/todo '）弹出的是**它的取值**，不是它自己",
+          [i.label for i in _menu53("/todo ").items]
+          == ["add", "start", "done", "remove", "clear"],
+          [i.label for i in _menu53("/todo ").items])
+    _loc53 = json.loads((FOLDER / "locales" / "zh.json").read_text(encoding="utf-8"))
+    _missing53 = sorted({_dk for vals in _mn53.ARGUMENT_HINTS.values() for _v, _dk in vals
+                         if _dk not in _loc53})
+    check("菜单参数表：取值说明在 zh.json 都有词条（菜单不泄漏键名）",
+          not _missing53, _missing53)
+
     # ============================================================
 
 if _want("54"):
@@ -10523,103 +11027,99 @@ if _want("59"):
 
 if _want("60"):
     # ── [60] ────
-    print("[60] 组件化全屏界面（Textual）—— 四区骨架 · 引擎桥接 · 无终端测试台")
+    print("[60] 引擎界面（主屏两车道）—— 桥接 · 会话循环 · 宿主问答 · CLI 接线")
     # ============================================================
-    import asyncio as _aio60  # noqa: E402
+    import io as _io60  # noqa: E402
+    import queue as _q60  # noqa: E402
 
-    try:
-        from tui import tui_available as _tui_avail60
-        _TUI60 = bool(_tui_avail60())
-    except Exception:  # noqa: BLE001 —— 没装 textual：相关断言走"跳过"，不算失败
-        _TUI60 = False
-    from tui.bridge import EngineBridge as _Bridge60  # noqa: E402 —— 纯逻辑，无需 textual
-    if _TUI60:
-        from tui.app import AceTuiApp as _AceTui60  # noqa: E402
+    from ui import ace_engine_repl as _eng60  # noqa: E402
+    from ui import ace_host as _host60  # noqa: E402
+    from ui import ace_screen as _scr60  # noqa: E402
 
-    def _raises60(fn) -> bool:
-        try:
-            fn()
-            return False
-        except OSError:
-            return True
+    # —— 桥接（_LineSink）：只有完整行进转录；带 \r 的重绘整条丢掉 ——
+    _queue60: "_q60.Queue[str]" = _q60.Queue()
+    _sink60 = _eng60._LineSink(_queue60)
+    _sink60.write("第一行\n第二行\n半行")
+    check("[60] 桥接：只有完整行进转录，半行先留着（与两车道同一套规矩）",
+          _queue60.qsize() == 2, _queue60.qsize())
+    _sink60.write("\r◈ 思考中 3s   ")
+    check("[60] 桥接：带 \\r 的重绘整条丢掉（写进 scrollback 只会变成残影）",
+          _queue60.qsize() == 2, _queue60.qsize())
+    while not _queue60.empty():          # 先把前两行取走，下面只看新写进去的那条
+        _queue60.get_nowait()
+    _sink60.write("\x1b[31m红色\x1b[0m\n")
+    _row60 = _queue60.get_nowait()
+    check("[60] 桥接：颜色**原样保留**（车道一是定稿原文，颜色由上游决定）",
+          _row60 == "\x1b[31m红色\x1b[0m", repr(_row60))
+    check("[60] 桥接：isatty 恒 False（界面里不该再弹自己的交互框）",
+          _sink60.isatty() is False and _sink60.writable() is True, "")
 
-    # —— 引擎桥接是纯逻辑：与 Textual 在不在无关 ——
-    _sink60: list = []
-    _bridge60 = _Bridge60(_sink60.extend)
-    _bridge60.write("第一行\n第二行\n半行")
-    check("桥接：只有完整行进界面，半行先留着（与全屏会话同一套规矩）",
-          _sink60 == ["第一行", "第二行"], _sink60)
-    _bridge60.flush()
-    check("桥接：flush 时把尾巴补上（不静默丢最后一行）",
-          _sink60[-1] == "半行", _sink60)
-    _bridge60.write("\r◈ 思考中 3s   ")
-    check("桥接：带 \\r 的重绘整条丢掉（进滚动区只会变成残影）",
-          _bridge60.dropped == 1 and len(_sink60) == 3, (_bridge60.dropped, _sink60))
-    _bridge60.write("\x1b[31m红色\x1b[0m\n")
-    check("桥接：颜色码剥掉（Textual 自己管样式，留着 ANSI 会串进文本）",
-          _sink60[-1] == "红色", _sink60[-1])
-    check("桥接：isatty 恒 False（界面里不该再弹自己的交互框）",
-          _bridge60.isatty() is False, "")
-    check("桥接：没有文件描述符时抛 OSError（不给假 fd）",
-          _raises60(lambda: _bridge60.fileno()), "")
+    # —— 引擎断言组：两车道字节流、宿主问答、跨线程接线 ——
+    _bad60 = _scr60.check() + _host60.check() + _eng60.check()
+    check("[60] 引擎断言组（帧缓冲/两车道/宿主问答/异步接线）全通过",
+          not _bad60, _bad60[:3])
 
-    if not _TUI60:
-        skip("Textual 界面（输入→引擎→转写区）", "未安装 textual（python setup_env.py --ensure）")
-    else:
-        def _fake_engine60(line: str) -> None:
-            print(f"◈ 收到：{line}")
-            print("\r重绘应被丢掉")
-            print("⚙ file_read ✓")
+    # —— 无终端跑一遍真会话循环：提交 → 引擎 → 转录；状态行常驻 ——
+    class _FakeCLI60:
+        def __init__(self) -> None:
+            self.seen: list = []
+            self.host = None
+            self._queued: list = []
 
-        def _status60():
-            return [("class:footer", " mock "), ("class:footer", " 权限:write ")]
+        def _footer(self, width: int = 0):
+            return [("model", "mock-model"), ("permission", "write")]
 
-        async def _drive60():
-            app = _AceTui60(engine=_fake_engine60, status_provider=_status60)
-            async with app.run_test(size=(100, 30)) as pilot:
-                await pilot.press(*"hello")
-                await pilot.press("enter")
-                await pilot.pause(0.5)
-                body = app.query_one("#body")
-                texts = [str(w.render()) for w in body.children]
-                out = {"texts": texts,
-                       "prompt_cleared": app.query_one("#prompt").value == "",
-                       "focused": type(app.focused).__name__,
-                       "status": str(app.query_one("#status").render()),
-                       "dropped": app._bridge.dropped}
-                app.action_clear_transcript()
-                await pilot.pause(0.1)
-                out["cleared"] = len(body.children)
-            return out
+        def _menu_state(self, text, cursor):
+            from ui import ace_menu as _m
+            return _m.MenuState()
 
-        _res60 = _aio60.run(_drive60())
-        check("TUI：输入提交后进转写区（输入 → 引擎 → 界面走通）",
-              any("❯ hello" in t for t in _res60["texts"])
-              and any("收到：hello" in t for t in _res60["texts"]), _res60["texts"][:4])
-        check("TUI：引擎的 print 被桥接成组件（工具行也在）",
-              any("file_read" in t for t in _res60["texts"]), "")
-        check("TUI：提交后输入框清空、焦点仍在输入框（打完字不会没进输入框）",
-              _res60["prompt_cleared"] and _res60["focused"] == "ChordInput",
-              (_res60["prompt_cleared"], _res60["focused"]))
-        check("TUI：状态行常驻（读的是同一份底栏数据）",
-              "mock" in _res60["status"] and "权限" in _res60["status"], _res60["status"])
-        check("TUI：spinner 的 \\r 重绘不会进滚动区",
-              _res60["dropped"] >= 1, _res60["dropped"])
-        check("TUI：清屏只清转写区（组件数归零）", _res60["cleared"] == 0, _res60["cleared"])
-        _bkeys60 = list(_AceTui60(engine=lambda line: None)._bindings.key_to_bindings)
-        check("TUI：绑定了 Ctrl+Q 退出与 Ctrl+L 清屏（键位现在由 keymap 生成）",
-              "ctrl+q" in _bkeys60 and "ctrl+l" in _bkeys60, _bkeys60)
-        check("TUI：CSS 里状态行与输入框是 dock（固定），只有转写区滚动",
-              "#status" in _AceTui60.CSS and "#prompt" in _AceTui60.CSS
-              and "#body" in _AceTui60.CSS, "")
+        def attach_ui(self, host) -> None:
+            self.host = host
 
-    # —— CLI 接线：--tui 走同一套 _process_line，没装就如实回退 ——
+        def request_stop(self) -> None:
+            return None
+
+    _out60 = _io60.StringIO()
+    _cli60 = _FakeCLI60()
+
+    def _turn60(line: str) -> None:
+        _cli60.seen.append(line)
+        print("◈ 收到：" + line)
+
+    class _Keys60:
+        """脚本化按键：过 parse_key，和真终端同一条口径（\r 是 enter，不是字符）。"""
+        def __init__(self, head: str, tail: str = "") -> None:
+            from ui import ace_prompt as _p
+            self._p = _p
+            self._head = list(head)
+            self._tail = list(tail)
+
+        def read(self, timeout=None):
+            if self._head:
+                return self._p.parse_key(self._head.pop(0))
+            return self._p.parse_key(self._tail.pop(0)) if self._tail else ""
+
+    _eng60.run_engine_repl(_cli60, out=_out60, turn=_turn60, keys=_Keys60("hello\r"))
+    _text60 = _out60.getvalue()
+    check("[60] 会话循环：输入→引擎→转录走通（提交送到引擎、两侧都进转录）",
+          _cli60.seen == ["hello"] and "> hello" in _text60
+          and "◈ 收到：hello" in _text60, (_cli60.seen, _text60[:60]))
+    check("[60] 会话循环：状态行常驻（读的是同一份底栏数据）",
+          "mock-model" in _text60 and "write" in _text60, _text60[-80:])
+    check("[60] 会话循环：宿主挂上了（权限问答不会去抢 stdin）",
+          _cli60.host is not None and getattr(_cli60.host, "pump", None) is not None, "")
+
+    # —— CLI 接线：走引擎界面，且真终端下默认就是它 ——
     _src60 = (FOLDER / "ai_code.py").read_text(encoding="utf-8")
-    check("源码级：--tui 接的是 run_tui + 同一个 _process_line（引擎没分叉）",
-          "from tui.app import run_tui" in _src60
-          and "engine=lambda line: cli._process_line(line)" in _src60, "")
-    check("源码级：没装 textual 时如实回退（不假装跑了 TUI）",
-          "TUI 不可用" in _src60 and "run_tui is not None" in _src60, "")
+    check("[60] 源码级：CLI 接的是 run_engine_repl，同一个 _process_line（引擎没分叉）",
+          "from ui.ace_engine_repl import run_engine_repl" in _src60
+          and "def _engine_default_ok" in _src60, "")
+    check("[60] 源码级：Textual 那条路已拆（不再 import tui / run_tui）",
+          "from tui" not in _src60 and "run_tui" not in _src60
+          and "AceTuiApp" not in _src60, "")
+    _setup60 = (FOLDER / "setup_env.py").read_text(encoding="utf-8")
+    check("[60] 源码级：界面依赖里不再有 textual / rich（引擎路径零第三方界面库）",
+          '"textual"' not in _setup60 and '"rich"' not in _setup60, "")
 
     # ============================================================
 
@@ -12520,6 +13020,46 @@ if _want("69"):
           any("result" in p for p in
               _sv69.validate_frame({"v": 1, "type": "resp", "id": "1", "ok": True})), "")
 
+    # —— 收尾不变量：一轮中止（模型报错 / 用户中断 / 熔断 / 提前 return）也必须发收尾帧 ——
+    # 为什么是硬要求：`user_message` 与 `model_request` 把前端置成“忙”，**只有 `final` 能解除**。
+    # converse 里有 9 个裸 return，都到不了成功路径那条 final；漏掉收尾的实测后果是
+    # “api key 无效 → 401 → 底栏永远显示『推演中 14s』”，看着像还在跑。
+    import ai_code as _ai69b  # noqa: E402
+
+    class _Emitter69:
+        def __init__(self, sink):
+            self.sink = sink
+
+        def emit(self, type_, **fields):
+            self.sink.append((type_, fields))
+
+    class _TurnStub69:
+        json_mode = True
+        _turn_final_sent = False
+
+        def __init__(self):
+            self.sent = []
+            self.events = _Emitter69(self.sent)
+
+    _ts69 = _TurnStub69()
+    _ai69b.AgentCLI._close_turn_if_open(_ts69)
+    check("[69] 未收尾的一轮 ⇒ 补一条空 final（前端据此离开忙态，且不产生回复气泡）",
+          bool(_ts69.sent) and _ts69.sent[0][0] == "final"
+          and _ts69.sent[0][1].get("text") == ""
+          and _ts69.sent[0][1].get("aborted") is True, _ts69.sent)
+    _ts69._turn_final_sent = True
+    _ts69.sent.clear()
+    _ai69b.AgentCLI._close_turn_if_open(_ts69)
+    check("[69] 已收尾的一轮 ⇒ 不重复发（成功路径那条 final 不能被顶成两条）",
+          _ts69.sent == [], _ts69.sent)
+
+    _src69b = (FOLDER / "ai_code.py").read_text(encoding="utf-8")
+    check("[69] 源码级：三个入口都立了收尾不变量（serve 的 user.message **不走** _process_line，"
+          "漏一处前端照样卡在忙态）",
+          _src69b.count("_close_turn_if_open()") >= 3
+          and "cli._turn_final_sent = False" in _src69b,
+          _src69b.count("_close_turn_if_open()"))
+
     # —— 服务端：派发 / 未知方法不杀会话 / 悬挂期拒杂音 ——
     _in69, _out69 = _io69.StringIO(), _io69.StringIO()
     _srv69 = _sv69.ServeServer(reader=_in69, writer=_out69)
@@ -12587,11 +13127,14 @@ if _want("69"):
     # H-26：给 serve 子进程一个**项目根**。不给的话它按 cwd 把测试会话写进仓库自己的
     # `.ace_sessions/` —— 那是用户真实会话历史的目录，实测每跑一次全量 +8 个文件。
     _pr69 = str(mktemp("norepo69"))
-    def _serve_round69(decision, trigger, timeout=120):
+    def _serve_round69(decision, trigger, timeout=120, command=None):
         """起一个真的 `ai_code.py --serve`，跑一轮并在收到审批请求时递上答案。
 
         返回 (events, resps, 退出码, stderr, 是否被杀)。看门狗是必需的：
         "两边互等"这类死锁在 CI 上表现为超时，没有它就是一小时的挂死。
+
+        `command`：给一条斜杠命令就走 `command.exec`（而不是 `user.message`）——
+        用来验"命令也要收尾"那条不变量。
         """
         _p69 = _sp69.Popen(
             [sys.executable, str(FOLDER / "ai_code.py"), "--serve", "--mock",
@@ -12621,7 +13164,10 @@ if _want("69"):
 
         _ev69, _rp69, _n69, _shut69 = [], [], 0, False
         _send69(_sv69.make_req("1", "initialize", {"protocol": 1, "stream": True}))
-        _send69(_sv69.make_req("2", "user.message", {"text": trigger}))
+        if command is None:
+            _send69(_sv69.make_req("2", "user.message", {"text": trigger}))
+        else:
+            _send69(_sv69.make_req("2", "command.exec", {"line": command}))
         try:
             for _ln69 in _p69.stdout:
                 _ln69 = _ln69.strip()
@@ -12678,6 +13224,25 @@ if _want("69"):
     check("--serve：三条 req 都回了成功的 resp",
           len(_rp69) == 3 and all(r.get("ok") for r in _rp69),
           [(r.get("id"), r.get("ok")) for r in _rp69])
+
+    # **命令也要收尾**：前端提交任何一行都会先本地置忙（`App.tsx` 的乐观 UI），
+    # 而只有 `final` 能解除；命令不跑轮次 ⇒ 不经过 converse 那条 final。
+    # 少了这一步，`/net on` 之后底栏会**永远**停在"推演中 4s"（实测截图）。
+    _ev69c, _rp69c, _rc69c, _err69c, _k69c = _serve_round69("deny", "", command="/net on")
+    _types69c = [f["event"]["type"] for f in _ev69c]
+    _fin69c = [f["event"] for f in _ev69c if f["event"]["type"] == "final"]
+    check("--serve：★`command.exec` 之后也有收尾帧（否则命令跑完界面永远停在'推演中'）",
+          bool(_fin69c) and _fin69c[0].get("aborted") is False
+          and "notice" in _types69c and not _k69c,
+          (sorted(set(_types69c)), _fin69c[:1], _err69c[-200:]))
+
+    # ★切语言必须**告诉外壳**：引擎自己那份文案换了，但外壳（Ink 前端）有自己一份字典 ——
+    # 不发这条事件，用户看到的就是"引擎旁白英文、斜杠后面的提示还是中文"（实测投诉）。
+    _ev69l, _rp69l, _rc69l, _err69l, _k69l = _serve_round69("deny", "", command="/lang en")
+    _lang69 = [f["event"] for f in _ev69l if f["event"]["type"] == "language"]
+    check("★--serve：`/lang en` 发 `language` 事件（外壳据此换字典，中英文才一致）",
+          len(_lang69) == 1 and _lang69[0].get("lang") == "en" and not _k69l,
+          (_lang69, [f["event"]["type"] for f in _ev69l][:12], _err69l[-200:]))
     # tool_start 必须**早于** tool_call：前者驱动"正在跑"，后者是事后审计。
     # 顺序反了就等于工具跑完了才亮灯 —— 这条断言守的就是那个区别。
     if "tool_start" in _types69 and "tool_call" in _types69:
@@ -13093,9 +13658,11 @@ if _want("70"):
     _env70 = {k: v for k, v in os.environ.items()
               if k not in ("PYTHONUTF8", "PYTHONIOENCODING")}
     _cwd70 = mktemp("servecwd")          # H-26：别把测试会话写进仓库自己的 .ace_sessions/
+    # **临时 cwd 不够**：`project_root` 会优先取配置文件里的值（压在 cwd 之上），
+    # 所以这里必须显式给 `--project-root`，否则配置一指向仓库就照写不误（实测 +2 条）。
     _p70 = _sp70.Popen(
         [sys.executable, str(FOLDER / "ai_code.py"), "--serve", "--mock",
-         "--permission", "readonly"],
+         "--permission", "readonly", "--project-root", str(_cwd70)],
         cwd=str(_cwd70), stdin=_sp70.PIPE, stdout=_sp70.PIPE, stderr=_sp70.PIPE,
         text=True, encoding="utf-8", errors="replace", bufsize=1, env=_env70)
     _resp70, _echo70, _types70 = {}, {}, []
@@ -13157,7 +13724,7 @@ if _want("70"):
     # 的 permission.answer 应答）—— 比数事件条数稳，不依赖 mock 的具体台词。
     _p70q = _sp70.Popen(
         [sys.executable, str(FOLDER / "ai_code.py"), "--serve", "--mock",
-         "--permission", "readonly"],
+         "--permission", "readonly", "--project-root", str(_cwd70)],
         cwd=str(_cwd70), stdin=_sp70.PIPE, stdout=_sp70.PIPE, stderr=_sp70.PIPE,
         text=True, encoding="utf-8", errors="replace", bufsize=1)
     _perm70q, _stray70q, _end70q = [], [], {}

@@ -81,3 +81,8 @@ examples/02_document_parsing/drop_docs_here/*
 
 # 本地汉化产出（Claude Code 泄漏源码中文版）—— 不进版本库，等人工检验
 .ace-cc-zh/
+
+# 生成物 / 本地工作目录（不属于源码，不进库）
+.acl-recovery/
+previews/
+video_work/

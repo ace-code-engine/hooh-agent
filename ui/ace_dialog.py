@@ -398,19 +398,25 @@ class WizardStep:
     `validate(answer) -> str` 返回错误文本（空串 = 通过）。`choices` 只用于展示
     （把可选值列出来），真正的取值判定仍在 `validate` 里 —— 展示与判定同源是最好的，
     但这里刻意不合并：展示可以宽松（给人看），判定必须严（给数据把关）。
+
+    `choice_values` 是 `choices` 的**平行表：展示串 → 答案值**。有了它，外壳就能把
+    "可选值"弹成**选择框**（与 `/provider` 同一套交互），再把选中项折回答案 ——
+    而不是先打一份清单、再让用户手输编号。留空 = 没有这个对应关系，界面退回文本输入。
     """
 
     def __init__(self, key: str, title: str, prompt: str,
                  default: str = "", hidden: bool = False,
                  choices: Sequence[str] = (), help_text: str = "",
                  skippable: bool = True,
-                 validate: Optional[Callable[[str], str]] = None) -> None:
+                 validate: Optional[Callable[[str], str]] = None,
+                 choice_values: Sequence[str] = ()) -> None:
         self.key = str(key)
         self.title = str(title)
         self.prompt = str(prompt)
         self.default = str(default)
         self.hidden = bool(hidden)
         self.choices = [str(x) for x in (choices or [])]
+        self.choice_values = [str(x) for x in (choice_values or ())]
         self.help_text = str(help_text)
         self.skippable = bool(skippable)
         self.validate = validate

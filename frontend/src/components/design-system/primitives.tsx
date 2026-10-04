@@ -1,0 +1,179 @@
+/**
+ * 设计系统 · 小原语（照 Claude Code `components/design-system/` 的**目录结构与语义**，
+ * 实现是自己的）。这一层解决的是"同一件小事三处长三个样"：
+ * 分隔线、状态图标、进度条、byline、快捷键提示 —— 每个界面都要用，各写一遍必然漂。
+ *
+ * 与 Python 侧 `ui/ace_widgets.py` **逐条对应**（那边是终端，这边是 Ink 前端），
+ * 关键算法刻意写成同形，`test/design-parity.test.ts` 会拿真 Python 对拍。
+ */
+
+import { Text, useStdout } from 'ink';
+import React from 'react';
+
+export type ColorFn = (token: string) => string | undefined;
+
+// ─────────────────────────────────────────────────────────── Divider
+
+/**
+ * 整宽分隔线；给了 `title` 就把它**居中嵌进线里**（`──── 状态 ────`）。
+ *
+ * 为什么不用固定长度（此前 markdown 那块是 `'─'.repeat(20)`）：宽终端上像"没画完"，
+ * 窄终端上又可能溢出。宽度只能从 `useStdout()` 拿，所以这里自己读。
+ */
+export function Divider({
+  title = '',
+  char = '─',
+  width,
+  color,
+}: {
+  title?: string;
+  char?: string;
+  width?: number;
+  color?: ColorFn;
+}): React.ReactElement {
+  const { stdout } = useStdout();
+  const total = Math.max(8, width ?? stdout?.columns ?? 80);
+  const label = title ? ` ${title.trim()} ` : '';
+  if (!label) {
+    return <Text color={color?.('border')}>{char.repeat(total)}</Text>;
+  }
+  // 中文占两列：这里按**码点数**近似居中 —— 前端拿不到 displayWidth（那是 Python 侧的表），
+  // 精确对齐由 `test/design-parity.test.ts` 只在纯 ASCII 标题上对拍，中文只保证"线是整宽的"。
+  const room = Math.max(0, total - label.length);
+  const left = Math.floor(room / 2);
+  const right = room - left;
+  return (
+    <Text>
+      <Text color={color?.('border')}>{char.repeat(left)}</Text>
+      <Text color={color?.('dim')}>{label}</Text>
+      <Text color={color?.('border')}>{char.repeat(right)}</Text>
+    </Text>
+  );
+}
+
+// ─────────────────────────────────────────────────────────── StatusIcon
+
+/** 六态 → (图标, token)。与 `ui/ace_widgets.STATUS_ICONS` 同表。 */
+export const STATUS_ICONS: Record<string, readonly [string, string]> = {
+  success: ['✓', 'success'],
+  error: ['✗', 'error'],
+  warning: ['⚠', 'warn'],
+  info: ['ℹ', 'info'],
+  pending: ['○', 'dim'],
+  loading: ['◌', 'tool_pending'],
+};
+
+const ALIASES: Record<string, string> = {
+  ok: 'success', done: 'success', pass: 'success', passed: 'success',
+  fail: 'error', failed: 'error', err: 'error', '400': 'error', '403': 'error', '404': 'error',
+  warn: 'warning', '500': 'warning', '502': 'warning', '503': 'warning',
+  note: 'info', notice: 'info',
+  todo: 'queued', queued: 'pending', wait: 'pending', waiting: 'pending',
+  run: 'loading', running: 'loading', working: 'loading', busy: 'loading',
+};
+
+/** 状态词 → (图标, token)；认不出的一律当 `pending`（**不猜成功**）。 */
+export function statusIcon(state: string): readonly [string, string] {
+  const key = String(state ?? '').trim().toLowerCase();
+  const norm = STATUS_ICONS[key] ? key : ALIASES[key] ?? 'pending';
+  return STATUS_ICONS[norm] ?? STATUS_ICONS.pending!;
+}
+
+/** 状态图标 + 可选尾随空格（照 CC `StatusIcon` 的 `withSpace`）。 */
+export function StatusIcon({
+  status,
+  withSpace = false,
+  color,
+}: {
+  status: string;
+  withSpace?: boolean;
+  color?: ColorFn;
+}): React.ReactElement {
+  const [icon, token] = statusIcon(status);
+  return <Text color={color?.(token)}>{withSpace ? `${icon} ` : icon}</Text>;
+}
+
+// ─────────────────────────────────────────────────────────── ProgressBar
+
+/** 八分之一块（照 CC `ProgressBar.BLOCKS`；与 `ui/ace_widgets.BLOCKS` 同表）。 */
+export const BLOCKS = [' ', '▏', '▎', '▍', '▌', '▋', '▊', '▉', '█'] as const;
+
+/** 与 `ui/ace_widgets.progress_bar` 同算法的进度条（对拍测试盯着这里）。 */
+export function progressBar(ratio: number, width: number, empty = '─'): string {
+  const w = Math.max(1, Math.trunc(width));
+  const r = Number.isFinite(ratio) ? Math.min(1, Math.max(0, ratio)) : 0;
+  const filled = r * w;
+  const whole = Math.floor(filled);
+  let out = '█'.repeat(whole);
+  if (whole < w) {
+    const idx = Math.floor((filled - whole) * 8);
+    if (idx > 0) {
+      out += BLOCKS[idx] ?? ' ';
+      out += empty.repeat(w - whole - 1);
+    } else {
+      // 余数正好 0：别再塞一个空子格（白扔一格，半满看着像 4/8 满）
+      out += empty.repeat(w - whole);
+    }
+  }
+  return out.slice(0, w);
+}
+
+export function ProgressBar({
+  ratio,
+  width,
+  color,
+}: {
+  ratio: number;
+  width: number;
+  color?: ColorFn;
+}): React.ReactElement {
+  return <Text color={color?.('accent')}>{progressBar(ratio, width)}</Text>;
+}
+
+// ─────────────────────────────────────────────────────────── Byline
+
+/** 元数据用 ` · ` 连（照 CC `Byline`）：空项自动丢，分隔符不出现在首尾。 */
+export function byline(parts: Array<string | false | null | undefined>, sep = ' · '): string {
+  return parts.map((p) => String(p ?? '')).filter((p) => p.trim()).join(sep);
+}
+
+export function Byline({
+  parts,
+  color,
+  sep,
+}: {
+  parts: Array<string | false | null | undefined>;
+  color?: ColorFn;
+  sep?: string;
+}): React.ReactElement {
+  return <Text color={color?.('dim')}>{byline(parts, sep)}</Text>;
+}
+
+// ─────────────────────────────────────────────────────────── ShortcutHint
+
+/** `key to action`；**语序交给 i18n**（中文不写 to）—— 与 Python 侧 `key_hint` 同口径。 */
+export function ShortcutHint({
+  keys,
+  action,
+  t,
+  parens = false,
+  bold = false,
+  color,
+}: {
+  keys: string;
+  action: string;
+  t: (key: string, params?: Record<string, string | number>) => string;
+  parens?: boolean;
+  bold?: boolean;
+  color?: ColorFn;
+}): React.ReactElement {
+  const text = t('key_hint', { shortcut: keys, action });
+  const body = parens ? `(${text})` : text;
+  if (!bold) return <Text color={color?.('dim')}>{body}</Text>;
+  return (
+    <Text color={color?.('dim')}>
+      <Text bold color={color?.('text')}>{keys}</Text>
+      {body.slice(keys.length)}
+    </Text>
+  );
+}

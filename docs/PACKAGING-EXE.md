@@ -35,8 +35,9 @@
 ## Ink 主外壳不进包（打包口径 **D3**，2026-09-27 定）
 
 `frontend/`（TypeScript + Ink，**声明的主外壳**）**不进 exe**。所以冻结发行跑的是
-`ui/`（Python REPL）与 `tui/`（Textual）这两条**回落外壳** —— 这是**明确的能力边界**，
-不是悄悄降级。三条理由都在现码上核过：
+`ui/` 那条**回落外壳**：引擎界面（主屏两车道，真终端下默认）与它背后的普通 REPL ——
+这是**明确的能力边界**，不是悄悄降级。（原来的 `tui/`（Textual）已废弃，见
+[`docs/TUI-ENGINE.md`](TUI-ENGINE.md)。）三条理由都在现码上核过：
 
 1. `packaging/ace.spec` 的 `datas` 只有 `prompts/ locales/ assets/ vendor/` + 三个根级文档
    （+ 打包时若存在的 `executor/`），**没有 `frontend/`**；

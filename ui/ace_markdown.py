@@ -32,6 +32,7 @@ from __future__ import annotations
 import re
 from typing import Callable, List, Optional, Tuple
 
+from ui import ace_widgets
 from ui.ace_text import display_width, pad_width, truncate_width
 
 __all__ = ["render", "render_inline", "split_blocks", "BlockStreamer",
@@ -162,7 +163,9 @@ def render(text: str, width: int = DEFAULT_WIDTH,
             i += 1
             continue
         if _RULE.match(line):
-            out.append(styler("dim", "─" * min(w, 60)))
+            # 分隔线走**整宽**（此前是 `"─" * min(w, 60)`：宽终端上只有半截，
+            # 看起来像"没画完"）。零件与观感照 Claude Code 的 `Divider`：整宽细线。
+            out.append(styler("dim", ace_widgets.divider(w)))
             i += 1
             continue
         if is_table_row(line):

@@ -82,6 +82,49 @@ export const ARGUMENT_HINTS: Record<string, Array<[string, string]>> = {
     ['on', 'arg_on'],
     ['off', 'arg_off'],
   ],
+  // 有固定取值的命令都在这张表里 —— 用户不必去翻 /help 或背 `readonly/write/full`。
+  // 加一条的前提只有一个：这条命令的参数**确实**是闭集（开集参数如 `/search` 不加，
+  // 加了会让光标旁边弹出一个"看起来能选、其实还得自己写"的假菜单）。
+  // 与 `ui/ace_menu.ARGUMENT_HINTS` 同表 —— 由 test_all 的跨语言对拍钉住（漏一边就红）。
+  '/lang': [
+    ['zh', 'arg_lang_zh'],
+    ['en', 'arg_lang_en'],
+    ['ja', 'arg_lang_ja'],
+  ],
+  '/effort': [
+    ['auto', 'effort_auto'],
+    ['low', 'effort_low'],
+    ['medium', 'effort_medium'],
+    ['high', 'effort_high'],
+    ['max', 'effort_max'],
+  ],
+  '/vim': [
+    ['on', 'arg_on'],
+    ['off', 'arg_off'],
+  ],
+  '/mock': [
+    ['on', 'arg_on'],
+    ['off', 'arg_off'],
+  ],
+  '/expandall': [
+    ['on', 'arg_on'],
+    ['off', 'arg_off'],
+  ],
+  '/goal': [
+    ['resume', 'arg_goal_resume'],
+    ['pause', 'arg_goal_pause'],
+    ['complete', 'arg_goal_complete'],
+  ],
+  '/audit': [
+    ['stats', 'arg_audit_stats'],
+    ['boundary', 'arg_audit_boundary'],
+  ],
+  '/rules': [
+    ['add', 'arg_rules_add'],
+    ['remove', 'arg_rules_remove'],
+    ['check', 'arg_rules_check'],
+    ['accept', 'arg_rules_accept'],
+  ],
   '/todo': [
     ['add', 'arg_todo_add'],
     ['start', 'arg_todo_start'],
@@ -160,9 +203,13 @@ export function commandItems(
   const state = opts.state ?? {};
   const out: MenuItem[] = [];
   for (const [name, descKey] of Object.entries(commands ?? {})) {
+    // **有取值表的命令，补全时带上那个空格** —— 于是"选了 `/todo`，下一层选项立刻出来"。
+    // 不带空格的后果（实测）：命令名一打全，菜单按"不弹就是关"关闭，第二层**永远不出现**，
+    // 用户只能自己猜"后面还有没有东西"。没有取值表的命令不带空格：那样回车直接发送。
+    const hasArgs = (ARGUMENT_HINTS[name]?.length ?? 0) > 0;
     out.push({
       label: name,
-      insert: name,
+      insert: hasArgs ? `${name} ` : name,
       desc: describeWithCurrent(name, tr(descKey), state, tr),
       group: opts.groupOf ? tr(opts.groupOf(name)) : '',
       kind: 'command',
@@ -281,7 +328,11 @@ export function buildMenu(
   opts: BuildMenuOptions,
 ): MenuState {
   const tr = opts.translate ?? identity;
-  const limit = opts.limit ?? 12;
+  // **不设条数上限**：`Menu` 组件本身就是滚动窗口（`windowBounds` + "上面/下面还有 N 条"），
+  // 选中项永远在窗口里。在这里再砍一刀的后果是"滚到底也看不到剩下的" ——
+  // 用户看到 12 条会以为命令/工具就这么多（实测踩过：连测试都要显式传 `limit: 30` 绕开它）。
+  // `opts.limit` 仍然保留，给"确实只想要前几条"的调用方用。
+  const limit = opts.limit ?? Number.POSITIVE_INFINITY;
   const t = String(text ?? '');
   const cur = Math.max(0, Math.min(Math.trunc(cursor), t.length));
   const [token, start, end] = tokenUnderCursor(t, cur);
@@ -311,26 +362,41 @@ export function buildMenu(
 
   // ③ 当前词以 `/` 开头 → 命令菜单
   if (token.startsWith('/')) {
-    return ranked(
-      commandItems(opts.commands, {
-        custom: opts.custom,
-        translate: tr,
-        groupOf: opts.groupOf,
-        state: opts.state,
-      }),
-      token,
-      start,
-      end,
-      '/',
-      limit,
-    );
+    const items = commandItems(opts.commands, {
+      custom: opts.custom,
+      translate: tr,
+      groupOf: opts.groupOf,
+      state: opts.state,
+    });
+    // 口径 1（本文件开头那三条之一）：**命令名已打全就不弹** —— 回车让给"直接发送"。
+    // 漏了这条的症状：打完 `/help` 按回车只是又补出一个空格，得按两次才发得出去。
+    if (token.length > 1 && items.some((i) => i.label === token)) {
+      return {
+        items: items.filter((i) => i.label === token),
+        selected: 0,
+        open: false,
+        kind: 'command',
+        query: token,
+        span: [start, end],
+      };
+    }
+    return ranked(items, token, start, end, '/', limit);
   }
 
   // ④ 行首是带参数提示的命令、且已经打过空格 → 参数菜单
   if (first.startsWith('/') && before.length > first.length) {
-    const args = argumentItems(first, tr);
-    if (args.length) {
-      return ranked(args, token, start, end, `${first} `, limit);
+    const hints = ARGUMENT_HINTS[first];
+    if (hints?.length) {
+      const known = new Set(hints.map(([a]) => a));
+      const used = before.trim().split(/\s+/).slice(1);
+      // 参数**已经选好**（`/lang zh `）→ 菜单让位，回车直接发送。
+      // 否则菜单会一直"再补一个参数"（`/lang zh zh `），用户永远按不出回车 ——
+      // Python 侧探针里踩到过，这条是那次修复的镜像（`ui/ace_menu.build_menu` ④）。
+      if (used.some((u) => known.has(u))) return { ...CLOSED };
+      const args = argumentItems(first, tr).filter((i) => !used.includes(i.label));
+      if (args.length) {
+        return ranked(args, token, start, end, `${first} `, limit);
+      }
     }
   }
 

@@ -13,6 +13,7 @@ import { Box, Text } from 'ink';
 import React, { useEffect, useState } from 'react';
 
 import { gstr } from '../render/glyphs.js';
+import { g } from '../render/glyphs.js';
 import { frameAt, phaseInterval, stallLevel, type Phase } from '../render/spinner.js';
 
 export interface SpinnerProps {
@@ -35,6 +36,14 @@ export const PHASE_VERB: Record<string, number> = {
   tool_args: 4,
   tool_running: 5,
 };
+
+/**
+ * 思考阶段前面那个**标记**（照 Claude Code `AssistantThinkingMessage` 的 `∴ Thinking`）。
+ * 只给「在想」的阶段加：工具参数解析、纯等待不该长成「思考」的样子。
+ */
+export function phaseMark(phase: string | undefined): string {
+  return String(phase) === 'reasoning' ? `${g('∴')} ` : '';
+}
 
 export function verbKeyFor(phase: string | undefined): string {
   const n = PHASE_VERB[String(phase)] ?? 2;
@@ -78,7 +87,7 @@ export function Spinner({
   return (
     <Box>
       <Text color={stalled && !reducedMotion ? stallColor : color('accent')}>{glyph} </Text>
-      <Text color={stalled && !reducedMotion ? stallColor : color('dim')}>{t(verbKeyFor(phase))}</Text>
+      <Text color={stalled && !reducedMotion ? stallColor : color('dim')}>{phaseMark(phase)}{t(verbKeyFor(phase))}</Text>
       {secs > 0 ? (
         <Text color={stalled && !reducedMotion ? stallColor : color('dim')}>
           {' '}

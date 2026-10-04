@@ -227,7 +227,7 @@ export function parseCommand(keys: string): [number, string, string] {
   count = count || 1;
 
   if (!op) {
-    if (!rest) throw new VimError('缺少动作');
+    if (!rest) throw new VimError('missing action');
     if (!(rest in MOTIONS)) throw new VimError(`未绑定的动作: ${rest}`);
     return [count, '', rest];
   }

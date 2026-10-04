@@ -42,6 +42,8 @@ export interface TaskLine {
  *
  * 空树（`null`）返回 `[]` —— 调用方不该画一棵空树：那只会让人以为「这里本来该有东西」。
  */
+import { progressBar } from '../components/design-system/index.js';
+
 export function flattenTaskTree(node: TaskNode | null, indent = 0): TaskLine[] {
   if (!node) return [];
   const out: TaskLine[] = [];
@@ -49,6 +51,11 @@ export function flattenTaskTree(node: TaskNode | null, indent = 0): TaskLine[] {
   const walk = (n: TaskNode, prefix: string, last: boolean, isRoot: boolean, depth: number): void => {
     const head = isRoot ? '' : `${prefix}${last ? '└─ ' : '├─ '}`;
     let line = `${head}${taskGlyph(n.status)} ${n.text}`;
+    // 根节点的小进度条 —— 与 `ace_layout.render_task_tree` 同一份排版（逐行对拍）
+    if (isRoot && n.children && n.children.length > 0) {
+      const done = n.children.filter((c) => c.status === 'done').length;
+      line += `  ${progressBar(done / n.children.length, 10)} ${done}/${n.children.length}`;
+    }
     if (n.note) line += `  (${n.note})`;
     out.push({ text: line, status: n.status, depth });
 

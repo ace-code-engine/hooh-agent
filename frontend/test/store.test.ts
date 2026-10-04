@@ -55,10 +55,101 @@ describe('基本流转', () => {
     expect(s.busy).toBe(true);
   });
 
+  it('**同一句话不出现两遍**（本地乐观播一条 + 引擎真发一条 → 只留一条）', () => {
+    const s = run(
+      ev('user_message', { text: '你好' }),
+      ev('user_message', { text: '你好' }),
+    );
+    expect(s.items).toHaveLength(1);
+    expect(s.busy).toBe(true);
+  });
+
+  it('**工具时间线夹在中间时，final 也并回原来那条**（否则整段回答出现两遍）', () => {
+    const s = run(
+      ev('user_message', { text: '怎么说' }),
+      ev('model_delta', { text: '看了你的顶层结构' }),
+      ev('model_delta', { text: '，说说真实判断。' }),
+      // 工具时间线 / 耗时这类 notice 会插在增量与 final 之间 —— 这是正常顺序
+      ev('notice', { text: '⚙  2 次工具调用 · 0.00s · 读取 2 项' }),
+      ev('final', { text: '看了你的顶层结构，说说真实判断。' }),
+    );
+    const assistants = s.items.filter((i) => i.kind === 'assistant');
+    expect(assistants).toHaveLength(1);
+    expect(assistants[0]).toMatchObject({
+      text: '看了你的顶层结构，说说真实判断。',
+      streaming: false,
+    });
+    expect(s.busy).toBe(false);
+  });
+
+  it('**notice 把增量劈开时也不另起一条**（同一段回答被拆成两段是最难查的那种）', () => {
+    const s = run(
+      ev('user_message', { text: '你好' }),
+      ev('model_delta', { text: '前半段' }),
+      ev('notice', { text: '⚙  1 次工具调用' }),
+      ev('model_delta', { text: '后半段' }),
+    );
+    const assistants = s.items.filter((i) => i.kind === 'assistant');
+    expect(assistants).toHaveLength(1);
+    expect(assistants[0]).toMatchObject({ text: '前半段后半段', streaming: true });
+  });
+
+  it('**被 FORMAT_ERROR 拒掉的草稿不留**（否则同一个问题看到两遍不同措辞的回答）', () => {
+    const s = run(
+      ev('user_message', { text: '你好' }),
+      ev('model_delta', { text: '第一版回答，措辞是这样。' }),
+      ev('notice', { text: '  ✗ FORMAT_ERROR: 格式错误: 缺少 <EXTERNAL> 标签' }),
+      ev('model_delta', { text: '第二版回答，措辞不一样。' }),
+      ev('final', { text: '第二版回答，措辞不一样。' }),
+    );
+    const assistants = s.items.filter((i) => i.kind === 'assistant');
+    expect(assistants).toHaveLength(1);
+    expect(assistants[0]).toMatchObject({ text: '第二版回答，措辞不一样。' });
+    // 那条错误本身要留着（用户/维护者得知道发生过格式纠正）
+    expect(s.items.some((i) => i.kind === 'notice' && i.text.includes('FORMAT_ERROR'))).toBe(true);
+  });
+
+  it('普通 notice（工具时间线）**不误删**已定稿的回答', () => {
+    const s = run(
+      ev('user_message', { text: '你好' }),
+      ev('model_delta', { text: '答' }),
+      ev('final', { text: '答' }),
+      ev('notice', { text: '⚙  2 次工具调用' }),
+    );
+    expect(s.items.filter((i) => i.kind === 'assistant')).toHaveLength(1);
+  });
+
+  it('不同的两句各自成条（去重只看"紧邻且同文"，不吞正常输入）', () => {
+    const s = run(
+      ev('user_message', { text: '第一句' }),
+      ev('final', { text: '答' }),
+      ev('user_message', { text: '第一句' }),
+    );
+    expect(s.items.filter((i) => i.kind === 'user')).toHaveLength(2);
+  });
+
   it('final 收尾并解除忙', () => {
     const s = run(ev('final', { text: '答', round: 1 }));
     expect(s.items[0]).toMatchObject({ kind: 'assistant', text: '答', streaming: false });
     expect(s.busy).toBe(false);
+  });
+
+  it('**空 final 只收尾、不产生气泡**（一轮以失败/中断结束时引擎发的那条）', () => {
+    const s = run(ev('user_message', { text: '你好' }), ev('final', { text: '', aborted: true }));
+    expect(s.busy).toBe(false);
+    // 转写区里只有用户那句话：空回复不该多出一个空气泡
+    expect(s.items).toHaveLength(1);
+    expect(s.items[0]).toMatchObject({ kind: 'user' });
+  });
+
+  it('model_request 把相位拉回 reasoning（否则工具跑完后标签一直写着"工具执行中"）', () => {
+    const s = run(
+      ev('user_message', { text: '你好' }),
+      ev('tool_start', { tool: 'grep', ts: 2 }),
+      ev('model_request', { round: 2, ts: 3 }),
+    );
+    expect(s.meta.phase).toBe('reasoning');
+    expect(s.busy).toBe(true);
   });
 });
 

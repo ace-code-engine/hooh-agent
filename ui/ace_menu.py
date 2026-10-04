@@ -52,6 +52,20 @@ ARGUMENT_HINTS: Dict[str, Tuple[Tuple[str, str], ...]] = {
     "/style": (("default", "style_default"), ("concise", "style_concise"),
                ("explanatory", "style_explanatory"), ("strict", "style_strict")),
     "/fullscreen": (("on", "arg_on"), ("off", "arg_off")),
+    # 有固定取值的命令都在这张表里 —— 用户不必去翻 /help 或背 `readonly/write/full`。
+    # 加一条的前提只有一个：这条命令的参数**确实**是闭集（开集参数如 /search 不加，
+    # 加了会让光标旁边弹出一个"看起来能选、其实还得自己写"的假菜单）。
+    "/lang": (("zh", "arg_lang_zh"), ("en", "arg_lang_en"), ("ja", "arg_lang_ja")),
+    "/effort": (("auto", "effort_auto"), ("low", "effort_low"), ("medium", "effort_medium"),
+                ("high", "effort_high"), ("max", "effort_max")),
+    "/vim": (("on", "arg_on"), ("off", "arg_off")),
+    "/mock": (("on", "arg_on"), ("off", "arg_off")),
+    "/expandall": (("on", "arg_on"), ("off", "arg_off")),
+    "/goal": (("resume", "arg_goal_resume"), ("pause", "arg_goal_pause"),
+              ("complete", "arg_goal_complete")),
+    "/audit": (("stats", "arg_audit_stats"), ("boundary", "arg_audit_boundary")),
+    "/rules": (("add", "arg_rules_add"), ("remove", "arg_rules_remove"),
+               ("check", "arg_rules_check"), ("accept", "arg_rules_accept")),
     "/todo": (("add", "arg_todo_add"), ("start", "arg_todo_start"),
               ("done", "arg_todo_done"), ("remove", "arg_todo_remove"),
               ("clear", "arg_todo_clear")),
@@ -142,7 +156,11 @@ def command_items(commands: Dict[str, str],
     tr = translate or (lambda k: k)
     out: List[MenuItem] = []
     for name, desc_key in (commands or {}).items():
-        out.append(MenuItem(name, name, tr(desc_key),
+        # **有取值表的命令，补全时带上那个空格** —— 于是"选了 `/todo`，下一层选项立刻出来"。
+        # 不带空格的后果（实测）：命令名一打全，菜单按"不弹就是关"关闭，第二层**永远不出现**，
+        # 用户只能自己猜"后面还有没有东西"。没有取值表的命令不带空格：那样回车直接发送。
+        _ins = f"{name} " if ARGUMENT_HINTS.get(name) else name
+        out.append(MenuItem(name, _ins, tr(desc_key),
                             tr(group_of(name)) if group_of else "", "command"))
     for name, desc in (custom or []):
         out.append(MenuItem(str(name), str(name), str(desc), tr("group_custom"),

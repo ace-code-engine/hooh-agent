@@ -14,6 +14,8 @@
  */
 
 import { Box, Text } from 'ink';
+
+import { Divider } from './design-system/index.js';
 import React from 'react';
 
 import { clampSelected, labelColumn, menuHintKey, windowBounds, type MenuState } from '../render/menu.js';
@@ -53,7 +55,10 @@ export function Menu({ state, t, color, height = 10, width = 80 }: MenuProps): R
   const clip = (s: string, n: number): string => (n > 0 ? truncateWidth(s, n) : s);
 
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor={color('border')} paddingX={1}>
+    <Box flexDirection="column" paddingX={1}>
+      {/* 无边框（Swiss 规范 §1 第 2 条）：候选区与转录之间用**一条整宽细线**切开，
+          不画四周的框 —— 框会让每一行都少 4 列，中文说明被挤得很窄。 */}
+      <Divider color={color} />
       {hiddenAbove > 0 ? (
         <Text color={color('dim')}>{t('menu_more_above', { n: hiddenAbove })}</Text>
       ) : null}

@@ -27,6 +27,7 @@ from __future__ import annotations
 import re
 from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
 
+from ui import ace_widgets
 from ui.ace_text import display_width, truncate_width
 
 __all__ = [
@@ -329,6 +330,13 @@ def render_task_tree(node: Optional[TaskNode], width: int = 0,
     def _walk(n: TaskNode, prefix: str, last: bool, is_root: bool) -> None:
         if is_root:
             line = f"{n.glyph()} {n.text}"
+            # 根节点带**小进度条**（八分之一块，照 Claude Code `ProgressBar` 的做法）：
+            # "3/8 走了多少"用文字看不出来，一根条一眼够。只给 10 格，免得这行被撑到折行。
+            if n.children:
+                _done = sum(1 for _c in n.children if _c.status == "done")
+                _total = len(n.children)
+                line += (f"  {ace_widgets.progress_bar(_done / _total, 10)}"
+                         f" {_done}/{_total}")
         else:
             line = f"{prefix}{'└─ ' if last else '├─ '}{n.glyph()} {n.text}"
         if n.note:

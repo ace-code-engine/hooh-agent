@@ -6,7 +6,9 @@
  * 不必真的起 Python、更不必有模型。
  */
 
-import { Box, Text, useApp, useInput, useStdout } from 'ink';
+import { Box, Static, Text, useApp, useInput, useStdout } from 'ink';
+
+import { ScrollBox } from './tui/scroll-box.js';
 import React, { useCallback, useEffect, useReducer, useState } from 'react';
 
 import { Banner } from './components/Banner.js';
@@ -34,6 +36,7 @@ import {
   applyEvent,
   applyPermissionAnswer,
   initialState,
+  type Item,
   type State,
 } from './state/store.js';
 
@@ -60,6 +63,10 @@ export interface AceClientLike {
 }
 
 export interface AppProps {
+  /** 备用屏全屏：转录走 `<ScrollBox>`（终端没有回滚缓冲）。 */
+  fullscreen?: boolean;
+  /** 引擎侧 `/fullscreen on|off` 生效时上报（备用屏由 Root 管，App 只管转录形态）。 */
+  onFullscreenChange?: (on: boolean) => void;
   client: AceClientLike;
   t: (key: string, params?: Record<string, string | number>) => string;
   colorOf: (token: string) => string | undefined;
@@ -84,7 +91,8 @@ function reducer(state: State, action: Action): State {
   return applyPermissionAnswer(state, action.decision);
 }
 
-export function App({ client, t, colorOf, initialMessage, menuOptions }: AppProps): React.ReactElement {
+export function App({ client, t, colorOf, initialMessage, menuOptions, fullscreen = false,
+  onFullscreenChange }: AppProps): React.ReactElement {
   const [state, dispatch] = useReducer(reducer, undefined, initialState);
   const [errors, setErrors] = useState<string[]>([]);
   /** 主页内容（引擎侧 `ace_home.build_home` 算好的结构化分区）。 */
@@ -156,6 +164,13 @@ export function App({ client, t, colorOf, initialMessage, menuOptions }: AppProp
   useEffect(() => {
     refreshConfig();
   }, [refreshConfig]);
+
+  // `/fullscreen on|off` 是**引擎**改了 cfg，而备用屏只能由外壳进出 ——
+  // 所以这里把配置里的值上报给 Root（它持有备用屏开关）。
+  useEffect(() => {
+    if (typeof config.fullscreen !== 'boolean') return;
+    onFullscreenChange?.(config.fullscreen);
+  }, [config.fullscreen, onFullscreenChange]);
 
   useEffect(() => {
     let alive = true;
@@ -284,8 +299,33 @@ export function App({ client, t, colorOf, initialMessage, menuOptions }: AppProp
     };
   }, [menuOptions, config, sessions, t]);
 
+  // 视口高度：终端行数减去底部区（状态行 + 输入行 + 对话框/任务树的预留）。
+  // 留 10 行是经验值：底部区最少要这么多才不至于把输入行挤没；下限 3 行。
+  const bodyHeight = Math.max(3, (stdout?.rows ?? 30) - 10);
+
   const perm = state.pendingPermission;
   const choice = state.pendingChoice;
+
+  // **定稿的转写交给 `<Static>`**：只写一次、进终端**真实回滚缓冲**，之后永不重画。
+  // 一条改动解决三件事：
+  //   ① 频闪 —— 长转录时按 `/` 弹菜单会触发整帧重画，重画量是 O(整段转录)（实测投诉）；
+  //   ② 往上翻 —— 动态帧里的东西不进回滚缓冲，翻上去只有一屏；
+  //   ③ 帧预算 —— 每帧只剩"还会变的那几条 + 底部区"，与转录长度无关。
+  //
+  // `Static` 的语义是**追加**（内部记着已印到第几项），所以只能放"印完就不会再变"的项。
+  // 两个坑：
+  //   - 助手消息**正在流**时必须留在动态帧，否则会被印死、后续增量全丢；
+  //   - **工具卡片是原地变状态的**（`running` → `ok`/`fail`，权限项 `answered` 同理），
+  //     刚 push 就冻住的话卡片会永远停在"运行中"—— 第一版就是这么错的，套件当场抓了出来。
+  // 因此按**后缀**切：冻结"全部不会再变"的最长前缀，其余留在动态帧 —— 顺序自然不会乱。
+  const mutable = (it: Item): boolean =>
+    (it.kind === 'assistant' && it.streaming)
+    || (it.kind === 'tool' && it.status === 'running')
+    || (it.kind === 'permission' && it.answered === undefined);
+  let cut = state.items.length;
+  while (cut > 0 && mutable(state.items[cut - 1]!)) cut--;
+  const frozen = state.items.slice(0, cut);
+  const live = state.items.slice(cut);
 
   return (
     <Box flexDirection="column">
@@ -308,7 +348,26 @@ export function App({ client, t, colorOf, initialMessage, menuOptions }: AppProp
         <Home home={home} t={t} color={colorOf} width={cols} />
       ) : null}
 
-      <Transcript items={state.items} t={t} color={colorOf} />
+      {/* 定稿转录：
+          主屏 → `<Static>` 写完就不再重画（进终端**真实回滚缓冲**，往上翻靠终端）；
+          备用屏 → 终端没有回滚，交给 `<ScrollBox>`（PgUp/PgDn/↑↓/g/G 翻，滚动条自动）。 */}
+      {fullscreen ? (
+        <ScrollBox
+          items={frozen}
+          height={bodyHeight}
+          active={!perm && !choice}
+          color={colorOf}
+          hint={t('scroll_hint')}
+          renderItem={(it) => <Transcript key={it.id} items={[it]} t={t} color={colorOf} />}
+        />
+      ) : (
+        <Static items={frozen}>
+          {(it) => <Transcript key={it.id} items={[it]} t={t} color={colorOf} />}
+        </Static>
+      )}
+
+      {/* 动态帧：只会是在流的那一条 + 底部区（对话框/任务树/状态行/输入框） */}
+      <Transcript items={live} t={t} color={colorOf} />
 
       {perm ? (
         <Box marginBottom={1}>

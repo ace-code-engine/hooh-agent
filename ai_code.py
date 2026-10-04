@@ -75,6 +75,7 @@ from ui import ace_menu  # noqa: E402  （补全菜单模型：候选从哪来/�
 from ui import ace_prompt  # noqa: E402  （无依赖的输入行：菜单 + 历史 + 行编辑）
 from ui import ace_spinner  # noqa: E402  （等待指示器状态机：阶段字形 + 卡住渐变）
 from ui import ace_notify  # noqa: E402  （通知排队 + 终端标题/桌面通知通道）
+from ui import ace_widgets  # noqa: E402  （边角小零件：状态图标/分隔线/进度条/方块小人）
 from ui import ace_tools  # noqa: E402  （工具看板：四态点 + 同帧同步 + 只重画变化行）
 from ui import ace_turn  # noqa: E402  （一轮的交互状态机：排队/两段式中断/授权选项）
 from ui import ace_home  # noqa: E402  （主页模型：分区/条目/渲染，纯逻辑）
@@ -118,6 +119,34 @@ from core import ace_serve   # noqa: E402  （--serve：双向 NDJSON，给独�
 from core import ace_mcp_server  # noqa: E402  （--mcp：MCP host 借执行层干活，本进程不调模型）
 
 CONFIG_PATH = Path.home() / ".ai_code.json"
+#: "真实用户配置"的路径快照 —— `ACE_NO_SAVE_CONFIG=1` 只挡写**这一个路径**。
+#: 测试把 `CONFIG_PATH` 重定向到临时文件是 H-31 明确允许的（写临时可以、写真实不行），
+#: 所以闸门必须比路径、而不是无条件拒绝（否则每条"验证配置能写"的测试都得自己开小门）。
+_REAL_CONFIG_PATH = CONFIG_PATH
+
+
+def _parse_token_count(raw: str) -> int:
+    """把 `1000000` / `1m` / `200k` / `1.5m` 解析成 token 数；不合法返回 0。
+
+    给 `/window` 用：让用户**少打几个零**（1M 窗口要打 7 个 0，打错一位就是另一个数量级）。
+    """
+    s = str(raw or "").strip().lower().replace("_", "").replace(",", "")
+    mult = 1
+    if s.endswith("m"):
+        mult, s = 1_000_000, s[:-1]
+    elif s.endswith("k"):
+        mult, s = 1_000, s[:-1]
+    try:
+        n = float(s) * mult
+    except ValueError:
+        return 0
+    if n <= 0 or n > 100_000_000:
+        return 0
+    return int(n)
+
+
+#: `ACE_NO_SAVE_CONFIG=1` 时是否已经说过一句（免得每存一次都刷一行）
+_NO_SAVE_NOTED = False
 LEGACY_CONFIG_PATH = Path.home() / ".agent_cli.json"
 CLAUDE_SETTINGS_PATH = Path.home() / ".claude" / "settings.json"
 MAX_ROUNDS = 20
@@ -923,13 +952,40 @@ def merge_config(args) -> Dict:
 
 
 def save_cli_config(cfg: Dict) -> None:
+    # **闸门：`ACE_NO_SAVE_CONFIG=1` 时不写**开发者的真实配置**（只挡那一个路径）。**
+    #
+    # 为什么需要它：测试/探针会用 `ai_code.py` 起**子进程**，而 H-31/H-26 那套
+    # "测试不许写真实配置"的纪律只在**进程内**把 `save_cli_config` 打桩 —— 子进程里
+    # 没有任何保护。一次全量测试就能把开发者的 `~/.ai_code.json` 覆盖成测试用的空壳
+    # （实测 2026-10-04 15:18：model=m1、base_url/api_key 全空、project_root 指到临时目录，
+    # 用户的历史会话与密钥一起没了）。
+    #
+    # **为什么比路径而不是无条件拒绝**：测试把 `CONFIG_PATH` 重定向到临时文件是 H-31
+    # 明确允许的（写临时可以、写真实不行）。无条件拒绝会让每条"验证配置能写"的测试
+    # 都得自己开一道小门，而那些小门迟早会有人忘了关。
+    if (os.environ.get("ACE_NO_SAVE_CONFIG") == "1"
+            and Path(CONFIG_PATH) == _REAL_CONFIG_PATH):
+        global _NO_SAVE_NOTED
+        if not _NO_SAVE_NOTED:
+            _NO_SAVE_NOTED = True
+            print("（ACE_NO_SAVE_CONFIG=1：本次不写真实配置）", file=sys.stderr)
+        return
+    # 只落盘**用户配置**：`_` 开头的键是运行时对象（`_serve` / `_events` / `_mcp_out`），
+    # 它们既不是 JSON 能序列化的，也绝不该写进 ~/.ai_code.json。
+    #
+    # 这里原先直接 dump 整个 dict —— 症状是 `--serve` 下**任何会存配置的命令都失败**
+    # （/provider、/model、/lang…），前端看到的是
+    # `命令执行失败: Object of type ServeServer is not JSON serializable`。
+    # 过滤放在这里而不是各个调用方：存配置的入口只有这一个，改一处就全好了。
+    #
     # 配置里有明文 api_key，所以先建文件再 chmod 是不够的：那两步之间有一个窗口，
     # 文件以默认权限（umask 决定，常见是 0644）躺在主目录里。用 O_CREAT|O_EXCL
     # 带 mode 创建，权限从第一个字节就是对的。
     #
     # 已存在时退回 write_text + chmod —— 这条路上文件权限本来就已经是上次收紧过的，
     # 没有新窗口。
-    payload = json.dumps(cfg, ensure_ascii=False, indent=2)
+    payload = json.dumps({k: v for k, v in cfg.items() if not str(k).startswith("_")},
+                         ensure_ascii=False, indent=2)
     try:
         fd = os.open(CONFIG_PATH, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
@@ -1446,7 +1502,11 @@ class _AtCommands:
             return self.lang
         self.lang = code
         set_language(code)
-        # 语言指令进的是**系统提示词**（`_build_system_prompt` 的【语言指令】段）——
+        # **必须告诉外壳**：引擎自己的文案（notice/状态行）换了语言，但外壳（Ink 前端）
+        # 有**自己那份字典**。不发这一条，用户看到的就是"引擎旁白变英文、斜杠后面的提示
+        # 还是中文"这种半拉状态（实测投诉）。外壳收到后换字典并重算菜单。
+        if self.json_mode:
+            self.events.emit("language", lang=code)
         # 前缀变了就得有人认领（@lang 与 /lang 共用这一处，所以声明也放这里）。
         self._note_prefix_change(ace_prefix.FIELD_SYSTEM, f"语言切到 {code}",
                                  detail="/lang 或 @lang")
@@ -1664,8 +1724,8 @@ class _SlashCommands:
                            "/todo", "/audit", "/exit"]),
         ("group_security", ["/permission", "/snapshots", "/undo", "/rollback",
                             "/sandbox", "/net", "/escalation"]),
-        ("group_model", ["/provider", "/model", "/preset", "/config", "/mock", "/thinking",
-                         "/style"]),
+        ("group_model", ["/provider", "/model", "/window", "/preset", "/config", "/mock",
+                         "/thinking", "/style"]),
         ("group_tools", ["/home", "/new", "/open", "/edit", "/review", "/diff", "/search", "/memory",
                         "/report", "/goal", "/cd", "/agents", "/workspace"]),
         ("group_extend", ["/effort", "/lang", "/mcp", "/hooks", "/plugins", "/vim", "/keys", "/term",
@@ -1711,6 +1771,7 @@ class _SlashCommands:
 
     COMMANDS = {
         "/help": "cmd_help",
+        "/tools": "cmd_tools",
         "/clear": "cmd_clear",
         "/status": "cmd_status",
         "/stats": "cmd_stats",
@@ -1722,9 +1783,13 @@ class _SlashCommands:
         "/permission": "cmd_permission",
         "/mock": "cmd_mock",
         "/model": "cmd_model",
+        # 上下文窗口：**每个模型都不一样，而"不知道"是常态** —— 给用户一个看得见、
+        # 一条命令能改的旋钮（表里只放核过出处的条目，其余走兜底并提示校正）。
+        "/window": "cmd_window",
         "/preset": "cmd_preset",
         "/provider": "cmd_provider",
         "/config": "cmd_config",
+        "/key": "cmd_key",
         "/goal": "cmd_goal",
         "/workspace": "cmd_workspace",
         "/audit": "cmd_audit",
@@ -1782,12 +1847,22 @@ class _SlashCommands:
         "/exit": "cmd_exit",
     }
 
+    #: 裸敲就弹选择器的命令：取值是闭集，且**裸形态本身只是打印状态/清单**（不是动作）。
+    #: 不在这里的不是"不好"，是它们的裸形态就是动作 —— `/vim` `/mock` `/thinking` 裸敲
+    #: 是**翻转**、`/stash` 裸敲是存一次 —— 自动再补一次选择会把那个动作做两遍。
+    #: `/permission` `/net` 也不在这里：它们自己早就实现了（见各自 docstring）。
+    ARG_PICK_BARE = ("/lang", "/effort", "/style", "/sandbox", "/todo",
+                     "/goal", "/audit", "/rules")
+
     # 斜杠命令的**处理函数**：name → (方法名, 是否接收 parts)。
     # 与 COMMANDS 分开两张表的原因很实际：COMMANDS 是类属性（i18n 键），/help 与补全
     # 菜单直接读它；处理函数需要 self 且**签名不统一**（历史遗留：有的收 parts、有的
     # 不收）。与其改一圈调用方，不如在表里把差异写明白——两张表的键集由断言守着一致。
     COMMAND_HANDLERS = {
         "/help": ("_cmd_help", True),
+        "/tools": ("_cmd_tools", True),
+        # 上下文窗口：看得见 + 一条命令能改（表外的模型不该让人一辈子用兜底值）
+        "/window": ("_cmd_window", True),
         "/clear": ("_cmd_clear", True),
         "/status": ("_show_status", False),
         "/stats": ("_cmd_stats", True),
@@ -1802,6 +1877,7 @@ class _SlashCommands:
         "/preset": ("_cmd_preset", True),
         "/provider": ("_handle_provider", True),
         "/config": ("_config_wizard", False),
+        "/key": ("_cmd_key", True),
         "/goal": ("_show_goal", True),
         "/workspace": ("_cmd_workspace", True),
         "/audit": ("_show_audit", True),
@@ -1877,9 +1953,18 @@ class _SlashCommands:
             return True                     # 提示已经打过了（候选列表 / 未知前缀）
         name, parts = _resolved
 
-        # 表驱动分发：命令 → (处理函数, 是否收 parts)。表在 COMMAND_HANDLERS，
-        # 键集与 COMMANDS 由断言守着一致；这里只负责"查表 + 调用 + 归一化返回值"。
-        # 返回值口径沿用旧 if/elif：只有显式 False 表示退出，其余（含 None）都是继续。
+        # 裸命令 + 闭集取值 ⇒ 先跑它原有的裸形态（状态/清单照旧显示），再弹**同一个选择器**，
+        # 选中的值补成参数重走一遍 —— 这就是"打前缀就跳出来挑"，与 `/provider` `/model` 同一套。
+        if name in self.ARG_PICK_BARE and len(parts) == 1:
+            self._dispatch_command(name, parts)
+            _picked = self._pick_arg_value(name)
+            if _picked is None:
+                return True                    # 取消：裸形态已经跑过，收工
+            parts = [name, _picked]
+        return self._dispatch_command(name, parts)
+
+    def _dispatch_command(self, name: str, parts: List[str]) -> bool:
+        """查表分发（`run_command` 的最后一跳）—— 单独出来给"裸命令 → 选择器"复用。"""
         _entry = self.COMMAND_HANDLERS.get(name)
         if _entry is None:
             print(t("unknown_cmd", name=name))
@@ -1887,6 +1972,24 @@ class _SlashCommands:
         _method, _takes_parts = _entry
         _fn = getattr(self, _method)
         return (_fn(parts) if _takes_parts else _fn()) is not False
+
+    def _pick_arg_value(self, cmd: str) -> Optional[str]:
+        """把 `ARGUMENT_HINTS[cmd]` 的取值弹成选择器，返回选中的**取值**；取消 → None。
+
+        取值表与补全菜单**同一份**（`ui/ace_menu.ARGUMENT_HINTS`）：各写一套的后果是
+        "菜单里看得见的选项，挑的时候却没有"。列表外的自填值原样回传（P-10）。
+        """
+        from ui import ace_menu                 # noqa: PLC0415 —— 与本文件其它处一致
+        hints = ace_menu.ARGUMENT_HINTS.get(cmd) or ()
+        if len(hints) < 2:
+            return None                         # 一个选项（或没有）不值得弹
+        items = [f"{value}  {t(desc)}" for value, desc in hints]
+        picked = self._select_index(t("arg_pick", cmd=cmd), items)
+        if picked is None:
+            return None
+        if isinstance(picked, int) and 0 <= picked < len(hints):
+            return hints[picked][0]
+        return str(picked)
 
     def _resolve_command(self, cmd: str, parts: List[str]) -> Optional[Tuple[str, List[str]]]:
         """把用户输入规整成 (命令名, 参数表)；解析不出来就打印提示并返回 None。
@@ -1920,6 +2023,84 @@ class _SlashCommands:
 
     # ---------- 斜杠命令的具体处理（从 run_command 的 if/elif 里提出来） ----------
 
+    def _cmd_tools(self, parts: List[str]) -> bool:
+        """把**所有**工具摆到屏幕上：按权限分档、标明当前权限下看不看得见、折叠的有哪些。
+
+        为什么要有这条命令：工具面会按权限档裁剪（readonly 只给只读的那批），
+        而/help 只列命令不列工具 —— 于是"我到底有几个工具、现在能用哪些"没有任何地方
+        说得清。工具是这套东西的主语，主语不该是隐形的。
+
+        `/tools <关键词>` 只列名字或说明里含该词的那些（找不到就如实说找不到）。
+        """
+        from execution_layer import (CONTROL_TOOLS, HIGH_RISK_TOOLS, READ_TOOLS,
+                                     WRITE_TOOLS, PermissionManager)
+        from tools.registry import openai_tools
+        from ui import ace_text as _txt
+
+        level = self.el.permission.level
+        allowed = PermissionManager.allowed_tools(level) | set(CONTROL_TOOLS)
+        all_names = [x["function"]["name"] for x in openai_tools()]
+        desc_of = {x["function"]["name"]: (x["function"].get("description") or "")
+                   for x in openai_tools()}
+        folded = set()
+        budget = int(self.cfg.get("tool_surface_budget", 0) or 0)
+        if getattr(self, "_surface", None) is not None:
+            try:
+                folded = set(self._surface.catalog.folded_names())
+            except Exception:      # noqa: BLE001 —— 拿不到折叠清单就照实不标
+                folded = set()
+
+        query = " ".join(parts[1:]).strip().lower()
+
+        def keep(n: str) -> bool:
+            if not query:
+                return True
+            return query in n.lower() or query in desc_of.get(n, "").lower()
+
+        groups = (("tool_group_read", sorted(READ_TOOLS)), 
+                  ("tool_group_write", sorted(WRITE_TOOLS)),
+                  ("tool_group_high", sorted(HIGH_RISK_TOOLS)))
+        shown = 0
+        print(c("bold", "\n" + t("tools_title",
+                                 n=len(all_names),
+                                 level=level,
+                                 visible=sum(1 for n in all_names if n in allowed))))
+        print(c("dim", "  " + t("tools_native",
+                                state=t("arg_on") if self.client.tools_ok else t("arg_off"),
+                                budget=budget if budget > 0 else t("arg_off"),
+                                folded=len(folded))))
+        _w = self._panel_width()
+        for group_key, names in groups:
+            hits = [n for n in names if keep(n)]
+            if not hits:
+                continue
+            print(c("dim", ace_panel.section(
+                t(group_key) + " · " + str(len(hits)), _w)))
+            line = "  "
+            for n in hits:
+                mark = "·" if n in folded else ("✓" if n in allowed else "×")
+                piece = f"{mark} {n}"
+                if _txt.display_width(line) + _txt.display_width(piece) + 1 > _w:
+                    print(c("dim" if line.strip().startswith("·") else "", line))
+                    line = "  "
+                line += piece + "  "
+                shown += 1
+            if line.strip():
+                print(line)
+        others = [n for n in all_names
+                  if n not in READ_TOOLS and n not in WRITE_TOOLS
+                  and n not in HIGH_RISK_TOOLS and keep(n)]
+        if others:
+            print(c("dim", ace_panel.section(t("tool_group_other") + " · "
+                                             + str(len(others)), _w)))
+            for n in sorted(others):
+                print("  ✓ " + n)
+                shown += 1
+        if query and shown == 0:
+            print(c("yellow", t("tools_not_found", q=query)))
+        print(c("dim", t("tools_legend")))
+        return True
+
     def _cmd_help(self, parts: List[str]) -> bool:
         """按分组列出命令。
 
@@ -1952,6 +2133,8 @@ class _SlashCommands:
         # 历史清空 → 水位归零：新会话里该提醒的时候还要能提醒
         self._ctx_warn_band = 0
         print(c("green", t("clear_done")))
+        # 与 `/new` 同一条：清零之后必须重发一次状态帧，否则前端底栏还挂着「轮N 上下文x%」
+        self._emit_status()
         return True
 
     def _cmd_thinking(self, parts: List[str]) -> bool:
@@ -2062,12 +2245,20 @@ class _SlashCommands:
             if not reg.presets:
                 print(c("dim", t("preset_none")))
                 return True
+            # **先弹选择器**（"打前缀就跳出来挑一个"，与 /provider /model 同一条路）。
+            # 列表仍然打一遍：选择器在非交互宿主里可能拿不到答案（取消/超时），
+            # 那时屏幕上有清单可抄 —— 拿不到答案不等于没有答案可看。
             print(c("bold", t("preset_title", n=len(reg.presets))))
             print(c("dim", t("preset_active", name=(_cur or "-"))))
             for _p in reg.presets:
                 _w = f"  [{len(_p.warnings)} warning]" if _p.warnings else ""
                 print(f"  {'*' if _p.name == _cur else ' '} {_p.name}{_w}")
-            return True
+            _names = [p.name for p in reg.presets]
+            _pick = self._select_index(t("preset_pick"), _names)
+            if isinstance(_pick, int) and 0 <= _pick < len(_names):
+                name = _names[_pick]
+            else:
+                return True
         # 先认名字再切：`switch()` 对认不出的名字会退化成"name=''"，而 `name=''` 在
         # 事件契约里是"切回无预设"—— 一个拼错的名字会被广播成一次真实的切走。
         if reg.get(name) is None:
@@ -3125,12 +3316,6 @@ class _SlashCommands:
         if on:
             print(c("dim", t("fullscreen_next_turn")))
         return True
-        # 上下文占用：把"还有多久会开始丢历史"摆到用户眼前。压缩发生时才提示就晚了，
-        # 用户看到的只是"模型突然忘事"。
-        _bdg_text, _bdg_cls = context_badge(self.context_usage(self.messages))
-        if _bdg_text:
-            parts.append((_bdg_cls, _bdg_text))
-        return parts
 
     def cost_estimate(self) -> Dict[str, Any]:
         """本会话成本估算（$）。口径见 core/ace_cost：**估算，不是账单**。
@@ -3405,6 +3590,63 @@ class _SlashCommands:
             _reason or "配置变更后重建模型客户端",
             detail=f"{_before} → {self.client.model} @ {self.client.base_url}")
 
+    def _apply_window(self) -> None:
+        """按当前模型 + 用户配置算窗口，并记下**来源**（决定要不要提示校正）。
+
+        来源三档：用户显式设的 / 表里有出处的 / **不知道**（兜底 32K）。
+        最后一档必须让用户看见 —— 否则他会一直在 3% 的容量里干活，还不知道能改。
+        """
+        self.context_window, self._window_source = ace_context.window_with_source(
+            self.client.model, override=int(self.cfg.get("context_window") or 0))
+
+    def _cmd_window(self, parts: List[str]) -> bool:
+        """`/window [<tokens>|auto]`：看/改**上下文窗口**。
+
+        为什么非要给用户这个旋钮：**每个模型的窗口都不一样，而"不知道"是常态**。
+        表里只放核过出处的条目（放猜测就是用今天的认知换明天的腐烂），其余走兜底
+        32768 —— 那是**安全**值（猜大了直接发超被接口拒），代价是可能只用了一小部分
+        容量。所以校正这件事必须一条命令能做完，并且**看得见当前值**。
+        """
+        if len(parts) < 2:
+            _src = t("window_src_" + self._window_source)
+            print(t("window_now", model=self.client.model,
+                    n=self.context_window, src=_src))
+            if self._window_source == ace_context.WINDOW_SOURCE_FALLBACK:
+                print(c("yellow", "  " + t("window_unknown_hint",
+                                           model=self.client.model, n=self.context_window)))
+            print(c("dim", "  " + t("window_usage")))
+            return True
+        arg = parts[1].strip().lower()
+        if arg in ("auto", "clear", "0"):
+            self.cfg.pop("context_window", None)
+            self._apply_window()
+            _saved = self._persist_window()
+            print(c("green", "  " + t("window_auto", n=self.context_window) + _saved))
+            return True
+        n = _parse_token_count(arg)
+        if not n:
+            print(c("yellow", "  " + t("window_bad", arg=parts[1])))
+            return True
+        self.cfg["context_window"] = n
+        self._apply_window()
+        _saved = self._persist_window()
+        print(c("green", "  " + t("window_set", n=self.context_window) + _saved))
+        return True
+
+    def _persist_window(self) -> str:
+        """把窗口选择落盘；失败也不影响本会话（返回给用户看的一句话尾巴）。"""
+        _save = globals().get("save_cli_config")
+        if not callable(_save):
+            return ""
+        try:
+            _save(self.cfg)
+            return t("window_saved_tail")
+        except Exception:      # noqa: BLE001
+            return t("window_unsaved_tail")
+
+    def _cmd_window_placeholder(self) -> None:
+        """占位：让 `_cmd_window` 在文件里位置稳定（无实际用途）。"""
+
     def _reload_client_for(self, reason: str) -> None:
         """**带理由**地重建客户端（WP-3：换模型/端点必须归因 —— 前缀缓存按模型分桶）。
 
@@ -3416,6 +3658,18 @@ class _SlashCommands:
             self._reload_client()
         finally:
             self._reload_reason = ""
+        # **换模型就要重算窗口**：窗口是"每个模型不一样"的东西，换了模型还沿用旧窗口，
+        # 要么浪费一大半容量（1M 窗口当 32K 用），要么发超被接口拒（反向更糟）。
+        _before_win = getattr(self, "context_window", 0)
+        _before_src = getattr(self, "_window_source", "")
+        self._apply_window()
+        if self.context_window != _before_win:
+            print(c("dim", "  " + t("context_window_now",
+                                    model=self.client.model, n=self.context_window)))
+        # 换成"表里没有"的模型 → 顺手告诉用户窗口是怎么来的 + 怎么改（一次，不刷屏）
+        if self._window_source == ace_context.WINDOW_SOURCE_FALLBACK and _before_src != self._window_source:
+            print(c("yellow", "  " + t("window_unknown_hint",
+                                       model=self.client.model, n=self.context_window)))
 
     def _handle_model(self, parts: List[str]) -> None:
         if len(parts) == 1:
@@ -3505,7 +3759,44 @@ class _SlashCommands:
         print(f"  端点: {target['base_url']}（{target['api_format']} 格式）")
         print(f"  模型: {self.cfg['model']}（可选: {' / '.join(target['models'][:6])}，用 /model <名> 换）")
         if not self.cfg.get("api_key"):
-            print(c("yellow", "  ⚠ 还没有该提供商的 API Key：用 /provider <id> <api-key> 或 /config 设置"))
+            # **第二层**：换了提供商却没有密钥 —— 当场问（隐藏输入，不回显），
+            # 而不是打一行提示让你再敲一条命令。没有可交互外壳时才退回提示。
+            _got_key = (self._ask_text(t("key_prompt"), "", hidden=True)
+                        if self._ui_can_prompt() else None)
+            if _got_key and str(_got_key).strip():
+                self.cfg["api_key"] = str(_got_key).strip()
+                save_cli_config(self.cfg)
+                self._reload_client_for(f"/provider 补上 {target['name']} 的密钥")
+                print(c("green", t("key_saved", desc=self.client.describe())))
+            else:
+                print(c("yellow", t("provider_need_key")))
+
+    def _cmd_key(self, parts: List[str]) -> bool:
+        """**一步改 API 密钥** —— `/config` 那三步向导里"密钥"那一步的单飞版。
+
+        为什么要单独一条：改密钥是最常做的配置动作，而 `/config` 要你先过提供商、再过模型；
+        `/provider <n>` 又**根本不问密钥**（它只换 base_url/model）。于是在前端里"我想直接改
+        密钥"没有任何入口 —— 这条就是那个入口。
+
+        密钥走 `hidden=True` 的输入（H-33/H-34a）：不回显、不进转录区。
+        `/key sk-xxx` 这种传参形态也能用，但它会把密钥写进屏幕与会话日志 —— 默认主张用提示。
+        """
+        inline = " ".join(parts[1:]).strip()
+        if inline:
+            new_key = inline
+        else:
+            got = self._ask_text(t("key_prompt"), "", hidden=True)
+            if got is None:
+                raise CommandCancelled()
+            new_key = str(got).strip()
+        if not new_key:
+            print(c("yellow", t("key_empty")))
+            return True
+        self.cfg["api_key"] = new_key
+        save_cli_config(self.cfg)
+        self._reload_client_for("/key 保存密钥后重建客户端")
+        print(c("green", t("key_saved", desc=self.client.describe())))
+        return True
 
     def _config_wizard(self) -> None:
         """模型配置向导：走 `ui/ace_dialog` 的向导框架（可后退、可校验、可取消）。
@@ -3530,15 +3821,24 @@ class _SlashCommands:
                     break
                 current = str(step.default or "")
                 if self._ui_can_prompt():
-                    # 组件界面在：向导步骤走界面的输入框（`input()` 会和界面抢 stdin）
-                    # 隐藏步骤（凭据）**不带 `[当前值]`、不预填默认值**，并把 `hidden`
-                    # 一路送到外壳（H-33）—— 此前它到此为止，外壳只能当普通文本画。
-                    _ptxt = (f"{step.prompt}: " if step.hidden
-                             else f"{step.prompt} [{current}]: ")
-                    raw = self._ask_text(_ptxt, "" if step.hidden else current,
-                                         hidden=step.hidden)
-                    if raw is None:
-                        raise CommandCancelled()
+                    if step.choices and step.choice_values:
+                        # **有可选值就弹选择框**（与 `/provider` 同一套交互），而不是先打一份
+                        # "可选: 1. 智谱 GLM / 2. DeepSeek…" 再让用户手输编号 ——
+                        # 同一件"选提供商"，两处两种交互是说不过去的。
+                        raw = self._wizard_choice_answer(
+                            step, self._select_index(step.prompt, list(step.choices)))
+                        if raw is None:
+                            raise CommandCancelled()
+                    else:
+                        # 组件界面在：向导步骤走界面的输入框（`input()` 会和界面抢 stdin）
+                        # 隐藏步骤（凭据）**不带 `[当前值]`、不预填默认值**，并把 `hidden`
+                        # 一路送到外壳（H-33）—— 此前它到此为止，外壳只能当普通文本画。
+                        _ptxt = (f"{step.prompt}: " if step.hidden
+                                 else f"{step.prompt} [{current}]: ")
+                        raw = self._ask_text(_ptxt, "" if step.hidden else current,
+                                             hidden=step.hidden)
+                        if raw is None:
+                            raise CommandCancelled()
                 else:
                     try:
                         if step.hidden:
@@ -3557,6 +3857,20 @@ class _SlashCommands:
         save_cli_config(self.cfg)
         self._reload_client_for("/config 向导保存后重建客户端")
         print(c("green", t("wizard_saved", desc=self.client.describe())))
+
+    @staticmethod
+    def _wizard_choice_answer(step: "ace_dialog.WizardStep",
+                              picked: Any) -> Optional[str]:
+        """选择框结果 → 这一步的**答案串**；`None` = 用户取消。
+
+        三态（与 `_select_index` 的 P-10 口径一致）：`None` 取消、`int` 是列表下标、
+        `str` 是用户自填的值（列表外）—— 自填值原样当答案，不在这里替调用方拒绝。
+        """
+        if picked is None:
+            return None
+        if isinstance(picked, int) and 0 <= picked < len(step.choice_values):
+            return step.choice_values[picked]
+        return str(picked)
 
     def _config_steps(self, answers: Dict[str, str]) -> List["ace_dialog.WizardStep"]:
         """向导的三步（数据驱动）：提供商 → 密钥 → 模型。
@@ -3582,6 +3896,9 @@ class _SlashCommands:
             ace_dialog.WizardStep(
                 "provider", t("wizard_step_provider"), t("wizard_ask_provider"),
                 default="", choices=prov_choices,
+                # 展示串是 "1. 智谱 GLM"，而这一步的**答案**必须是一个编号
+                # （`_apply_config_answers` 按下标解析）—— 两张平行表就是为这个差别存在的。
+                choice_values=[str(i) for i in range(1, len(PROVIDERS) + 1)],
                 help_text=t("wizard_help_provider"), validate=_check_provider),
             ace_dialog.WizardStep(
                 "api_key", t("wizard_step_key"), t("wizard_ask_key"),
@@ -3590,7 +3907,8 @@ class _SlashCommands:
                 "model", t("wizard_step_model"), t("wizard_ask_model"),
                 default=str((prov or {}).get("models", [""])[0] or
                             self.cfg.get("model", "")),
-                choices=model_choices, help_text=t("wizard_help_model")),
+                choices=model_choices, choice_values=model_choices,
+                help_text=t("wizard_help_model")),
         ]
 
     def _apply_config_answers(self, answers: Dict[str, str]) -> None:
@@ -3724,6 +4042,16 @@ class _LandingUI:
         同样的话；刻意不用 emoji（Windows 旧终端 conhost 会渲染成方框）。
         """
         lines = []
+        # 方块小人（`ui/ace_widgets.block_figure`）：**姿势就是思考强度** ——
+        # 蹲着=low、举臂=high/max、站着=auto。借 Claude Code `Clawd` 的三条做法：
+        # 按段拼、**所有姿势同宽同高**、四分块字符。高度固定 2 行 ⇒ 首屏布局不跳。
+        # caption 只挂第一行（两行小图 + 一行 byline，与 CC 的排版习惯一致）。
+        _eff = self.cfg.get("effort") or ace_effort.DEFAULT_EFFORT
+        _cap = t("banner_effort_mark", sym=ace_effort.symbol(_eff), level=_eff)
+        for _i, _ln in enumerate(ace_widgets.block_figure(
+                ace_widgets.pose_for_effort(_eff))):
+            lines.append(c("border", "  " + _ln)
+                         + ("   " + c("dim", _cap) if _i == 0 else ""))
         kb = self.cfg.get("kb_root")
         kb_path = kb or (os.path.abspath(self.cfg['project_root']) + os.sep + '.ace_kb')
         lines.append(c("dim", t("banner_kb", path=kb_path,
@@ -3953,6 +4281,9 @@ class AgentCLI(_AtCommands, _SlashCommands, _LandingUI):
         # "结构化输出模式" —— 全项目几十处 `if self.json_mode:` 分支于是自动生效，
         # 不必为协议再抄一遍"什么时候该发哪个事件"。
         self.json_mode = bool(cfg.get("json") or cfg.get("serve"))
+        # 本轮是否已经发过收尾帧：`_process_line` 每行置 False，成功路径的 `final` 置 True，
+        # 行尾由 `_close_turn_if_open` 兜底（失败/中断也要收尾，否则前端永远"忙"）。
+        self._turn_final_sent = True
         # --serve：双向协议的宿主。`FrameEmitter` 与 `EventEmitter` 同接口，所以这里
         # 换掉之后，下面几十处 `self.events.emit(...)` 一行都不用改就变成合法协议帧。
         self._serve = cfg.get("_serve")
@@ -3970,7 +4301,10 @@ class AgentCLI(_AtCommands, _SlashCommands, _LandingUI):
         self._reply_delta_sink: Optional[Callable[[str], None]] = None
         self.client = ModelClient(cfg, mock=mock)
         self.max_history = int(cfg.get("max_history", 0) or 0)
-        self.context_window = int(cfg.get("context_window", 32768) or 32768)
+        # **窗口跟着模型走**：不同模型的窗口差一个数量级（DeepSeek 1M / GLM 200K / 不知道 32K），
+        # 写死一个 32768 的后果是"用 1M 窗口的模型只装 3% 对话"。优先级：用户显式
+        # `--context-window` / 配置 / `/window` > 模型前缀表 > 兜底。切模型时重算（`_apply_window`）。
+        self._apply_window()
         self.compact_enabled = bool(cfg.get("compact", True))
         self.lang = str(cfg.get("lang", "zh"))
         set_language(self.lang)  # 界面语言跟随配置/@lang
@@ -4254,17 +4588,25 @@ class AgentCLI(_AtCommands, _SlashCommands, _LandingUI):
             return True
         if len(parts) < 2:
             print(c("cyan", "◈ " + t("diff_title", n=len(hist))))
+            _labels: List[str] = []
             for i, item in enumerate(reversed(hist), start=1):
                 files = ace_diff.split_by_file(str(item.get("diff") or ""))
                 stats = ace_diff.summarize_diff(str(item.get("diff") or ""))
                 path = str(item.get("path") or "") or (
                     files[0]["path"] if files else "?")
                 hunks = sum(len(f["hunks"]) for f in files) or 1
-                print(c("dim", t("diff_item", i=i, tool=item.get("tool", ""),
-                                 path=path, added=stats["added"],
-                                 removed=stats["removed"], hunks=hunks)))
+                _label = t("diff_item", i=i, tool=item.get("tool", ""),
+                           path=path, added=stats["added"],
+                           removed=stats["removed"], hunks=hunks)
+                _labels.append(_label)
+                print(c("dim", _label))
             print(c("dim", t("diff_hint")))
-            return True
+            # **第二层**：清单已经打出来了，顺手让用户挑一条 —— 不必回头数"是第几个"。
+            # 取消（Esc）就停在清单这一层，什么都不改。
+            _pick = self._select_index(t("diff_pick"), _labels)
+            if not (isinstance(_pick, int) and 0 <= _pick < len(hist)):
+                return True
+            parts = ["/diff", str(_pick + 1)]
         raw = parts[1].lstrip("#")
         if not raw.isdigit() or not (1 <= int(raw) <= len(hist)):
             print(c("red", t("diff_bad_index", raw=raw, n=len(hist))))
@@ -5085,13 +5427,16 @@ class AgentCLI(_AtCommands, _SlashCommands, _LandingUI):
         return True
 
     def _cmd_lang(self, parts: List[str]) -> bool:
-        """`/lang [zh|en|ja]`：回答用什么语言（顺带把界面语言一起切）。
+        """`/lang [zh|en|ja]`：切**界面语言**（按钮、提示、报错、底栏、主页都跟着换）。
 
-        为什么绑定在一起：用户说"用英文回答"时，几乎总是也想让界面说英文 ——
-        拆成两个开关的结果是"模型说英文、界面说中文"这种半拉状态。
+        **它不管模型用什么语言回答** —— 那是模型自己的事，你在对话里直接说一句
+        "用英文回答"就行，模型听得懂。此前这两件事被绑在一起（还会往系统提示词里塞
+        一条"请始终使用 X 回答"的语言指令），结果是：想换个界面语言，却顺带改变了
+        模型的回答语言；而这个项目的初衷恰恰是**中文界面 + 中文提示词**，不该被
+        一个界面开关捎带着改掉。
         """
         _NAMES = LANG_NAMES          # 模块级常量（ai_code 自己的那张表）
-        cur = str(self.cfg.get("reply_lang") or self.lang or "zh")
+        cur = str(self.lang or "zh")
         if len(parts) < 2:
             print(f"  {t('lang_now', name=_NAMES.get(cur, cur), code=cur)}")
             print(c("dim", "  " + t("lang_usage", names=", ".join(_NAMES))))
@@ -5101,8 +5446,7 @@ class AgentCLI(_AtCommands, _SlashCommands, _LandingUI):
             print(c("yellow", "  " + t("at_lang_unsupported", arg=parts[1],
                                        names=", ".join(_NAMES))))
             return True
-        self._set_lang(want)             # UI 语言（与 @lang 同一条路）
-        self.cfg["reply_lang"] = want
+        self._set_lang(want)             # 界面语言（与 @lang 同一条路）
         _save = globals().get("save_cli_config")
         if callable(_save):
             try:
@@ -5143,6 +5487,10 @@ class AgentCLI(_AtCommands, _SlashCommands, _LandingUI):
         print(c("green", "  " + t("new_session_done")))
         if old_path:
             print(c("dim", "  " + t("new_session_prev", path=os.path.basename(old_path))))
+        # **重发一次状态帧**：上面刚把轮数/工具数/上下文清零，而底栏画的是"上一次收到的
+        # 快照"——不发这一条，前端会继续显示上一段会话的「轮2 上下文2%」，看起来就像
+        # "新开一段没跟着换"（实测截图）。终端里这条是空操作（底栏本来就在实时重画）。
+        self._emit_status()
         return True
 
     def _sessions_brief(self, limit: int = 5) -> List[Dict[str, object]]:
@@ -5196,7 +5544,8 @@ class AgentCLI(_AtCommands, _SlashCommands, _LandingUI):
             "sandbox": str(self.cfg.get("sandbox", "off") or "off"),
             "effort": ace_effort.normalize(self.cfg.get("effort")),
             "net": net,
-            "lang": str(self.cfg.get("reply_lang") or self.lang or "zh"),
+            # 主页/菜单里显示的 `lang` = **界面语言**（不是"回答语言"；后者已随设计定调删掉）
+            "lang": str(self.lang or "zh"),
             "snapshots": snaps,
             "version": version.__version__,
         }
@@ -5440,6 +5789,18 @@ class AgentCLI(_AtCommands, _SlashCommands, _LandingUI):
         action = (args[0].lower() if args else "list")
         rest = args[1:]
         note = ""
+        if action in ("start", "done", "remove") and not rest:
+            # **第二层选择**：第一层（动作）已经定了，这一层挑"哪一条"。
+            # 此前这里要用户手打条目 id —— 把内部编号推给人、又不给可选项，
+            # 打错只会换来一句"没有这条待办"，是这类命令里最没道理的一处。
+            if not store.items:
+                print(c("dim", t("todo_empty")))
+                return True
+            _items = [f"#{it.id} {it.text}" for it in store.items]
+            _pick = self._select_index(t("todo_pick"), _items)
+            if not (isinstance(_pick, int) and 0 <= _pick < len(store.items)):
+                return True                          # 取消：什么都不做
+            rest = [str(store.items[_pick].id)]
         if action == "list" or (action not in ("add", "start", "done", "remove", "clear")):
             if action not in ("list",) and args:
                 print(c("yellow", t("todo_usage")))
@@ -5950,6 +6311,16 @@ class AgentCLI(_AtCommands, _SlashCommands, _LandingUI):
             return True
         src_note = Path(str(self.cfg.get("session_log") or "")).name
         target = 1
+        if len(parts) == 1 and self._ui_can_prompt() and turns > 0:
+            # **第二层**：不带参数时弹一张轮次表让你挑"从第几轮分叉"。
+            # 默认值（第 1 轮 = 最早那句）仍然保留为"取消"的语义。
+            _picked = self._select_index(
+                t("fork_pick"), [t("fork_option", n=i, turns=turns)
+                                 for i in range(1, turns + 1)])
+            if isinstance(_picked, int) and 0 <= _picked < turns:
+                target = _picked + 1
+            else:
+                return True
         if len(parts) > 1:
             raw = str(parts[1]).strip()
             if raw.startswith("@"):
@@ -6162,6 +6533,18 @@ class AgentCLI(_AtCommands, _SlashCommands, _LandingUI):
                 return True
         else:
             target = turns - 1
+            # **第二层**：`/rewind` 不带轮次时弹一张轮次表让用户挑，而不是让他自己数
+            # "现在是第几轮、想退到第几轮"。候选只列**真的会退掉东西**的那些
+            # （`turns` 本身是空操作，列出来只会浪费一次选择）。取消 = 什么都不做。
+            _opts = list(range(turns - 1, 0, -1))
+            if self._ui_can_prompt() and _opts:
+                _picked = self._select_index(
+                    t("rewind_pick"),
+                    [t("rewind_option", n=n, turns=turns) for n in _opts])
+                if isinstance(_picked, int) and 0 <= _picked < len(_opts):
+                    target = _opts[_picked]
+                else:
+                    return True
         target = max(0, min(target, turns))
         before = len(self.messages)
         self.messages = _sess.messages_at_turn(evs, target)
@@ -6410,11 +6793,9 @@ class AgentCLI(_AtCommands, _SlashCommands, _LandingUI):
             parts.append("【项目系统补充】以下内容来自项目根的 APPEND_SYSTEM.md"
                          "（项目所有者追加的系统指令，应遵循）：\n"
                          + self._project_system_append)
-        _reply_lang = str(self.cfg.get("reply_lang") or self.lang or "zh")
-        if _reply_lang != "zh":
-            parts.append(f"【语言指令】请始终使用 "
-                         f"{LANG_NAMES.get(_reply_lang, _reply_lang)} 回答用户；"
-                         f"代码标识符、命令、路径、报错原文保持原样，不要翻译。")
+        # 这里曾有"【语言指令】请始终使用 X 回答用户" —— **已删除**（设计定调）：
+        # 界面语言是界面的事（`/lang`），模型用什么语言回答是模型的事。想把回答钉成
+        # 某种语言，在对话里说一句就行；不该由一个界面开关替模型做决定。
         # 思考强度：**默认档不加任何话** —— 不替模型做决定
         _effort_hint = ace_effort.prompt_hint(
             self._turn_effort or self.cfg.get("effort"))
@@ -6530,19 +6911,27 @@ class AgentCLI(_AtCommands, _SlashCommands, _LandingUI):
                 return
             delta = visible[st["reply_printed"]:]
             st["reply_printed"] = len(visible)
-            _renderer().feed(delta)
-            # 同一份增量同步给事件流（只在 serve + `stream: true` 时有出口）。
+            # **正文只发一次**：有事件出口（serve/`--json`）时**不喂终端渲染器** ——
+            # 那条 stdout 在 serve 下是协议通道，喂它等于把同一段正文再发一遍
+            # （前端上表现为"◈ 流式一段 + ▏ 旁白一段"的重复，实测截图）。
+            # 没有出口时（普通 REPL）才走渲染器，屏幕上照样是逐行流式。
+            if _sink["fn"] is None:
+                _renderer().feed(delta)
+                return
             # 发不出去不该打断回答；但也不许静默 —— 断开出口并如实说一句。
-            if _sink["fn"] is not None:
-                try:
-                    _sink["fn"](delta)
-                except Exception as _e:      # noqa: BLE001
-                    _sink["fn"] = None
-                    print(f"⚠ model_delta 发送失败，已停止流式增量: "
-                          f"{type(_e).__name__}: {_e}", file=sys.stderr)
+            try:
+                _sink["fn"](delta)
+            except Exception as _e:      # noqa: BLE001
+                _sink["fn"] = None
+                print(f"⚠ model_delta 发送失败，已停止流式增量: "
+                      f"{type(_e).__name__}: {_e}", file=sys.stderr)
 
         def _flush_reply() -> None:
-            """收尾：交出未完结的最后一行与攒着的表格。幂等。"""
+            """收尾：交出未完结的最后一行与攒着的表格。幂等。
+
+            只在"终端渲染器真的被喂过"时才 flush —— 事件出口那条路上没有渲染器状态，
+            flush 一次会把空内容打成空行。
+            """
             if md["renderer"] is not None:
                 md["renderer"].flush()
 
@@ -6853,7 +7242,8 @@ class AgentCLI(_AtCommands, _SlashCommands, _LandingUI):
         # stringify"落在此处的那一半。
         _pchk = self._check_prefix(system)
         self._warn_context_if_near(msgs, system)
-        spinner = _Spinner(t("thinking"), verbs=ace_layout.spinner_verbs(t),
+        spinner = _Spinner(ace_widgets.think_label(self.cfg.get("effort"), t("thinking")),
+                     verbs=ace_layout.spinner_verbs(t),
                            reduce_motion=self._reduce_motion())
         self._spinner = spinner      # /tasks 用：能看出"此刻在跑什么"
         disp = self._make_display(tools_mode=bool(self.client.tools), spinner=spinner,
@@ -7257,9 +7647,14 @@ class AgentCLI(_AtCommands, _SlashCommands, _LandingUI):
                         next_user = PROMPT_UNVERIFIED_CLAIM
                         continue
                     print(c("yellow", "\n" + t("unverified_claim_final")))
-                if disp["state"]["reply_printed"] < len(result["message"]):
+                if (not self.json_mode
+                        and disp["state"]["reply_printed"] < len(result["message"])):
                     # 兜底：流式展示未覆盖时补打完整回复。同样走 Markdown 渲染 ——
                     # 否则同一条回复会因为"走的是哪条路径"而排版不同。
+                    #
+                    # **serve / --json 下不打**：这条路的 stdout 是协议通道，正文已经通过
+                    # `model_delta` 与 `final` 发出去了；再打一遍就是同一段回答到两次
+                    # （前端上表现为"◈ 流式一段 + ▏ 旁白一段"的重复）。
                     print()
                     for _ln in ace_markdown.render(str(result["message"]),
                                                    width=_md_width(), styler=_md_styler):
@@ -7268,6 +7663,7 @@ class AgentCLI(_AtCommands, _SlashCommands, _LandingUI):
                 if self.json_mode:
                     self.events.emit("final", text=str(result["message"] or ""),
                                      round=_round, sec=round(time.time() - t0, 3))
+                    self._turn_final_sent = True
                     # 收尾那一帧：这一轮的轮数/工具数/上下文已定型（下一轮开工前不再变）。
                     self._emit_status()
                 print(c("green", t("done", round=_round,
@@ -7638,8 +8034,11 @@ class AgentCLI(_AtCommands, _SlashCommands, _LandingUI):
 
     def repl(self, return_to_landing: bool = False) -> None:
         """聊天 REPL；return_to_landing=True 时退出聊天回到主界面，否则结束程序"""
-        # 进入聊天前清屏，避免登录页的 logo/菜单残留在屏幕上造成双头部
-        self._clear_screen()
+        # **进聊天不清屏**（原来这里有一句 `self._clear_screen()`，理由是"避免登录页的
+        # logo/菜单残留造成双头部"）。代价太大：`\x1b[2J` 会把**终端回滚缓冲一起清掉** ——
+        # 首屏那张卡（HooH 标）、以及进聊天前刚打的东西（比如 `/resume` 的历史预览）
+        # 全部消失，用户往上翻只能翻到清屏那一刻之后（实测投诉："图标没了、划不上去"）。
+        # 首屏本来就该像开场字幕一样自然滚上去 —— 与 Ink 侧 `App.tsx` 的同一条原则。
         self._play_banner_animation()
         # 头部用与首屏同一套面板：模型/边界/目录/历史四行，字段一多也不会错位
         print(c("bold", "HooH") + c("dim", t("banner_sub", ver=version.__version__)))
@@ -7650,6 +8049,11 @@ class AgentCLI(_AtCommands, _SlashCommands, _LandingUI):
             print(_ln)
         if self.cfg["permission"] != "readonly":
             print(c("yellow", t("banner_warn_write")))
+        # **窗口未知就当面说清**：表里只放核过出处的模型，"不知道"不等于"窗口小"。
+        # 不说的话用户会一直在兜底值（32K）里干活，还以为这就是极限。
+        if self._window_source == ace_context.WINDOW_SOURCE_FALLBACK:
+            print(c("yellow", "  " + t("window_unknown_hint",
+                                       model=self.client.model, n=self.context_window)))
         print(t("banner_hint",
                 help=c("magenta", "/help"), at=c("magenta", "@"),
                 exit=c("magenta", "/exit")))
@@ -7886,9 +8290,12 @@ class AgentCLI(_AtCommands, _SlashCommands, _LandingUI):
                 self._queued = self._queued[1:]
                 print(c("dim", t("queue_running", n=len(self._queued))))
                 try:
+                    self._turn_final_sent = False
                     self.converse(_next, echo_input=False)
                 except KeyboardInterrupt:
                     print("\n" + t("interrupted"))
+                finally:
+                    self._close_turn_if_open()
                 continue
             try:
                 # 提示符带权限状态（readonly=蓝 / write=黄 / full=红），一眼看清当前权限
@@ -7993,12 +8400,15 @@ class AgentCLI(_AtCommands, _SlashCommands, _LandingUI):
             # 里被排除，永远不会被自定义命令顶掉）。
             _expanded = self._maybe_custom_command(line)
             if _expanded is not None:
+                self._turn_final_sent = False
                 try:
                     self.converse(_expanded, echo_input=False)
                 except KeyboardInterrupt:
                     print("\n" + t("interrupted"))
                 except Exception as e:  # noqa: BLE001 —— 单条命令失败不该结束会话
                     print(c("red", t("chat_error", err=e)))
+                finally:
+                    self._close_turn_if_open()
                 return True
             try:
                 if not self.run_command(line):
@@ -8010,13 +8420,33 @@ class AgentCLI(_AtCommands, _SlashCommands, _LandingUI):
             except Exception as e:  # noqa: BLE001
                 print(c("red", t("command_failed", err=e)))
             return True
+        self._turn_final_sent = False
         try:
             self.converse(line, echo_input=False)
         except KeyboardInterrupt:
             print("\n" + t("interrupted"))
         except Exception as e:  # noqa: BLE001
             print(c("red", t("chat_error", err=e)))
+        finally:
+            self._close_turn_if_open()
         return True
+
+    def _close_turn_if_open(self, *, aborted: bool = True) -> None:
+        """**收尾不变量**：提交一行 ⇒ 一定有一条收尾帧（成功了也要有，但那条由 converse 发）。
+
+        为什么需要它：`converse` 里有 9 个裸 `return`（用户中断 / 模型调用失败 / 连续无进展
+        熔断 / 目标预算耗尽…），它们都不会走到成功路径那条 `final`；而此前 `user_message`
+        与 `model_request` 早就把前端置成了"忙"。缺了收尾，前端**永远**停在"推演中"——
+        实测症状：api key 无效时 401 之后底栏一直是"推演中 14s"，看着像还在跑。
+
+        **命令也要收尾**：前端提交任何一行都会先本地置忙（`App.tsx` 的乐观 UI），
+        而命令不跑轮次、不经过 `converse` 那条 `final` —— 少了这一步，`/net on` 之后
+        底栏就永远停在"推演中 4s"。`aborted=False` 用来区分"没跑轮次"和"跑了但断了"。
+
+        空文本 = 只收尾、不产生回复气泡（前端对空 `final` 只清忙态，见 store.ts）。
+        """
+        if self.json_mode and not getattr(self, "_turn_final_sent", True):
+            self.events.emit("final", text="", aborted=bool(aborted))
 
     def _run_fullscreen_repl(self) -> str:
         """在备用屏幕里跑会话（头部/滚动区/状态行/输入行），返回退出原因。
@@ -8107,14 +8537,14 @@ def _net_thinking_hint(now: Optional[float] = None) -> str:
             "4) 搜不到就如实说搜不到，也不要用旧知识补一个「应该差不多」的答案。")
 
 
-def _tui_off_reason(args) -> str:
-    """为什么没进组件界面：`missing` / `pipe` / `machine` / `explicit` / `""`。
+def _engine_off_reason(args) -> str:
+    """为什么没进新引擎界面：`explicit` / `pipe` / `machine` / `""`。
 
-    分这么细是为了**说人话**：缺依赖要告诉用户怎么装；管道/机器可读是正常回退，
+    分这么细是为了**说人话**：用户点名关掉就安静回退；管道/机器可读是正常回退，
     不该啰嗦（脚本里刷一行提示只会碍事）。
     """
     try:
-        if getattr(args, "no_tui", False):
+        if getattr(args, "no_engine", False):
             return "explicit"
         if getattr(args, "json", False) or getattr(args, "input", None):
             return "machine"
@@ -8122,35 +8552,24 @@ def _tui_off_reason(args) -> str:
             return "machine"
         if not (sys.stdin.isatty() and sys.stdout.isatty()):
             return "pipe"
-        from tui import tui_available
-        return "" if tui_available() else "missing"
+        return ""
     except Exception:  # noqa: BLE001
-        return "missing"
+        return "pipe"
 
 
-def _tui_default_ok(args) -> bool:
-    """默认用不用组件化界面。
+def _engine_default_ok(args) -> bool:
+    """默认用不用新引擎界面（主屏两车道）。
 
-    产品口径：**装了就用**（那是这份产品的正脸），但要满足四个前提，任何一个不成立
-    都老实回退 REPL —— 在管道里、在机器可读输出里、在一次性问答里画全屏界面，
-    是"看起来高级、实际把输出弄坏"。
+    产品口径：**真终端就是它**（转录留在终端自己的 scrollback 里，可滚可复制可搜索）。
+    四个前提任何一个不成立都老实回退普通 REPL —— 在管道里、在机器可读输出里、
+    在一次性问答里铺一个常驻底部区，是"看起来高级、实际把输出弄坏"。
 
-    - 真终端（stdin + stdout 都是 TTY）：否则 resizing/按键都没有意义；
+    - 真终端（stdin + stdout 都是 TTY）；
     - 没开 `--json`：事件流的消费者是程序，不是人；
-    - 不是 `--input` 一次性问答 / `--preview` 静态预览：它们压根不该进交互界面；
-    - 装得上 textual（`tui.app` 能 import）。
+    - 不是 `--input` 一次性问答 / `--preview` 静态预览；
+    - 没显式 `--no-engine`。
     """
-    try:
-        if getattr(args, "json", False) or getattr(args, "input", None):
-            return False
-        if getattr(args, "preview", False) or getattr(args, "preview_width", 0):
-            return False
-        if not (sys.stdin.isatty() and sys.stdout.isatty()):
-            return False
-        from tui import tui_available
-        return bool(tui_available())
-    except Exception:  # noqa: BLE001 —— 探测本身不该拦住启动
-        return False
+    return _engine_off_reason(args) == ""
 
 
 def _run_serve(cli: "AgentCLI", srv) -> int:
@@ -8196,6 +8615,9 @@ def _run_serve(cli: "AgentCLI", srv) -> int:
             "project_root": str(cli.cfg.get("project_root", ".")),
             "model": cli.client.model,
             "mock": bool(cli.client.mock),
+            # 界面语言：外壳**自己有一份字典**，所以起步就得知道该用哪本 ——
+            # 只认命令行 `--lang` 的后果是"配置里写 en、前端照样中文"（实测）。
+            "lang": str(getattr(cli, "lang", "") or "zh"),
             "stream": srv.stream_enabled,
             "vim": bool(cli.cfg.get("vim_mode", False)),
             # 字形降级表：`{原字: 替身}`，只含**这台控制台画不出**的那些。
@@ -8227,14 +8649,31 @@ def _run_serve(cli: "AgentCLI", srv) -> int:
             raise _sv.ServeError("E_BAD_REQUEST", "text 为空")
         # echo_input=False：说话的是前端，它已经把那句话画在屏幕上了。再回显一次
         # 会变成一条多余的 notice，前端要自己去重 —— 那是把我们的账推给它。
-        cli.converse(text, echo_input=False)
+        #
+        # **这条路径不走 `_process_line`**（前端把"聊天"和"命令"分成两个请求），
+        # 所以收尾不变量必须在这里也立一次：converse 中途失败/中断时不会发 `final`，
+        # 而 `user_message`/`model_request` 早把前端置成"忙" —— 少这一下，底栏就永远
+        # 停在"推演中"（实测：api key 无效 → 401 → 一直"推演中 14s"）。
+        cli._turn_final_sent = False
+        try:
+            cli.converse(text, echo_input=False)
+        finally:
+            cli._close_turn_if_open()
         return {"ok": True}
 
     def _h_command(params: Dict) -> Dict:
         line = str(params.get("line") or "").strip()
         if not line:
             raise _sv.ServeError("E_BAD_REQUEST", "line 为空")
-        keep = cli._process_line(line)
+        # **命令也要收尾**：前端提交任何一行都会先本地置忙（乐观 UI），只有 `final` 能解除。
+        # 命令不跑轮次 ⇒ 不经过 converse 那条 final ⇒ 忙态永远挂着
+        # （实测：`/net on` 之后底栏一直"推演中 4s"）。自定义命令展开成对话时会自己
+        # 发真的 final，`_close_turn_if_open` 那时已经看到 `_turn_final_sent=True`，不重复发。
+        cli._turn_final_sent = False
+        try:
+            keep = cli._process_line(line)
+        finally:
+            cli._close_turn_if_open(aborted=False)
         return {"ok": True, "keep_going": keep is not False}
 
     def _h_interrupt(_params: Dict) -> Dict:
@@ -8313,6 +8752,9 @@ def _run_serve(cli: "AgentCLI", srv) -> int:
         """
         st = cli.home_state()
         st["vim"] = bool(cli.cfg.get("vim_mode", False))
+        # `/fullscreen` 改的也是引擎的 cfg，而**备用屏是外壳的事**（谁能进 1049 只有它知道）。
+        # 不把这个字段发出去，用户敲 `/fullscreen on` 就是空转 —— 实测投诉过。
+        st["fullscreen"] = bool(cli.cfg.get("fullscreen", False))
         return st
 
     def _h_sessions(_params: Dict) -> Dict:
@@ -8623,16 +9065,16 @@ def main() -> None:
                         help="配合 --preview：按指定列宽渲染（默认按当前终端，取不到用 100）")
     parser.add_argument("--save-config", action="store_true", help="把当前参数保存到 ~/.ai_code.json")
     parser.add_argument("--install-ui", action="store_true",
-                        help="准备界面依赖（prompt_toolkit + textual + rich）：先看当前解释器"
+                        help="准备界面依赖（prompt_toolkit）：先看当前解释器"
                              "有没有，没有就建 .ace_env 并安装（离线可用仓库自带的 wheel）")
     parser.add_argument("--setup", action="store_true",
                         help="同 --install-ui（别名）：把运行环境准备好再启动")
-    parser.add_argument("--tui", action="store_true",
-                        help="用组件化全屏界面（Textual）启动：鼠标滚轮滚动会话区、"
-                             "状态行常驻、输入框固定；忙时输入自动排队、Ctrl+C 两段式中断。"
-                             "装了 textual 且是真终端时**默认就是它**")
-    parser.add_argument("--no-tui", action="store_true",
-                        help="强制用普通 REPL（不要全屏界面）：脚本化、录屏、"
+    # 引擎界面（主屏两车道 + 帧缓冲）：真终端下**已经是默认**。见 docs/TUI-ENGINE.md。
+    # `--engine` 保留成显式声明（老命令还能用），`--no-engine` 才是那条回退路。
+    parser.add_argument("--engine", action="store_true",
+                        help="用引擎界面启动（真终端下已经是默认，这个开关只是显式声明）")
+    parser.add_argument("--no-engine", action="store_true",
+                        help="强制普通 REPL（不要常驻底部区）：脚本化、录屏、"
                              "或你只是想看逐行滚动时用")
     parser.add_argument("--install-executor", action="store_true",
                         help="一键下载官方预编译执行器到 executor/（替代手工 go build；"
@@ -8709,9 +9151,9 @@ def main() -> None:
         save_cli_config(cfg)
 
     cli = AgentCLI(cfg, mock=args.mock)
-    # 冻结发行（PyInstaller）不含 Ink 主外壳（见 docs/PACKAGING-EXE.md D3）：运行时明说，
+    # 冻结发行（PyInstaller）不含主外壳（见 docs/PACKAGING-EXE.md D3）：运行时明说，
     # 而不是让用户以为"主外壳坏了"。打 stderr —— 一是不污染 --json/--serve/--mcp 的 stdout
-    # 协议通道，二是 Textual 全屏用 alt-screen 时会盖住 stdout，stderr 才能一直看得见。
+    # 协议通道，二是引擎界面的常驻底部区会用到 stdout 的光标定位，stderr 才能一直看得见。
     if getattr(sys, "frozen", False):
         print(c("yellow", t("frozen_fallback_shell")), file=sys.stderr)
     # MCP 子进程必须在所有退出路径上收掉：Windows 上父进程退出**不会**带走子进程，
@@ -8730,41 +9172,22 @@ def main() -> None:
     if args.preview:
         return _print_preview(cli, width=args.preview_width)
     if args.input:
-        cli.converse(args.input)
-        return
-    if getattr(args, "tui", False) or (not getattr(args, "no_tui", False)
-                                       and _tui_default_ok(args)):
-        # 组件化全屏界面：引擎照旧（同一套 _process_line），只把"谁在画屏幕"换掉。
-        # 没装 textual / 不是真终端 / 机器可读输出（--json）时**如实回退**，不假装跑了。
+        cli._turn_final_sent = False
         try:
-            from tui.app import run_tui
+            cli.converse(args.input)
+        finally:
+            cli._close_turn_if_open()
+        return
+    if getattr(args, "engine", False) or _engine_default_ok(args):
+        # 引擎界面（主屏两车道）：转录直写终端 scrollback，底部区走帧缓冲增量重画。
+        # 出任何问题都**如实回退**普通 REPL —— 一个界面不该把整个会话卡死。
+        try:
+            from ui.ace_engine_repl import run_engine_repl
+            return run_engine_repl(cli)
         except Exception as e:  # noqa: BLE001
-            print(c("yellow", f"  TUI 不可用（{type(e).__name__}: {e}），回退普通 REPL"))
-            run_tui = None
-        if run_tui is not None:
-            _code = run_tui(engine=lambda line: cli._process_line(line),
-                            status_provider=cli._footer,
-                            title=f"HooH {version.__version__}",
-                            translate=t,
-                            command_table=AgentCLI.COMMANDS,
-                            on_stop=cli.request_stop,
-                            board_provider=lambda: cli._board,
-                            ui_host=cli,
-                            steering_mode=cli.cfg.get("steering_mode", "queue"),
-                            followup_mode=cli.cfg.get("followup_mode", "queue"))
-            if _code == 0:
-                return
-            if getattr(args, "tui", False):
-                print(c("yellow", "  没装 textual —— 用 `python setup_env.py --ensure` 装好，"
-                                  "或继续用普通 REPL"))
-    else:
-        _tui_reason = _tui_off_reason(args)
-        if _tui_reason == "missing":
-            # 缺依赖这件事必须**说出来**：不说的话，用户只会发现"排队/中断/Shift+Tab
-            # 这些怎么都没有"，然后觉得"好多功能用不了"。
-            print(c("dim", "  （组件界面未启用：没装 textual —— 排队 / 两段式中断 / "
-                           "Shift+Tab 切权限 / F1 帮助 只在组件界面里。装："
-                           "python setup_env.py --ensure）"))
+            print(c("yellow", f"  引擎界面不可用（{type(e).__name__}: {e}），回退普通 REPL"))
+    elif _engine_off_reason(args) == "pipe" and not getattr(args, "no_engine", False):
+        print(c("dim", "  · 非交互终端：走普通 REPL"))
     if os.environ.get("ACE_DIRECT_CHAT") == "1":
         # 直进聊天：会话滚回缓冲里没有“登录主页”，上滑只见开场横幅+对话本身
         cli.repl()

@@ -116,6 +116,25 @@ function push(state: State, item: NewItem): State {
 }
 
 /**
+ * 最后一条**还在流**的助手消息的下标；没有则 -1。
+ *
+ * 为什么不直接看 `items[items.length - 1]`：工具时间线（`⚙ 2 次工具调用`）、耗时、快照
+ * 提示这些 notice 会插在增量与 `final` 之间。只看最后一条就会漏掉合并，症状是
+ * **同一段回答出现两遍**（`final` 又推一条）或**被劈成两条**（后续增量另起一条）——
+ * 两个都是实测踩到过的。
+ *
+ * 遇到 `user` 项就停下：那是上一轮的用户消息，绝不跨轮合并。
+ */
+function lastStreamingAssistant(items: Item[]): number {
+  for (let i = items.length - 1; i >= 0; i--) {
+    const it = items[i]!;
+    if (it.kind === 'user') return -1;
+    if (it.kind === 'assistant' && it.streaming) return i;
+  }
+  return -1;
+}
+
+/**
  * 把一个事件折进状态。**永不修改入参** —— 便于 React 做引用比较，
  * 也让"同一串事件跑两遍结果一致"这件事可断言。
  */
@@ -136,19 +155,29 @@ export function applyEvent(state: State, ev: AceEvent): State {
       };
     }
 
-    case 'user_message':
-      return {
-        ...push({ ...state, busy: true }, { kind: 'user', text: str(ev.text) }),
-        meta: { ...state.meta, phase: 'reasoning' },
-      };
+    case 'user_message': {
+      // **去重**：前端提交时会先本地乐观播一条（`App.tsx` 的 `handleSubmit`），引擎随后
+      // 还会真的发一条 `user_message`。两条都 push 的后果是同一句话在转写区出现**两遍**
+      //（实测截图）。留本地那条（它先到、位置也对），引擎那条只负责把"忙"置起来。
+      const text = str(ev.text);
+      const last = state.items[state.items.length - 1];
+      const already = last?.kind === 'user' && last.text === text;
+      const next = already ? state : push(state, { kind: 'user', text });
+      return { ...next, busy: true, meta: { ...state.meta, phase: 'reasoning' } };
+    }
 
     case 'model_delta': {
-      // 流式增量：追加到"最后一条还在流的助手消息"上；没有就新开一条。
+      // 流式增量：追加到"最后一条**还在流**的助手消息"上；没有就新开一条。
+      // **往回找**，不是只看最后一条 —— 工具时间线（`⚙ 2 次工具调用`）那类 notice 会夹在
+      // 增量中间，只看 `last` 会把同一段回答**劈成两条**（实测：◈ 一段 + ◈ 又一段）。
       const items = [...state.items];
-      const last = items[items.length - 1];
-      if (last && last.kind === 'assistant' && last.streaming) {
-        items[items.length - 1] = { ...last, text: last.text + str(ev.text) };
-        return { ...state, items, meta: { ...state.meta, lastOutputAt: ev.ts } };
+      const idx = lastStreamingAssistant(items);
+      if (idx >= 0) {
+        const prev = items[idx]!;
+        if (prev.kind === 'assistant') {
+          items[idx] = { ...prev, text: prev.text + str(ev.text) };
+          return { ...state, items, meta: { ...state.meta, lastOutputAt: ev.ts } };
+        }
       }
       return {
         ...push(state, { kind: 'assistant', text: str(ev.text), streaming: true }),
@@ -158,19 +187,27 @@ export function applyEvent(state: State, ev: AceEvent): State {
 
     case 'final': {
       const text = str(ev.text);
+      // **空文本的 final = 只收尾，不产生气泡**：一轮以失败/中断结束时，引擎发不出回复
+      // 正文，但必须把界面从"忙"里放出来（否则底栏永远停在"推演中"，看着像还在跑）。
+      // 这是引擎侧 `_close_turn_if_open` 的对应端，两边少一边都会让忙碌态泄漏。
+      if (!text) return { ...state, busy: false };
       // 流式已经把正文拼好了：收尾时**要么补全、要么原样**，不能再追加一遍
       // （追加的后果是屏幕上出现两遍回答 —— 这是流式渲染最经典的踩坑）。
+      // 同样**往回找**那条还在流的助手消息：工具时间线 notice 夹在中间时，
+      // 只看最后一条会漏掉合并，把整段回答再推一条出来（实测：回答两遍）。
       const items = [...state.items];
-      const last = items[items.length - 1];
-      if (last && last.kind === 'assistant' && last.streaming) {
-        const merged = last.text.length >= text.length ? last.text : text;
-        items[items.length - 1] = {
-          ...last,
-          text: merged,
-          streaming: false,
-          round: num(ev.round) ?? last.round,
-        };
-        return { ...state, items, busy: false };
+      const idx = lastStreamingAssistant(items);
+      if (idx >= 0) {
+        const prev = items[idx]!;
+        if (prev.kind === 'assistant') {
+          items[idx] = {
+            ...prev,
+            text: prev.text.length >= text.length ? prev.text : text,
+            streaming: false,
+            round: num(ev.round) ?? prev.round,
+          };
+          return { ...state, items, busy: false };
+        }
       }
       return { ...push(state, { kind: 'assistant', text, streaming: false, round: num(ev.round) }), busy: false };
     }
@@ -255,7 +292,29 @@ export function applyEvent(state: State, ev: AceEvent): State {
     case 'notice': {
       const text = str(ev.text);
       if (!text.trim()) return state;
+      // **被拒的草稿不留**：模型这一轮输出不合协议时，执行层会**拒掉它并重问**；
+      // 那条草稿留在屏幕上就是噪音 —— 同一个问题看到两遍不同措辞的回答（实测投诉）。
+      // 判据取自引擎自己的提示（`✗ FORMAT_ERROR: …`），只丢"还在流"的那条，
+      // 所以不会误删已定稿的回答。
+      if (/FORMAT_ERROR|格式错误/.test(text)) {
+        const idx = lastStreamingAssistant(state.items);
+        if (idx >= 0) {
+          // 丢草稿，但**错误行要留着**（发生过格式纠正是事实，别一起吞掉）
+          return push({ ...state, items: state.items.filter((_, i) => i !== idx) },
+                      { kind: 'notice', text });
+        }
+      }
       return push(state, { kind: 'notice', text });
+    }
+
+    case 'error': {
+      // 引擎的错误事件此前**没有被消费**（`default:` 直接忽略），于是 error 类信息
+      // 到不了界面。这里补上，并沿用"被拒的草稿不留"这条口径。
+      const text = str(ev.text);
+      if (!text.trim()) return state;
+      const idx = /FORMAT_ERROR|格式错误/.test(text) ? lastStreamingAssistant(state.items) : -1;
+      const items = idx >= 0 ? state.items.filter((_, i) => i !== idx) : state.items;
+      return push({ ...state, items }, { kind: 'error', text });
     }
 
     case 'agent_preset': {
@@ -284,7 +343,18 @@ export function applyEvent(state: State, ev: AceEvent): State {
     }
 
     case 'model_request':
-      return { ...state, busy: true, meta: { ...state.meta, rounds: Math.max(state.meta.rounds, num(ev.round) ?? 0) } };
+      // 每一轮模型请求 = 模型又开始生成了 ⇒ 相位回到 `reasoning`（"推演中"）。
+      // 不写这一句的后果是**标签说谎**：工具跑完之后相位一直停在 `tool_running`，
+      // 模型明明在推，底栏却还写着"工具执行中"。
+      return {
+        ...state,
+        busy: true,
+        meta: {
+          ...state.meta,
+          phase: 'reasoning',
+          rounds: Math.max(state.meta.rounds, num(ev.round) ?? 0),
+        },
+      };
 
     case 'session_end':
       return {

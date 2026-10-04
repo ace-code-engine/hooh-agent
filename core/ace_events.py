@@ -64,7 +64,7 @@ __all__ = ["EVENT_TYPES", "EVENT_REQUIRED", "make_event", "validate_event",
 EVENT_TYPES = ("session_start", "user_message", "model_request", "tool_start",
                "tool_call", "tool_result", "permission_request", "choice_request",
                "notice", "final", "session_end", "model_delta", "status",
-               "agent_preset")
+               "agent_preset", "language")
 
 # 每个事件的必需字段（校验与文档的唯一来源）
 EVENT_REQUIRED: Dict[str, tuple] = {
@@ -86,6 +86,8 @@ EVENT_REQUIRED: Dict[str, tuple] = {
     "status": ("segments",),
     # WP-6：预设切换（`core/ace_agents.emit_switch`）。`name` 为空串 = 切回无预设。
     "agent_preset": ("name", "permission"),
+    # 界面语言切换：外壳据此换自己的字典（引擎那份由 `ui.i18n.set_language` 负责）
+    "language": ("lang",),
 }
 
 _ANSI = re.compile(r"\x1b\[[0-9;]*m")

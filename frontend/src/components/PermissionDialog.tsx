@@ -12,6 +12,8 @@
  */
 
 import { Box, Text, useInput } from 'ink';
+
+import { Divider } from './design-system/index.js';
 import React, { useState } from 'react';
 
 import type { GrantDecision } from '../protocol/types.js';
@@ -116,11 +118,14 @@ export function PermissionDialog({
   const box = (s: string): string => s;
 
   return (
-    <Box flexDirection="column" borderStyle="round" borderColor={color('warn')} paddingX={1}>
+    <Box flexDirection="column" paddingX={1}>
+      {/* 无边框：标题 + **整宽细线**（Swiss 规范 §1 第 2 条；照 CC `Dialog` 的做法）。
+          圆角框在窄终端上会把内容挤到只剩十几列，而且四条边全是纯装饰。 */}
       <Text color={color('warn')} bold>
         {gstr(box('⚠ '))}
         {t('perm_request_title', { tool })}
       </Text>
+      <Divider color={color} />
       {reason ? <Text color={color('dim')}>{t('perm_reason', { reason })}</Text> : null}
 
       {typingReason ? (

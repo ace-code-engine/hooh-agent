@@ -80,7 +80,9 @@ async function runSession(
       PROJECT_ROOT,
       ...(opts.extraArgs ?? []),
     ],
-    ...(opts.env ? { env: opts.env } : {}),
+    // **子进程也不许写开发者的真实配置**：进程内的桩管不到被 spawn 的引擎，
+    // 实测一次测试就能把 `~/.ai_code.json` 覆盖成测试用的空壳。
+    env: { ACE_NO_SAVE_CONFIG: '1', ...(opts.env ?? {}) },
   });
   const events: AceEvent[] = [];
   client.on('event', (ev: AceEvent) => events.push(ev));

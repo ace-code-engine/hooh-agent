@@ -126,3 +126,43 @@ def set_theme(theme: str) -> None:
 def current_theme() -> str:
     """返回当前生效的主题名（"dark" 或 "light"）。"""
     return _resolve_theme()
+
+
+# ---------------------------------------------------------------------------
+# 瑞士风格 token 层（docs/TUI-SWISS-SPEC.md 第四节）
+# 三级灰 + 一个强调色 + 三个语义色。**新屏一律用这一层**。
+#
+# 为什么和上面的旧表并存：旧表的色名（`ansiyellow` 之类）被 test_all.py:6002-6052
+# 当契约断言了，还有调用方在用。一次大爆炸改色会把"测试红"和"界面坏"混在一起。
+# 旧 → 新的映射与删除条件写在规范第四节；调用方迁完之后，旧表整块删除。
+#
+# 值分两种：SGR 参数（喂终端）与 hex（喂 SVG 预览后端），所以两个取值函数。
+# ---------------------------------------------------------------------------
+CELL_THEMES = {
+    "dark": {
+        "text": "39", "text_2": "38;5;245", "text_3": "38;5;240",
+        "accent": "38;5;173",
+        "ok": "38;5;71", "warn": "38;5;179", "err": "38;5;167",
+        "base_bg": "#0e0e13", "base_fg": "#e8e8ee", "accent_hex": "#d7a05f",
+    },
+    "light": {
+        "text": "39", "text_2": "38;5;244", "text_3": "38;5;249",
+        "accent": "38;5;160",
+        "ok": "38;5;28", "warn": "38;5;136", "err": "38;5;160",
+        "base_bg": "#faf8f4", "base_fg": "#16161a", "accent_hex": "#c0392b",
+    },
+}
+
+SWISS_ROLES = ("text", "text_2", "text_3", "accent", "ok", "warn", "err")
+
+
+def cell(role: str, theme: str = None) -> str:
+    """瑞士 token → SGR 参数（不含 ESC）。未知角色回退 `text`（默认前景）。"""
+    palette = CELL_THEMES.get(theme or _resolve_theme(), CELL_THEMES["dark"])
+    return palette.get(role, palette["text"])
+
+
+def cell_hex(role: str, theme: str = None) -> str:
+    """同一批 token 的 hex 值（预览图用；终端不用它）。未知角色回退默认前景。"""
+    palette = CELL_THEMES.get(theme or _resolve_theme(), CELL_THEMES["dark"])
+    return palette.get(role, palette["base_fg"])

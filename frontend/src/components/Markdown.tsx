@@ -8,11 +8,13 @@
  *      层级感全丢。
  */
 
-import { Box, Text } from 'ink';
+import { Box, Text, useStdout } from 'ink';
 import React from 'react';
 
+import { Divider } from './design-system/index.js';
 import { gstr } from '../render/glyphs.js';
-import type { Block, Span } from '../render/markdown.js';
+import type { Block, Span, TableRow } from '../render/markdown.js';
+import { displayWidth } from '../render/text.js';
 
 export interface MarkdownProps {
   blocks: Block[];
@@ -53,6 +55,53 @@ function Spans({ spans, color }: { spans: Span[]; color: MarkdownProps['color'] 
         );
       })}
     </>
+  );
+}
+
+/**
+ * 表格 —— 与终端 `ace_markdown._render_table` **同一套排版**：列宽按显示宽度算（中文占两列），
+ * 边框 `│ ├ ┼ ┤ ─`，总宽超出终端时按比例压缩每一列（而不是把最后一列挤没）。
+ *
+ * 为什么单独一个组件：列宽要跟着**终端宽度**变，而宽度只能从 `useStdout()` 拿 ——
+ * 在 `BlockView` 的 switch 里读 hook 会违反 hooks 规则。
+ *
+ * 已知天花板：单元格内容超宽时**不截断**（截断会把行内样式切碎），交给终端折行；
+ * 终端那份是截断的。真在意的话，把 `cols` 从 App 一路传进来再走截断那条路。
+ */
+function Table({ rows, color }: { rows: TableRow[]; color: MarkdownProps['color'] }): React.ReactElement {
+  const { stdout } = useStdout();
+  const cols = stdout?.columns ?? 80;
+  const plain = rows.map((r) => r.map((spans) => spans.map((s) => s.text).join('')));
+  const ncol = Math.max(1, ...rows.map((r) => r.length));
+  const widths = Array.from({ length: ncol }, (_, j) =>
+    Math.max(1, ...plain.map((r) => displayWidth(r[j] ?? ''))));
+  // 3 = "│ " + " │" 的最小间隔（与 `_render_table` 的 `cols * 3 + 1` 同算法）
+  const room = Math.max(12, cols - (ncol * 3 + 1));
+  const total = widths.reduce((a, b) => a + b, 0);
+  const fit = total > room && total > 0
+    ? widths.map((w) => Math.max(4, Math.floor((w * room) / total)))
+    : widths;
+  const rule = '├' + fit.map((w) => '─'.repeat(w + 2)).join('┼') + '┤';
+
+  return (
+    <Box flexDirection="column">
+      {rows.map((r, i) => (
+        <React.Fragment key={i}>
+          <Text>
+            <Text color={color('border')}>│ </Text>
+            {Array.from({ length: ncol }, (_, j) => (
+              <React.Fragment key={j}>
+                {j > 0 ? <Text color={color('border')}> │ </Text> : null}
+                <Spans spans={r[j] ?? []} color={color} />
+                <Text>{' '.repeat(Math.max(0, (fit[j] ?? 0) - displayWidth(plain[i]?.[j] ?? '')))}</Text>
+              </React.Fragment>
+            ))}
+            <Text color={color('border')}> │</Text>
+          </Text>
+          {i === 0 ? <Text color={color('border')}>{rule}</Text> : null}
+        </React.Fragment>
+      ))}
+    </Box>
   );
 }
 
@@ -135,10 +184,13 @@ function BlockView({
         </Text>
       );
 
+    case 'table':
+      return <Table rows={block.rows} color={color} />;
+
     case 'hr':
-      return (
-        <Text color={color('border')}>{gstr('─'.repeat(20))}</Text>
-      );
+      // **整宽**分隔线（此前固定 20 个 `─`：宽终端上像没画完）。宽度只能从
+      // `useStdout()` 拿，所以单独一个小组件 —— 与 Python 侧 `ace_widgets.divider` 同观感。
+      return <Divider color={color} />;
 
     default:
       return <Text> </Text>;

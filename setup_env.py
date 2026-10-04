@@ -39,11 +39,13 @@ except Exception:  # noqa: BLE001 —— 加固失败也要能跑
 HERE = Path(__file__).resolve().parent
 ENV_DIR_NAME = ".ace_env"
 VENDOR_DIR_NAME = "vendor"
-# 界面依赖：prompt_toolkit（输入行/浮层菜单）+ textual + rich（组件化 TUI 与渲染）。
-# 这三个只影响"界面长什么样"。requests 不一样 —— 它是**模型调用的硬依赖**
+# 界面依赖：prompt_toolkit（普通 REPL 的输入行/浮层菜单）。
+# 引擎界面（默认那条）走 ui/ace_prompt 的零依赖输入层，不需要任何第三方界面库 ——
+# 原来列在这里的 textual / rich 随 `tui/` 一起删掉了（见 docs/TUI-ENGINE.md 第五节）。
+# requests 不一样 —— 它是**模型调用的硬依赖**
 # （core/ace_http.request_with_retry 唯一出网点，直接 import requests，无回退），
 # 所以列在这里：启动器必须把它装上，否则装完 UI 也连不上模型（H-22）。
-REQUIRED = ("requests", "prompt_toolkit", "textual", "rich")
+REQUIRED = ("requests", "prompt_toolkit")
 # `--vendor` 用的解析参数：让 pip 把整棵依赖树解成**平台中立**的 `py3-none-any` wheel，
 # 而不是按"跑这条命令的那台机器"解。
 #

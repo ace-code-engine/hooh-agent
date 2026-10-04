@@ -9,9 +9,10 @@
 import { Box, Text, render } from 'ink';
 import React from 'react';
 
-import { App } from './App.js';
 import { I18n, SUPPORTED, type Lang } from './i18n.js';
 import { AceClient } from './protocol/client.js';
+import { Root } from './Root.js';
+import { wrapSynchronizedOutput } from './tui/synchronized.js';
 import { setGlyphs } from './render/glyphs.js';
 import type { BuildMenuOptions } from './render/menu.js';
 import { colorFor, detectTheme, type Token } from './theme/tokens.js';
@@ -24,10 +25,11 @@ interface Args {
   message?: string;
   python?: string;
   help: boolean;
+  /** 备用屏全屏模式（历史靠自带滚动视口，不靠终端回滚）。 */
+  fullscreen: boolean;
 }
 
-function parseArgs(argv: string[]): Args {
-  const out: Args = { mock: false, stream: true, help: false };
+function parseArgs(argv: string[]): Args {  const out: Args = { mock: false, stream: true, help: false, fullscreen: false };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]!;
     const next = (): string | undefined => argv[++i];
@@ -37,6 +39,9 @@ function parseArgs(argv: string[]): Args {
         break;
       case '--mock':
         out.mock = true;
+        break;
+      case '--fullscreen':
+        out.fullscreen = true;
         break;
       case '--lang': {
         const v = next();
@@ -77,7 +82,7 @@ function parseArgs(argv: string[]): Args {
  * 拿不到任何线索。有了边界，错误会留在屏幕上、细节打到 stderr。
  */
 class Boundary extends React.Component<
-  { children: React.ReactNode },
+  { children: React.ReactNode; t: (k: string) => string },
   { err: Error | null }
 > {
   override state: { err: Error | null } = { err: null };
@@ -97,9 +102,9 @@ class Boundary extends React.Component<
     if (this.state.err) {
       return (
         <Box flexDirection="column">
-          <Text color="red">{'界面渲染出错（细节已打到 stderr）'}</Text>
+          <Text color="red">{this.props.t('fe_render_error')}</Text>
           <Text color="gray">{String(this.state.err.message ?? this.state.err)}</Text>
-          <Text color="gray">{'按 Ctrl+C 退出；把 stderr 那段贴给维护者。'}</Text>
+          <Text color="gray">{this.props.t('fe_render_error_hint')}</Text>
         </Box>
       );
     }
@@ -119,6 +124,7 @@ const HELP = `HooH 前端（TypeScript + Ink）
   --message, -m <text>  启动后立刻发一句
   --python <path>       Python 解释器（默认自动探测；ACE_PYTHON 环境变量优先）
   --no-stream           不要流式增量（只收 final）
+  --fullscreen          备用屏全屏：转录走自带滚动视口（PgUp/PgDn/↑↓/g/G 翻，退出还原主屏）
   --help, -h            显示这段
 `;
 
@@ -176,15 +182,26 @@ async function main(): Promise<number> {
     translate: (k) => i18n.t(k),
   };
 
+  // 控制层三件（照 pi / Claude Code 的架构自己实现的）：
+  //   · 同步输出：把每帧写入原子化（`?2026`），消掉长转录时的撕裂/频闪；
+  //   · 备用屏：`--fullscreen` 时进入，退出必须还原（否则回主屏一片空白）；
+  //   · 滚动视口（App 里）：备用屏没有终端回滚，历史得自己管。
+  // 同步输出：**只要是真终端就开**（此前只在 `--fullscreen` 下开）。
+  // 它把每帧写入原子化，正是长转录重画时的频闪来源；不支持的终端会忽略这两个序列。
+  const restoreSync = wrapSynchronizedOutput(process.stdout, { enabled: Boolean(process.stdout.isTTY) });
+
   const app = render(
-    <Boundary>
-      <App
-        client={client}
-        t={(k, p) => i18n.t(k, p)}
-        colorOf={colorOf}
-        menuOptions={menuOptions}
-        {...(args.message !== undefined ? { initialMessage: args.message } : {})}
-      />
+    <Boundary t={(k: string) => i18n.t(k)}>
+      <Root
+          client={client}
+          i18n={i18n}
+          colorOf={colorOf}
+          menuOptions={menuOptions}
+          commandLineLang={args.lang}
+          engineLang={caps.lang}
+          fullscreen={args.fullscreen}
+          {...(args.message !== undefined ? { initialMessage: args.message } : {})}
+        />
     </Boundary>,
   );
 
@@ -196,6 +213,7 @@ async function main(): Promise<number> {
   process.on('SIGTERM', onSignal);
 
   await app.waitUntilExit();
+  restoreSync();
   await client.shutdown();
   return 0;
 }

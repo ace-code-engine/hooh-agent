@@ -30,7 +30,9 @@
 
 - **决策**：**安全核心**（执行层 / 网关 / 记忆 / CLI / 内置编辑器）只用标准库。
   **模型调用需要 `requests`**：`core/ace_http.py` 是唯一出网点，`request_with_retry`
-  直接 `import requests`、没有回退。`prompt_toolkit` / `textual` / `rich` 仍是可选懒加载。
+  直接 `import requests`、没有回退。`prompt_toolkit` 仍是可选懒加载（普通 REPL 的输入行）；
+   自引擎界面落地（[`docs/TUI-ENGINE.md`](../TUI-ENGINE.md)）起，默认那条界面路径
+   **不需要任何第三方界面库**（原 `textual` / `rich` 依赖已随 `tui/` 移除）。
 - **理由**：降低部署与依赖风险；配置校验用 `dataclass`（`CLIConfig`）实现同样的默认值与校验能力，
   不引入 Pydantic。**安全边界不依赖任何第三方库** —— 这是"安全下沉到执行层"能成立的前提：
   被审计的那一层越少外部成分，权限/快照/审计链越可审计。容器化、插件化是未来的可选路径。

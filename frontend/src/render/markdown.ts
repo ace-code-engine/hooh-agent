@@ -25,7 +25,14 @@ export type Block =
   | { kind: 'list'; ordered: boolean; items: Span[][] }
   | { kind: 'code'; lang: string; lines: string[] }
   | { kind: 'quote'; spans: Span[] }
+  | { kind: 'table'; rows: TableRow[] }
   | { kind: 'hr' };
+
+/**
+ * 表格的一行 = **单元格数组**；一个单元格 = **行内片段数组**（与段落同构，可取粗体/行内代码）。
+ * 三层容易写错成两层，所以给个名字。
+ */
+export type TableRow = Span[][];
 
 /** 行内解析：`**粗**` / `*斜*` / `` `码` ``。都不嵌套（受控子集的取舍）。 */
 export function parseInline(text: string): Span[] {
@@ -52,6 +59,22 @@ const HR = /^\s*([-*_])\s*(\1\s*){2,}$/;
 const UL = /^(\s*)[-*+]\s+(.*)$/;
 const OL = /^(\s*)\d+[.)]\s+(.*)$/;
 const QUOTE = /^\s*>\s?(.*)$/;
+/** 表格分隔行：`|---|:--:|`。判据与 `ui/ace_markdown._TABLE_SEP` 同一套。 */
+const TABLE_SEP = /^\s*\|?[\s:|-]+\|[\s:|-]*$/;
+
+/** 像表格行吗？（至少两个 `|`，且不是围栏）—— 与 `ace_markdown.is_table_row` 同口径。 */
+export function isTableRow(line: string): boolean {
+  const t = String(line ?? '').trim();
+  return (t.match(/\|/g)?.length ?? 0) >= 2 && !t.startsWith('```');
+}
+
+/** 拆单元格：去掉首尾的 `|`，各格 trim。 */
+function splitCells(line: string): string[] {
+  let t = String(line ?? '').trim();
+  if (t.startsWith('|')) t = t.slice(1);
+  if (t.endsWith('|')) t = t.slice(0, -1);
+  return t.split('|').map((c) => c.trim());
+}
 
 /**
  * 把一段 Markdown 解析成 Block 列表。
@@ -92,7 +115,8 @@ export function parseMarkdown(text: string): Block[] {
     flushQuote();
   };
 
-  for (const raw of lines) {
+  for (let li = 0; li < lines.length; li++) {
+    const raw = lines[li]!;
     const line = raw.replace(/\s+$/, '');
 
     if (fence) {
@@ -153,6 +177,27 @@ export function parseMarkdown(text: string): Block[] {
       continue;
     }
 
+    // 表格：本行像表行、**且下一行是分隔行**（`|---|:--:|`）—— 两条都满足才当表。
+    // 只看"有竖线"会把正文里随手一个 `|` 误判成表（Python 侧 `is_table_row` +
+    // `_TABLE_SEP` 同一条判据）。表在第一个非表行/空行处结束。
+    if (isTableRow(line) && li + 1 < lines.length
+        && TABLE_SEP.test((lines[li + 1] ?? '').trim())) {
+      flushAll();
+      const rows: TableRow[] = [];
+      let i = li;
+      for (; i < lines.length; i++) {
+        const t = (lines[i] ?? '').trim();
+        if (!t || !isTableRow(t)) break;
+        if (TABLE_SEP.test(t)) continue;         // 分隔行不进数据
+        rows.push(splitCells(t).map((c) => parseInline(c)));
+      }
+      if (rows.length) {
+        blocks.push({ kind: 'table', rows });
+        li = i - 1;
+        continue;
+      }
+    }
+
     flushList();
     flushQuote();
     para.push(line);
@@ -197,6 +242,10 @@ export function toPlainText(blocks: Block[]): string {
         break;
       case 'code':
         out.push(...b.lines);
+        break;
+      case 'table':
+        // 单元格之间用 ` | ` 连，行间换行 —— 纯文本场合（日志/断言）看得懂就行
+        b.rows.forEach((r) => out.push(r.map(spanText).join(' | ')));
         break;
       case 'hr':
         out.push('---');
