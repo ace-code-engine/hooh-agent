@@ -198,10 +198,11 @@ ace-agent/
 │   ├── HOME-DESIGN.md          #  主页设计：分区顺序为什么是这样、每条信息为什么在这个位置
 │   ├── KEYMAP-CLAUDE-PARITY.md #  键位对照表（Claude Code ↔ HooH，逐条核实 + 不做的理由）
 │   ├── ARCHITECTURE.md         #   本文档：分层职责 + 权威目录树 + ADR 索引
-│   ├── security/               #   安全文档（模型 / FAQ / 审计）
+│   ├── security/               #   安全文档（模型 / FAQ / 审计 / 自查扫描）
 │   │   ├── SECURITY-MODEL.md       #   安全模型：权限/隔离/路径/网络/沙箱 + 生产部署必读
 │   │   ├── SECURITY-FAQ.md         #   安全边界 FAQ（11 问：挡住了什么/没挡住什么；含无人值守 fail-close 与快照不覆盖清单）
-│   │   └── SECURITY-AUDIT.md       #   安全审计（OWASP + STRIDE；部分条目与现码漂移，以代码为准，见 BACKLOG SEC-*）
+│   │   ├── SECURITY-AUDIT.md       #   安全审计（OWASP + STRIDE；部分条目与现码漂移，以代码为准，见 BACKLOG SEC-*）
+│   │   └── SECURITY-SCAN-2026-10-04.md # 自查扫描记录：ace_security_scan 扫本仓库（路径级 259 条全为未跟踪生成物 / dist 内容级 0 条凭据命中 / 两条工具反馈）
 │   ├── CONFIGURATION.md        #   配置全项：config 键 + 出站白名单/检索/编码/DB 边界
 │   ├── COMMANDS.md             #   命令参考：斜杠/@ 全表 + 启动参数
 │   ├── EXTENDING.md            #   扩展点：事件钩子 / 自定义命令 / 插件 / MCP（边界写清楚）

@@ -43,6 +43,7 @@
 | [`security/SECURITY-FAQ.md`](security/SECURITY-FAQ.md) | **安全边界 FAQ（11 问）**：挡住了什么、没挡住什么；每条都写明去哪段代码核实 |
 | [`security/SECURITY-MODEL.md`](security/SECURITY-MODEL.md) | 完整安全模型：权限 / 隔离 / 路径 / 网络 / 沙箱 + 生产部署必读 |
 | [`security/SECURITY-AUDIT.md`](security/SECURITY-AUDIT.md) | OWASP + STRIDE 逐条审计；**部分是某一天的实测记录**，以代码为准 |
+| [`security/SECURITY-SCAN-2026-10-04.md`](security/SECURITY-SCAN-2026-10-04.md) | 自查扫描记录：`ace_security_scan` 扫本仓库；**口径是路径级**（干净 ≠ 安全）+ 两条工具反馈 |
 
 ### 架构决策（`adr/`）
 
