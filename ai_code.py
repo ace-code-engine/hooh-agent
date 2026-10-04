@@ -41,7 +41,7 @@ import threading
 import time
 from dataclasses import dataclass, fields
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, Iterable, List, Optional, Set, Tuple
 
 # Windows GBK 控制台兼容：统一走 core/ace_io.harden_streams()
 # （不崩：UTF-8 + errors="replace"；不乱：随后用 glyph()/safe() 主动降级字形）
@@ -8572,6 +8572,50 @@ def _engine_default_ok(args) -> bool:
     return _engine_off_reason(args) == ""
 
 
+#: `--serve` **对外承诺**的注册方法集 —— 方法表的唯一真相源。
+#:
+#: 此前这里是两份手写清单：`srv.register(...)` 一份、`_h_initialize` 的
+#: `"methods"` 返回里再抄一份。抄漏的实测症状是**功能静默不工作**：
+#: `sessions.request` 注册了却不在握手清单里，前端据此以为引擎不支持，
+#: `@session` 菜单压根不出现 —— 而服务端明明答得出来。所以现在只说一次，
+#: 由 `serve_handshake_methods(注册表)` 推导（`_run_serve` 会拿注册表与它比对）。
+SERVE_METHODS: Tuple[str, ...] = (
+    "initialize",        # 握手调用本身：注册了，但**不许**进清单，理由见下
+    "user.message",
+    "command.exec",
+    "session.interrupt",
+    "home.request",
+    "tasks.request",
+    "config.request",
+    "sessions.request",  # ← 本次 bug 漏报的就是它
+)
+
+#: 属于协议、但**不注册**进 `_handlers` 的方法。它们仍要出现在握手清单里
+#: （前端得知道能发），只是不走"派发到处理函数"这条路：
+#: - `permission.answer` / `choice.answer`：由 `ServeUIHost.wait_for` 在
+#:   "引擎正等这个答案"的那一刻**就地取走**。注册它们反而有害 —— 没人在等时
+#:   前端递上来的答案会被静默接受，看着成功、实际什么都不影响（详见 `_run_serve`）。
+#: - `shutdown`：`serve_forever` 的主循环直接拦截 —— 它要结束的正是那个循环。
+SERVE_UNREGISTERED_METHODS: Tuple[str, ...] = (
+    "permission.answer", "choice.answer", "shutdown")
+
+#: 握手清单里必须**排除**的方法。`initialize` 就是握手本身：前端要先发它才知道
+#: 我们支持什么，所以不能要求"先 initialize 再 initialize"。把它列进清单对前端
+#: 是纯噪音（它此刻正在调用这个方法）。
+SERVE_HANDSHAKE_EXCLUDED = frozenset({"initialize"})
+
+
+def serve_handshake_methods(registered: Iterable[str]) -> List[str]:
+    """从**注册表**推导握手的 `methods` 清单（不再手写）。
+
+    `registered` 是注册表里的方法名（传 `_handlers` 的键）。排除
+    `initialize`（理由见 `SERVE_HANDSHAKE_EXCLUDED`）后，补上不注册但仍属
+    协议的那三个（理由见 `SERVE_UNREGISTERED_METHODS`）。
+    """
+    return ([m for m in registered if m not in SERVE_HANDSHAKE_EXCLUDED]
+            + list(SERVE_UNREGISTERED_METHODS))
+
+
 def _run_serve(cli: "AgentCLI", srv) -> int:
     """跑 `--serve`：读 req、回 resp，直到 `shutdown` 或前端断开（EOF）。
 
@@ -8624,10 +8668,8 @@ def _run_serve(cli: "AgentCLI", srv) -> int:
             # 前端用 `glyphs[c] ?? c` 应用；表为空即"这台终端画得出全部"。
             "glyphs": {c: ace_io.glyph(c) for c in FRONTEND_GLYPHS
                        if ace_io.glyph(c) != c},
-            "methods": ["user.message", "command.exec", "session.interrupt",
-                        "permission.answer", "choice.answer",
-                        "home.request", "tasks.request", "config.request",
-                        "shutdown"],
+            # 从注册表推导，不再手抄（抄漏 `sessions.request` 就是上次那个 bug）。
+            "methods": serve_handshake_methods(_handlers),
             # 命令表（名 → i18n 键）与分组。**发键不发译文**：前端自己有 locales/，
             # 发译文等于把语言钉死在握手那一刻，用户之后 /lang 切了也不会跟着变。
             #
@@ -8777,18 +8819,32 @@ def _run_serve(cli: "AgentCLI", srv) -> int:
                               "label": str(r.get("label") or "")}
                              for r in rows]}
 
-    srv.register("initialize", _h_initialize)
-    srv.register("user.message", _requires_init(_h_user_message))
-    srv.register("command.exec", _requires_init(_h_command))
-    srv.register("session.interrupt", _requires_init(_h_interrupt))
-    srv.register("home.request", _requires_init(_h_home))
-    srv.register("tasks.request", _requires_init(_h_tasks))
-    srv.register("config.request", _requires_init(_h_config))
-    srv.register("sessions.request", _requires_init(_h_sessions))
+    # 注册表 = 握手清单的**唯一真相源**。注册与承诺（`SERVE_METHODS`）必须是同一个
+    # 集合：少一个 ⇒ 前端发了收到 E_UNKNOWN_METHOD；多一个 ⇒ 前端永远不会发它，
+    # 两条都是"写了没人用"的死代码。所以这里当场比对，漂了就在启动时炸掉，
+    # 而不是等前端表现成"某个功能静默不工作"。
+    _handlers: Dict[str, Any] = {
+        "initialize": _h_initialize,
+        "user.message": _requires_init(_h_user_message),
+        "command.exec": _requires_init(_h_command),
+        "session.interrupt": _requires_init(_h_interrupt),
+        "home.request": _requires_init(_h_home),
+        "tasks.request": _requires_init(_h_tasks),
+        "config.request": _requires_init(_h_config),
+        "sessions.request": _requires_init(_h_sessions),
+    }
+    if set(_handlers) != set(SERVE_METHODS):
+        raise RuntimeError(
+            "serve 注册表与 SERVE_METHODS 不一致：缺失 "
+            f"{sorted(set(SERVE_METHODS) - set(_handlers))} / 多出 "
+            f"{sorted(set(_handlers) - set(SERVE_METHODS))}")
+    for _m, _h in _handlers.items():
+        srv.register(_m, _h)
     # 说明**为什么不注册** `permission.answer` / `choice.answer`：它们由
     # `ServeUIHost` 里的 `wait_for` 就地取走（那才是它们该出现的时刻）。
     # 注册在这里是有害的 —— 那会让"根本没人在等答案"时前端递上来的答案被静默接受，
     # 看起来成功、实际什么都不影响。不注册则回一条 E_UNKNOWN_METHOD，前端立刻知道搞错了。
+    # （它们仍出现在握手清单里，来源是 `SERVE_UNREGISTERED_METHODS`。）
     #
     # 把协议前端挂成界面宿主：`attach_ui` 之后，授权 / 选择 / 确认 / 文本输入
     # 四类提问全部自动走协议往返 —— CLI 里十几处调用点**一行都不用改**。

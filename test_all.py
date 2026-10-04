@@ -13225,6 +13225,24 @@ if _want("69"):
           len(_rp69) == 3 and all(r.get("ok") for r in _rp69),
           [(r.get("id"), r.get("ok")) for r in _rp69])
 
+    # —— 握手 `methods` 必须**由注册表推导**，不许手写 ——
+    # 实测过的 bug：`sessions.request` 在 `_run_serve` 里注册了，却不在手写的
+    # `"methods"` 清单里 ⇒ 前端据此以为引擎不支持，`@session` 菜单不出现，
+    # 而服务端明明答得出来。证据链刻意**不在测试里另抄一份名单**：期望集合从
+    # 引擎自己的注册表声明（`SERVE_METHODS`，`_run_serve` 注册前与其逐项比对）
+    # 推导出来，再跟线上握手真正返回的集合比。两边漂了（无论哪一边）都会红。
+    _hs69 = next((r.get("result") or {} for r in _rp69 if r.get("id") == "1"), {})
+    _m69 = _hs69.get("methods") or []
+    _wantm69 = _ai69b.serve_handshake_methods(_ai69b.SERVE_METHODS)
+    check("--serve ★握手 methods == 从注册表推导出的清单（新注册的方法自动进握手）",
+          sorted(_m69) == sorted(_wantm69), (_m69, _wantm69))
+    check("--serve ★`sessions.request` 在握手清单里（回归：曾漏报 ⇒ 前端以为不支持）",
+          "sessions.request" in _m69, _m69)
+    check("--serve 握手不列 `initialize`（它本身就是握手调用，列了是噪音）",
+          "initialize" not in _m69, _m69)
+    check("--serve 不注册的协议方法仍在清单里（两个 answer + shutdown）",
+          set(_ai69b.SERVE_UNREGISTERED_METHODS) <= set(_m69), _m69)
+
     # **命令也要收尾**：前端提交任何一行都会先本地置忙（`App.tsx` 的乐观 UI），
     # 而只有 `final` 能解除；命令不跑轮次 ⇒ 不经过 converse 那条 final。
     # 少了这一步，`/net on` 之后底栏会**永远**停在"推演中 4s"（实测截图）。
