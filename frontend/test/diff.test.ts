@@ -17,11 +17,14 @@ import {
   colorName,
   colorizeDiff,
   diffMarker,
+  diffSlot,
   looksLikeDiff,
   splitByFile,
   statText,
   summarizeDiff,
 } from '../src/render/diff.js';
+import { ToolCard } from '../src/components/ToolCard.js';
+import { h, renderLines } from './helpers/screen.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -157,5 +160,58 @@ describe('按文件切开（两级视图）', () => {
 
   it('空输入返回空数组', () => {
     expect(splitByFile('')).toEqual([]);
+  });
+});
+
+/**
+ * 状态槽 —— 借鉴 dsh-TUI `SplitDiffView`（他们 issue #250）：工具给的 diff **不带文件偏移**，
+ * 编一个行号比没有更糟（人会拿它去 `sed -n '<n>p'`）。所以只声明"这行是什么"。
+ */
+describe('状态槽（替代行号）', () => {
+  it('增 / 删 / 上下文 / 块头 / 不是 diff 行 —— 五档分得开', () => {
+    expect(diffSlot('+新')).toBe('+');
+    expect(diffSlot('-旧')).toBe('-');
+    expect(diffSlot(' 上下文')).toBe(' ');
+    expect(diffSlot('@@ -1,3 +1,4 @@')).toBe('~');
+    // 文件头第一个字符也是 `-`/`+`：不特判就会被谎报成"删了这行、加了这行"
+    expect(diffSlot('--- a/x')).toBe('?');
+    expect(diffSlot('+++ b/x')).toBe('?');
+    expect(diffSlot('diff --git a/x b/x')).toBe('?');
+    expect(diffSlot('普通输出')).toBe('?');
+    expect(diffSlot('')).toBe('?');
+  });
+
+  it('**不变量**：colorizeDiff 每一行都有槽位，且正文里不再重复行首标记', () => {
+    const out = colorizeDiff(SAMPLE);
+    expect(out).toHaveLength(8);
+    for (const l of out) expect(['+', '-', ' ', '~', '?']).toContain(l.slot);
+    const body = (slot: string): string[] => out.filter((l) => l.slot === slot).map((l) => l.text);
+    expect(body('+')).toEqual(['新的第二行', '新增的第三行']);
+    expect(body('-')).toEqual(['旧的第二行']);
+    expect(body(' ')).toEqual(['第一行', '第四行']);
+    expect(body('~')).toEqual(['@@ -1,3 +1,4 @@']);
+    expect(body('?')).toEqual(['--- a/note.md', '+++ b/note.md']);
+  });
+
+  it('Tab 展开成 3 空格（否则宽度算式会散架），超限说明行走 `?` 槽位', () => {
+    expect(colorizeDiff('+\ta')[0]!.text).toBe('   a');
+    const long = Array.from({ length: MAX_DIFF_LINES + 7 }, (_, i) => `+第${i}行`).join('\n');
+    const out = colorizeDiff(long);
+    expect(out[out.length - 1]).toMatchObject({ slot: '?' });
+  });
+
+  it('**渲染层不变量**：工具卡里每一行 diff 都以「槽位 + 空格」开头（第 0 列不是数字）', () => {
+    const rows = colorizeDiff(SAMPLE);
+    const out = renderLines(
+      h(ToolCard, { tool: 'file_edit', target: 'note.md', status: 'ok', diff: SAMPLE, color: () => undefined }),
+      80,
+    );
+    // 卡片把 diff 缩进 2 列，所以行首是 `  <槽位> `
+    const drawn = out.lines.filter((l) => /^ {2}[+\-~? ] /.test(l));
+    expect(drawn).toHaveLength(rows.length);
+    expect(out.has('  ? --- a/note.md')).toBe(true); // 文件头不再冒充删除行
+    expect(out.has('  - 旧的第二行')).toBe(true);
+    expect(out.has('  + 新的第二行')).toBe(true);
+    expect(out.has('  ~ @@ -1,3 +1,4 @@')).toBe(true);
   });
 });

@@ -21,6 +21,7 @@ import { Banner } from './components/Banner.js';
 import { ChoiceDialog, type ChoiceAnswer } from './components/ChoiceDialog.js';
 import { Home } from './components/Home.js';
 import { Input } from './components/Input.js';
+import { PAGE_INSET, PageMargin, Rule, contentColumns } from './components/layout/PageMargin.js';
 import { PermissionDialog } from './components/PermissionDialog.js';
 import { Spinner } from './components/Spinner.js';
 import { StatusLine } from './components/StatusLine.js';
@@ -156,6 +157,11 @@ export function App({ client, t, colorOf, initialMessage, menuOptions, fullscree
   const size = React.useContext(TerminalSizeContext);
   const cols = size?.columns ?? 80;
   const rows = size?.rows ?? 30;
+  // 内容列宽 —— **必须**与 `PageMargin` 下发进内层的那个数同源（同一条 `contentColumns`）。
+  // 吃 `width` prop 的那几个（横幅 / 主页 / 状态行 / 输入行）拿到的是内容宽，
+  // 不会宽出页边距、把长行挤折；不传 prop 的那些（转录/卡片里的 Markdown）走
+  // `useColumns()`，读到的已经是 `PageMargin` 覆盖过的内容区尺寸。
+  const content = contentColumns(cols);
 
   // 主页拉一次就够（进入会话后它会被滚上去）。拉不到就**不显示** —— 一个空壳主页
   // （有分区标题没条目）比没有主页更让人困惑。
@@ -348,10 +354,11 @@ export function App({ client, t, colorOf, initialMessage, menuOptions, fullscree
     };
   }, [menuOptions, config, sessions, t]);
 
-  // 视口高度（只给**全屏**那条路的 `<ScrollBox>` 用）：终端行数减去底部区
-  // （状态行 + 输入行 + 对话框/任务树的预留）。留 10 行是经验值：底部区最少要这么多
-  // 才不至于把输入行挤没；下限 3 行。
-  const bodyHeight = Math.max(3, rows - 10);
+  // 视口高度（只给**全屏**那条路的 `<ScrollBox>` 用）：终端行数减去页边距（上下各
+  // `PAGE_INSET.y`，那两行 `PageMargin` 已经占掉了）再减去底部区
+  // （状态行 + 输入行 + 版面级细线 + 对话框/任务树的预留）。留 10 行是经验值：
+  // 底部区最少要这么多才不至于把输入行挤没；下限 3 行。
+  const bodyHeight = Math.max(3, rows - 2 * PAGE_INSET.y - 10);
 
   const perm = state.pendingPermission;
   const choice = state.pendingChoice;
@@ -382,122 +389,131 @@ export function App({ client, t, colorOf, initialMessage, menuOptions, fullscree
   const live = state.items.slice(cut);
 
   return (
-    <Box flexDirection="column">
-      {/* 首屏：横幅（logo + 身份）→ 主页分区。**只在还没有消息时出现** ——
-          打字之后整块自然滚上去，与"聊天记录是主线、首屏只是开场"一致。
-          原来的常驻头部（`ACE /path`）去掉了：那些信息现在分别在
-          横幅（首屏）和状态行（常驻）里，各出现一次就够。 */}
-      {state.items.length === 0 ? (
-        <Banner
-          version={config.version}
-          model={config.model}
-          permission={config.permission}
-          folder={config.folder}
+    // 版式几何：整棵界面走**同一套**页边距（内容内缩 2 列 / 1 行），转录与底部区
+    // 因此共用一个内容列宽。`width={cols}` 传的是**终端**列数 —— `PageMargin`
+    // 自己扣掉内缩再往下发（测试里没有 Provider 时它落到 80，与 `cols` 同一档兜底）。
+    <PageMargin width={cols}>
+      <Box flexDirection="column">
+        {/* 首屏：横幅（logo + 身份）→ 主页分区。**只在还没有消息时出现** ——
+            打字之后整块自然滚上去，与"聊天记录是主线、首屏只是开场"一致。
+            原来的常驻头部（`ACE /path`）去掉了：那些信息现在分别在
+            横幅（首屏）和状态行（常驻）里，各出现一次就够。 */}
+        {state.items.length === 0 ? (
+          <Banner
+            version={config.version}
+            model={config.model}
+            permission={config.permission}
+            folder={config.folder}
+            color={colorOf}
+            width={content}
+          />
+        ) : null}
+
+        {state.items.length === 0 && home ? (
+          <Home home={home} t={t} color={colorOf} width={content} />
+        ) : null}
+
+        {/* 转录 —— 两条路：
+            主屏（默认）：**全部条目 inline 一次渲染**，滚出视口的行由内核帧引擎推进终端
+              **真实回滚缓冲**（往上翻靠终端），只有还在视口里的那几行参与 diff/重画；
+            备用屏（全屏）：终端没有回滚缓冲，交给我们自己的 `<ScrollBox>`
+              （PgUp/PgDn/↑↓/g/G 翻，滚动条自动），仍会变的那几条钉在它下面。 */}
+        {fullscreen ? (
+          <ScrollBox
+            items={frozen}
+            height={bodyHeight}
+            active={!perm && !choice}
+            color={colorOf}
+            hint={t('scroll_hint')}
+            renderItem={(it) => <Transcript key={it.id} items={[it]} t={t} color={colorOf} />}
+          />
+        ) : null}
+
+        {/* 动态帧：主屏是**整段转录**（历史由终端回滚缓冲接住）；全屏只剩"仍在变的尾部"
+            + 底部区（对话框/任务树/状态行/输入框）。 */}
+        <Transcript items={fullscreen ? live : state.items} t={t} color={colorOf} />
+
+        {/* 转录与底部区之间的**版面级**结构线：出血直通终端左右边缘（正文仍留在
+            内容列里）。转录**内部**那条轮次线不出血 —— 见 `Transcript.tsx` 的说明。 */}
+        <Rule color={colorOf} />
+
+        {perm ? (
+          <Box marginBottom={1}>
+            <PermissionDialog
+              tool={perm.tool}
+              reason={perm.reason}
+              t={t}
+              color={colorOf}
+              onAnswer={handleAnswer}
+              disabled={state.meta.ended}
+            />
+          </Box>
+        ) : null}
+
+        {showTasks ? (
+          <Box marginBottom={1}>
+            <TaskTree tree={taskTree} t={t} color={colorOf} />
+          </Box>
+        ) : null}
+
+        {choice ? (
+          <Box marginBottom={1}>
+            <ChoiceDialog
+              kind={choice.kind}
+              title={choice.title}
+              options={choice.options}
+              defaultValue={choice.defaultValue}
+              secret={choice.secret}
+              t={t}
+              color={colorOf}
+              onAnswer={handleChoice}
+              disabled={state.meta.ended}
+            />
+          </Box>
+        ) : null}
+
+        {errors.length > 0 ? (
+          <Box flexDirection="column" marginBottom={1}>
+            {errors.map((e, i) => (
+              <Text key={i} color={colorOf('warn')}>
+                {'  '}▏ {e}
+              </Text>
+            ))}
+          </Box>
+        ) : null}
+
+        {/* 等待指示器：只在"确实在跑、且没有弹框占着屏幕"时出现。
+            有授权框时不该再转 —— 那会让人以为"它还在自己干"，而事实是**它在等你**。 */}
+        {state.busy && !perm ? (
+          <Box marginBottom={1}>
+            <Spinner
+              phase={state.meta.phase || 'reasoning'}
+              t={t}
+              color={colorOf}
+              reducedMotion={process.env.ACE_REDUCE_MOTION === '1'}
+              lastOutputAt={state.meta.lastOutputAt}
+            />
+          </Box>
+        ) : null}
+
+        <StatusLine meta={state.meta} busy={state.busy} color={colorOf} width={content} t={t} />
+
+        <Input
+          t={t}
           color={colorOf}
-          width={cols}
+          busy={state.busy}
+          disabled={Boolean(perm) || Boolean(choice) || state.meta.ended}
+          onSubmit={handleSubmit}
+          width={content}
+          vim={vim}
+          {...(menuWithState ? { menuOptions: menuWithState } : {})}
+          onInterrupt={() => {
+            client.interrupt().catch(() => {
+              /* 中断失败无所谓：下一轮照常 */
+            });
+          }}
         />
-      ) : null}
-
-      {state.items.length === 0 && home ? (
-        <Home home={home} t={t} color={colorOf} width={cols} />
-      ) : null}
-
-      {/* 转录 —— 两条路：
-          主屏（默认）：**全部条目 inline 一次渲染**，滚出视口的行由内核帧引擎推进终端
-            **真实回滚缓冲**（往上翻靠终端），只有还在视口里的那几行参与 diff/重画；
-          备用屏（全屏）：终端没有回滚缓冲，交给我们自己的 `<ScrollBox>`
-            （PgUp/PgDn/↑↓/g/G 翻，滚动条自动），仍会变的那几条钉在它下面。 */}
-      {fullscreen ? (
-        <ScrollBox
-          items={frozen}
-          height={bodyHeight}
-          active={!perm && !choice}
-          color={colorOf}
-          hint={t('scroll_hint')}
-          renderItem={(it) => <Transcript key={it.id} items={[it]} t={t} color={colorOf} />}
-        />
-      ) : null}
-
-      {/* 动态帧：主屏是**整段转录**（历史由终端回滚缓冲接住）；全屏只剩"仍在变的尾部"
-          + 底部区（对话框/任务树/状态行/输入框）。 */}
-      <Transcript items={fullscreen ? live : state.items} t={t} color={colorOf} />
-
-      {perm ? (
-        <Box marginBottom={1}>
-          <PermissionDialog
-            tool={perm.tool}
-            reason={perm.reason}
-            t={t}
-            color={colorOf}
-            onAnswer={handleAnswer}
-            disabled={state.meta.ended}
-          />
-        </Box>
-      ) : null}
-
-      {showTasks ? (
-        <Box marginBottom={1}>
-          <TaskTree tree={taskTree} t={t} color={colorOf} />
-        </Box>
-      ) : null}
-
-      {choice ? (
-        <Box marginBottom={1}>
-          <ChoiceDialog
-            kind={choice.kind}
-            title={choice.title}
-            options={choice.options}
-            defaultValue={choice.defaultValue}
-            secret={choice.secret}
-            t={t}
-            color={colorOf}
-            onAnswer={handleChoice}
-            disabled={state.meta.ended}
-          />
-        </Box>
-      ) : null}
-
-      {errors.length > 0 ? (
-        <Box flexDirection="column" marginBottom={1}>
-          {errors.map((e, i) => (
-            <Text key={i} color={colorOf('warn')}>
-              {'  '}▏ {e}
-            </Text>
-          ))}
-        </Box>
-      ) : null}
-
-      {/* 等待指示器：只在"确实在跑、且没有弹框占着屏幕"时出现。
-          有授权框时不该再转 —— 那会让人以为"它还在自己干"，而事实是**它在等你**。 */}
-      {state.busy && !perm ? (
-        <Box marginBottom={1}>
-          <Spinner
-            phase={state.meta.phase || 'reasoning'}
-            t={t}
-            color={colorOf}
-            reducedMotion={process.env.ACE_REDUCE_MOTION === '1'}
-            lastOutputAt={state.meta.lastOutputAt}
-          />
-        </Box>
-      ) : null}
-
-      <StatusLine meta={state.meta} busy={state.busy} color={colorOf} width={cols} t={t} />
-
-      <Input
-        t={t}
-        color={colorOf}
-        busy={state.busy}
-        disabled={Boolean(perm) || Boolean(choice) || state.meta.ended}
-        onSubmit={handleSubmit}
-        width={cols}
-        vim={vim}
-        {...(menuWithState ? { menuOptions: menuWithState } : {})}
-        onInterrupt={() => {
-          client.interrupt().catch(() => {
-            /* 中断失败无所谓：下一轮照常 */
-          });
-        }}
-      />
-    </Box>
+      </Box>
+    </PageMargin>
   );
 }

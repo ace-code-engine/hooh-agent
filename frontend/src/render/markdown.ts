@@ -12,6 +12,8 @@
  * 解析与渲染分离：本模块产出 Block 树（可穷举断言），Ink 组件只负责把它画出来。
  */
 
+import { truncateWidth } from './text.js';
+
 export interface Span {
   text: string;
   bold?: boolean;
@@ -253,4 +255,42 @@ export function toPlainText(blocks: Block[]): string {
     }
   }
   return out.join('\n');
+}
+
+// ─────────────────────────────────────────────────────────── 代码块版式
+
+/** 代码块的左侧槽位：竖条 + 空格，共 2 列（与引用块的 `▏ ` 同一套几何）。 */
+export const CODE_BAR = '▌';
+
+export interface CodeRow {
+  /** 整行文本（含槽位），**已按容器宽截断**。 */
+  text: string;
+  /** 上色用的主题 token：标签行走 `dim`（dsh-TUI 那边是 `theme.subtle`），正文走 `text`。 */
+  token: 'dim' | 'text';
+}
+
+/**
+ * 代码块版式 —— 借鉴 dsh-TUI `terminal-utils/markdown.renderCodeBlock`（Kimi 风格）的四条：
+ *   ① 语言标签只占**块首一行**，等于他们的开围栏 `` ```lang ``，且是弱化色；
+ *   ② 正文统一一个 2 列的左侧槽位 —— 他们那边是"2 空格缩进"，我们有竖条，
+ *      所以**不叠加**（叠加等于左边 4 列全是装饰）；
+ *   ③ **不画闭合围栏**（他们注释：缩进/颜色已经标出块的结束，闭合围栏只白占一行）；
+ *   ④ **尾部空行全剥** —— 否则块尾会漏一行空白，流式输出里看着像"卡了一下"。
+ *
+ * 两条是 ace 自己的纪律：**不换行、超宽按显示宽度截断**（`truncateWidth`，中文不劈半个），
+ * 以及**空行不留尾随空格**（空行就是一根光竖条）。
+ */
+export function codeBlockRows(lang: string, lines: string[], width: number): CodeRow[] {
+  const cols = Math.max(4, Math.trunc(Number.isFinite(width) ? width : 0));
+  const fit = (text: string): string => truncateWidth(text, cols);
+  const rows: CodeRow[] = [];
+  if (lang) rows.push({ text: fit(`${CODE_BAR} ${lang}`), token: 'dim' });
+  // 剥尾：只剥真空白行（与他们的 `/\n+$/` 同口径，空白行不属于代码内容）
+  let end = lines.length;
+  while (end > 0 && lines[end - 1] === '') end--;
+  for (let i = 0; i < end; i++) {
+    const line = lines[i] ?? '';
+    rows.push({ text: fit(line ? `${CODE_BAR} ${line}` : CODE_BAR), token: 'text' });
+  }
+  return rows;
 }

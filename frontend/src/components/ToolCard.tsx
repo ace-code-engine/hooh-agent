@@ -108,8 +108,9 @@ export function ToolCard({
         <Box flexDirection="column" marginLeft={2} marginTop={1}>
           {diffLines.map((l, i) => (
             // 不折行：折了就分不清"这是 diff 里的一行"还是"终端折的"
+            // 行首固定一格状态槽（`+`/`-`/空格/`~`/`?`），**不是行号** —— 见 render/diff.ts
             <Text key={i} color={color(l.token)} wrap="truncate">
-              {l.text || ' '}
+              {`${l.slot} ${l.text || ' '}`}
             </Text>
           ))}
         </Box>

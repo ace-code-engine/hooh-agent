@@ -13,7 +13,7 @@ import React from 'react';
 
 import { Divider, useColumns } from './design-system/index.js';
 import { gstr } from '../render/glyphs.js';
-import type { Block, Span, TableRow } from '../render/markdown.js';
+import { codeBlockRows, type Block, type Span, type TableRow } from '../render/markdown.js';
 import { displayWidth } from '../render/text.js';
 
 export interface MarkdownProps {
@@ -118,6 +118,40 @@ function Table({
   );
 }
 
+/**
+ * 代码块 —— 版式见 `render/markdown.ts` 的 `codeBlockRows`（标签行 + 2 列竖条槽位 +
+ * 无闭合围栏 + 空行不留尾随空格）。宽度要跟终端走，所以在组件里取 `useColumns()`。
+ *
+ * **刻意不做语法高亮**：dsh-TUI 那边靠 `highlight.js` + `cli-highlight` 两个外部词法器，
+ * 本仓库不许加依赖。只借鉴他们那套**色桥的语义**（`syntaxTheme.SYNTAX_CLASS_TO_TOKEN`）：
+ * 认不出的东西一律回落到**已有的**语义色（标签→`dim`，正文→`text`），
+ * 不让词法器自带的颜色漏出来 —— 这里就是把这条规则用在仅有的两档上。
+ */
+function Code({
+  lang,
+  lines,
+  color,
+  width,
+}: {
+  lang: string;
+  lines: string[];
+  color: MarkdownProps['color'];
+  width?: number;
+}): React.ReactElement {
+  const cols = useColumns(width);
+  const rows = codeBlockRows(lang, lines, cols);
+  return (
+    <Box flexDirection="column">
+      {rows.map((r, i) => (
+        // 不折行（见文件头第 1 条）：折了就分不清"这是代码里的换行"还是"终端折的"
+        <Text key={i} color={color(r.token)} wrap="truncate">
+          {r.text}
+        </Text>
+      ))}
+    </Box>
+  );
+}
+
 export function Markdown({ blocks, color, streaming = false, width }: MarkdownProps): React.ReactElement {
   return (
     <Box flexDirection="column">
@@ -177,19 +211,7 @@ function BlockView({
       );
 
     case 'code':
-      return (
-        <Box flexDirection="column" borderStyle="round" borderColor={color('border')} paddingX={1}>
-          {block.lang ? (
-            <Text color={color('dim')}>{block.lang}</Text>
-          ) : null}
-          {block.lines.map((l, i) => (
-            // wrap="truncate"：代码不折行（见文件头说明）
-            <Text key={i} color={color('text')} wrap="truncate">
-              {l || ' '}
-            </Text>
-          ))}
-        </Box>
-      );
+      return <Code lang={block.lang} lines={block.lines} color={color} width={width} />;
 
     case 'quote':
       return (

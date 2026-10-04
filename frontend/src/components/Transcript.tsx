@@ -16,6 +16,7 @@ import { parseMarkdown } from '../render/markdown.js';
 import type { Item } from '../state/store.js';
 import { Markdown } from './Markdown.js';
 import { ToolCard } from './ToolCard.js';
+import { Rule } from './layout/PageMargin.js';
 
 /**
  * 助手消息 —— 走 Markdown 渲染。
@@ -52,8 +53,20 @@ export interface TranscriptProps {
 export function Transcript({ items, t, color }: TranscriptProps): React.ReactElement {
   return (
     <Box flexDirection="column">
-      {items.map((it) => (
+      {items.map((it, i) => (
         <Box key={it.id} flexDirection="column" marginBottom={1}>
+          {/* 轮次边界（规范 §2「区间隔 = 1 空行 + 整宽细线 + 1 空行」）：
+              只在**前面真的还有东西**时才画 —— 第一条用户消息上面没有"上一轮"，
+              画一条悬空的线只是噪音（这就是"线在哪儿被内容打断"的那一档）。
+
+              这条线**不出血**（`bleed={false}`）：转录所在的表面右边可能还有别的东西
+              （全屏时是滚动视口那 1 列滚动条），出血过去会压到别人的格子上。
+              版面级那条（`App` 里转录与底部区之间）才出血。 */}
+          {it.kind === 'user' && i > 0 ? (
+            <Box marginBottom={1}>
+              <Rule bleed={false} color={color} />
+            </Box>
+          ) : null}
           <ItemView item={it} t={t} color={color} />
         </Box>
       ))}

@@ -10,6 +10,8 @@
  *      会把普通输出误染成 diff。
  *   2. **文件头不计入增删** —— 否则每个 diff 都"删了一行、加了一行"，数字失去意义。
  *   3. **文件头按 dim 而非红绿** —— 它们不是"删了这行、加了那行"。
+ *   4. **行首给状态槽、不给行号**（借鉴 dsh-TUI `SplitDiffView` 的 issue #250）——
+ *      见下面 `DiffSlot`：工具输出里没有文件偏移，编出来的行号是假信息。
  *
  * 纯函数：不碰 Ink、不读宽度（宽度由调用方截断），所以可穷举测。
  */
@@ -76,24 +78,77 @@ export function colorName(line: string): DiffToken {
 }
 
 export interface DiffLine {
+  /**
+   * 行首状态槽 —— **替代行号**（借鉴 dsh-TUI `SplitDiffView`，他们 issue #250 的理由：
+   * 工具给的 diff **不带文件偏移**，行号只能编；编错的行号比没有行号更糟 ——
+   * 人会拿它去 `sed -n '<n>p'`，然后看到不是自己以为的那一行）。
+   * 所以每一行只声明它**是什么**，不假装知道它在文件里的第几行。
+   */
+  slot: DiffSlot;
+  /**
+   * 正文 —— **已去掉原行首的标记字符**（标记挪到 `slot` 了，否则会渲染成 `- -旧行`）。
+   * 文件头/杂项行不是"标记 + 正文"结构，整行留在 `text` 里。
+   */
   text: string;
   token: DiffToken;
 }
 
 /**
- * diff 文本 → 待渲染行 + 颜色 token。
+ * 状态槽：`+` 增 · `-` 删 · ` ` 上下文 · `~` 块头（`@@`）· `?` 不是 diff 行。
+ *
+ * `?` 这一档是必须的，不是凑数：`--- a/x` 的第一个字符也是 `-`，没有它就等于
+ * 把文件头谎报成"删了这行"（`colorName` 早就按 dim 处理它们了，槽位得跟上）。
+ */
+export type DiffSlot = '+' | '-' | ' ' | '~' | '?';
+
+export function diffSlot(line: string): DiffSlot {
+  if (line.startsWith('--- ') || line.startsWith('+++ ') || line.startsWith('diff ')) return '?';
+  switch (diffMarker(line)) {
+    case '+':
+      return '+';
+    case '-':
+      return '-';
+    case ' ':
+      return ' ';
+    case '@':
+      return '~';
+    default:
+      return '?';
+  }
+}
+
+/** Tab → 3 空格：一个 Tab 显示几列取决于制表位，宽度算式会当场散架（照抄他们的 `expandTabs`）。 */
+function expandTabs(line: string): string {
+  return line.replace(/\t/g, '   ');
+}
+
+/**
+ * diff 文本 → 待渲染行 + 状态槽 + 颜色 token。
  *
  * 超过 `maxLines` 时截断并**追加一行说明**（不冒充完整）—— 静默截断会让用户
- * 以为"就改了这些"。
+ * 以为"就改了这些"；那一行的槽位是 `?`（它不是 diff 行）。
  */
 export function colorizeDiff(text: string, maxLines: number = MAX_DIFF_LINES): DiffLine[] {
   if (!text) return [];
   const lines = text.split(/\r?\n/);
   const capped = lines.length > maxLines;
   const shown = lines.slice(0, maxLines);
-  const out: DiffLine[] = shown.map((l) => ({ text: l, token: colorName(l) }));
+  const out: DiffLine[] = shown.map((raw) => {
+    const line = expandTabs(raw);
+    const slot = diffSlot(line);
+    return {
+      slot,
+      // 标记已经在槽位里了：`+`/`-`/空格 这三档把原行首那个字符去掉
+      text: slot === '?' || slot === '~' ? line : line.slice(1),
+      token: colorName(line),
+    };
+  });
   if (capped) {
-    out.push({ text: `… 还有 ${lines.length - maxLines} 行`, token: 'dim' });
+    out.push({
+      slot: '?',
+      text: `… 还有 ${lines.length - maxLines} 行`,
+      token: 'dim',
+    });
   }
   return out;
 }
