@@ -198,6 +198,7 @@ ace-agent/
 │   ├── HOME-DESIGN.md          #  主页设计：分区顺序为什么是这样、每条信息为什么在这个位置
 │   ├── KEYMAP-CLAUDE-PARITY.md #  键位对照表（Claude Code ↔ HooH，逐条核实 + 不做的理由）
 │   ├── ARCHITECTURE.md         #   本文档：分层职责 + 权威目录树 + ADR 索引
+│   ├── style-dictionary-preview.svg #  风格词典预览图（`--preview` 生成物，入库当素材；同 assets/ 的社会预览图）
 │   ├── security/               #   安全文档（模型 / FAQ / 审计 / 自查扫描）
 │   │   ├── SECURITY-MODEL.md       #   安全模型：权限/隔离/路径/网络/沙箱 + 生产部署必读
 │   │   ├── SECURITY-FAQ.md         #   安全边界 FAQ（11 问：挡住了什么/没挡住什么；含无人值守 fail-close 与快照不覆盖清单）
