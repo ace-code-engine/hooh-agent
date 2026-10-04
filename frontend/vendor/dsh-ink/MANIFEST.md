@@ -22,6 +22,30 @@ kernel closure. The single `@deepseek-ai/*` mention in the tree is an optional h
 inside `try/catch`; returns `undefined` and falls back to text when the host tree is absent).
 See `README.md` for how the rest are resolved.
 
+**⚠️ react / react-reconciler / usehooks-ts 是例外**：这三个**不**指向 dsh-tui，而是解析到 ace 自己的
+`frontend/node_modules/*`，且**全仓必须单实例**。判据不是"谁叫 react"，而是**谁 import react**：
+
+- `react` / `react-reconciler` 两份实例 ⇒ 元素能互认、hook 不能，`useState` 组件抛
+  `Invalid hook call` 并**静默渲染成空屏（零报错）**；
+- **`usehooks-ts` 自身也 `import react`** ⇒ 它被 junction 到 dsh-tui 时，Node 按 **realpath**
+  解析会让它拿到 dsh-tui 的第二份 react；内核 `use-input.js` 拿 ace 的，于是任何调 `useInput`
+  的组件渲染即 `Invalid hook call` / `Cannot read properties of null (reading 'useRef')`，且
+  **不抛** —— 内核画成 ERROR 屏，真机上表现为"输入框起不来、看不到报错"。
+
+复现与修复（**必须先 `npm install`，从 `frontend/` 起跑**）：
+
+```powershell
+cd G:\AI_Project\ace\frontend
+npm install
+node vendor\dsh-ink\setup-deps.mjs    # 幂等；错链接会被 re-point / unlink 自愈
+node vendor\dsh-ink\probe.mjs         # PATH C/D/E 守卫；任一红 -> exit 1
+```
+
+反向验证（证明守卫不是摆设）：把 `vendor/dsh-ink/node_modules/usehooks-ts`（或 `react`）手工
+junction 回 dsh-tui → `PATH A/B` 仍旧全 PASS，`PATH D` 渲染成空屏/ERROR 屏、`PATH E` 报出
+`usehooks-ts` 拿到的是 dsh-tui 的 react，`PROBE_EXIT=1`；再跑一次 `setup-deps.mjs` 即自愈
+（输出 `1 react-importer links removed` / `2 re-pointed`）。
+
 | bare specifier | version resolved upstream | import sites |
 |---|---|---|
 | `@alcalzone/ansi-tokenize` | 0.3.1 | 4 |
@@ -47,6 +71,12 @@ See `README.md` for how the rest are resolved.
 | `supports-hyperlinks` | 3.2.0 | 1 |
 | `usehooks-ts` | 3.1.1 | 1 |
 | `wrap-ansi` | 10.0.2 | 1 |
+
+表中 `react` / `react/jsx-runtime` / `react-reconciler`(+`/constants.js`) 的版本号与上游相同，
+但**必须解析到 ace 的 `frontend/node_modules` 那一份实例**（版本号相同 ≠ 同一实例，见上）；
+其余 18 个包解析到 dsh-tui 的 junction —— 前提是它们**自身不 import react**（`usehooks-ts` 就
+因为自身 import react 而被移出 junction 名单，改由 `frontend/package.json` 的
+`"usehooks-ts": "^3.1.0"` 经 `npm install` 提供；`probe.mjs` PATH E 会扫闭包复核这份名单）。
 
 ## File list (135)
 
