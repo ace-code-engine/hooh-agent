@@ -10,6 +10,8 @@
 import { Text, useStdout } from 'ink';
 import React from 'react';
 
+import { displayWidth, truncateWidth } from '../../render/text.js';
+
 export type ColorFn = (token: string) => string | undefined;
 
 // ─────────────────────────────────────────────────────────── Divider
@@ -37,9 +39,15 @@ export function Divider({
   if (!label) {
     return <Text color={color?.('border')}>{char.repeat(total)}</Text>;
   }
-  // 中文占两列：这里按**码点数**近似居中 —— 前端拿不到 displayWidth（那是 Python 侧的表），
-  // 精确对齐由 `test/design-parity.test.ts` 只在纯 ASCII 标题上对拍，中文只保证"线是整宽的"。
-  const room = Math.max(0, total - label.length);
+  // 中文占两列：一律按**显示宽度**算，不能用 `label.length`（码点数）——
+  // `" 状态 "` 码点数是 4、显示宽度是 6，按码点数居中会算多 2 列，
+  // 分隔线既不是整宽、左右也不对称（同 `ui/ace_widgets.divider`，那边用的是 `display_width`）。
+  const lw = displayWidth(label);
+  if (lw >= total) {
+    // 标题比线还长：只留标题，别画负长度的线；截断也走显示宽度，绝不把中文劈成半个
+    return <Text color={color?.('dim')}>{truncateWidth(title.trim(), total)}</Text>;
+  }
+  const room = total - lw;
   const left = Math.floor(room / 2);
   const right = room - left;
   return (

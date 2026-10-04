@@ -19,6 +19,7 @@ import {
   StatusIcon, Tabs, byline, progressBar, statusIcon,
 } from '../src/components/design-system/index.js';
 import { resolvePython } from '../src/protocol/client.js';
+import { displayWidth } from '../src/render/text.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const noColor = (): string | undefined => undefined;
@@ -41,7 +42,12 @@ bylines = [W.byline(["a","","b"]), W.byline(["模型","上下文 12%"])]
 dividers = [W.divider(24), W.divider(20, title="Status")]
 print(json.dumps({"bars": bars, "icons": icons, "bylines": bylines, "dividers": dividers}, ensure_ascii=False))
 `;
-  const out = execFileSync(resolvePython(), ['-c', code], { encoding: 'utf-8' });
+  // 中文/图标要能原样过管道：Windows 上 Python 默认按 GBK 编码 stdout，不加这两行会当场 UnicodeEncodeError
+  // （照 `tasktree.test.ts` 的老办法）
+  const out = execFileSync(resolvePython(), ['-c', code], {
+    encoding: 'utf-8',
+    env: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' },
+  });
   return JSON.parse(out);
 }
 
@@ -88,7 +94,8 @@ describe('设计系统 · 与 Python 逐值对拍（同批输入）', () => {
   });
 
   it('分隔线逐值相同（纯 ASCII 标题下）', () => {
-    // 前端拿不到 displayWidth（那是 Python 的表），所以对拍只用 ASCII 标题
+    // 前端现在也按 displayWidth 居中（与 Python 同源），对拍从纯 ASCII 扩到中文也没问题；
+    // 中文那批的**整宽+对称**不变量见下面"渲染"那组。
     expect([pythonSide().dividers[0]]).toEqual([py.dividers[0]]);
     expect(py.dividers[1]).toBe('────── Status ──────');   // 20 列，两侧各 6（我是猜的，真值以 Python 为准）
   });
@@ -100,6 +107,35 @@ describe('设计系统 · 渲染', () => {
     await tick();
     expect(tree.lastFrame() ?? '').toContain('─'.repeat(24));
     tree.unmount();
+  });
+
+  it('Divider 中文标题：按**显示宽度**居中，整宽且左右对称', async () => {
+    // 不变量比背字符串稳：按码点数算的话（`" 状态 "` 码点 4 / 显示宽 6），
+    // 线会比请求宽度长出 2 列，这条当场红。
+    const cases: Array<[number, string]> = [
+      [9, '状态'], [11, '状态'], [12, '模型'], [17, '模型 上下文'], [24, '配置'],
+    ];
+    for (const [width, title] of cases) {
+      const tree = render(<Divider title={title} color={noColor} width={width} />);
+      await tick();
+      const line = (tree.lastFrame() ?? '').trim();
+      tree.unmount();
+      expect(displayWidth(line), `width=${width} title=${title}`).toBe(width);
+      // 左右两侧各占多少列：差 1 列以内才算居中
+      const [left = '', right = ''] = line.split(` ${title.trim()} `);
+      const skew = displayWidth(right) - displayWidth(left);
+      expect(skew, `width=${width} title=${title} 左右不对称`).toBeGreaterThanOrEqual(0);
+      expect(skew, `width=${width} title=${title} 左右不对称`).toBeLessThanOrEqual(1);
+    }
+  });
+
+  it('Divider 标题比线长：按显示宽度截断，不劈中文', async () => {
+    const tree = render(<Divider title="很长很长的标题" color={noColor} width={9} />);
+    await tick();
+    const line = (tree.lastFrame() ?? '').trim();
+    tree.unmount();
+    expect(line).toBe('很长很长…');           // 4 个汉字 8 列 + 省略号 1 列
+    expect(displayWidth(line)).toBeLessThanOrEqual(9);
   });
 
   it('ListItem：聚焦 `❯` / 选中 `✓` / 无标记，且标记列**定宽**（文字不左右跳）', async () => {
