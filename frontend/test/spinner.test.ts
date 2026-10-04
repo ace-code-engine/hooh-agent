@@ -5,13 +5,17 @@
  * `waiting` 0.08s（等首字节，网络在动）、`reasoning` 0.24s（模型在推）、
  * `tool_running` 0.16s（工具在跑）。用户看速度判断"卡在哪一步"。
  * 两套前端各转各的，这条信息就废了。所以这里直接读那个 .py 比对。
+ *
+ * ## 迁移记录（S5，换内核）
+ * 只有末尾两条渲染用例要挂载：卡住判定来自 `useEffect` + `setInterval`（要等帧间隔
+ * 走一拍才会 setState），所以走 `./mount.js` 的 `mountTree()`（内核 `renderSync` + 假 stdio）
+ * —— `renderLines` 是一次性渲染，那颗定时器根本没机会跑。断言与 `tick(320ms)` 一字未改。
  */
 
 import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { render } from 'ink-testing-library';
 import React from 'react';
 import { describe, expect, it } from 'vitest';
 
@@ -27,6 +31,7 @@ import {
   stallLevel,
 } from '../src/render/spinner.js';
 import { PHASE_VERB, verbKeyFor } from '../src/components/Spinner.js';
+import { mountTree } from './mount.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 
@@ -167,7 +172,7 @@ describe('Spinner 渲染（R-7 卡住）', () => {
 
   it('无动效 + 静默超过阈值 → 出现"无响应"的标记（stub t 断言键名）', async () => {
     const lastOutputAt = Date.now() / 1000 - 5;    // 5s 前最后一次产出 ⇒ 已卡
-    const { lastFrame, unmount } = render(
+    const { lastFrame, unmount } = mountTree(
       React.createElement(Spinner, { phase: 'reasoning', t, color: noColor, reducedMotion: true, lastOutputAt }),
     );
     await tick();
@@ -178,7 +183,7 @@ describe('Spinner 渲染（R-7 卡住）', () => {
 
   it('工具在跑时**不判**卡住（一条长命令跑 60 秒是正常的）', async () => {
     const lastOutputAt = Date.now() / 1000 - 5;
-    const { lastFrame, unmount } = render(
+    const { lastFrame, unmount } = mountTree(
       React.createElement(Spinner, { phase: 'tool_running', t, color: noColor, reducedMotion: true, lastOutputAt }),
     );
     await tick();

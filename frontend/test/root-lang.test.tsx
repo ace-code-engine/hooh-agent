@@ -1,4 +1,4 @@
-﻿/**
+/**
  * 界面语言**跟着引擎走** —— 这条以前是断的，而且断得很有欺骗性：
  * 引擎侧全套翻译都在（`/` 菜单、参数提示），`ui/i18n.py` 也真的切了语言，
  * 但前端**自己那份字典**是启动时按 `--lang` 建一次、之后再也不动。
@@ -7,14 +7,19 @@
  * 这一组测两件事：
  *   1. 起步听**引擎**的（配置里写了 en 就该是英文，不必命令行 `--lang`）；
  *   2. 运行中收到 `language` 事件就换字典。
+ *
+ * ## 迁移记录（S5，换内核）
+ * 本文件只关心"挂载起来 + effect 跑过"，从不断言画面。`ink-testing-library` → `./mount.js`
+ * （内核 `renderSync` + 假 stdio）。断言一字未改。
+ * ✅ 复查（同日）：`src/**` 已整体换到内核（`from 'ink'` 清零），本文件随全量测试转绿。
  */
 
-import { render } from 'ink-testing-library';
 import { describe, expect, it } from 'vitest';
 
 import { I18n } from '../src/i18n.js';
 import { Root } from '../src/Root.js';
 import { FakeClient, tick } from './fake-engine.js';
+import { mountTree } from './mount.js';
 
 const noColor = (): string | undefined => undefined;
 const noMenu = { commands: {}, groupOf: () => 'group_more', translate: (k: string) => k };
@@ -23,7 +28,7 @@ describe('界面语言跟着引擎走', () => {
   it('命令行没给 --lang 时，用**引擎握手报的**语言（配置里写 en 也算）', async () => {
     const i18n = new I18n('zh');
     const client = new FakeClient();
-    render(
+    mountTree(
       <Root
         client={client}
         i18n={i18n}
@@ -41,7 +46,7 @@ describe('界面语言跟着引擎走', () => {
   it('命令行给了 --lang 就听用户的（不能被引擎覆盖）', async () => {
     const i18n = new I18n('zh');
     const client = new FakeClient();
-    render(
+    mountTree(
       <Root
         client={client}
         i18n={i18n}
@@ -58,7 +63,7 @@ describe('界面语言跟着引擎走', () => {
   it('运行中引擎切语言（`/lang en`）→ 收到 `language` 事件就换字典', async () => {
     const i18n = new I18n('zh');
     const client = new FakeClient();
-    const tree = render(
+    const tree = mountTree(
       <Root
         client={client}
         i18n={i18n}
@@ -84,7 +89,7 @@ describe('界面语言跟着引擎走', () => {
   it('引擎报了个不认识的语言 → 不动（不能让界面变成键名堆）', async () => {
     const i18n = new I18n('zh');
     const client = new FakeClient();
-    render(
+    mountTree(
       <Root
         client={client}
         i18n={i18n}

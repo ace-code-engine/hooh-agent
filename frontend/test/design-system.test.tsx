@@ -10,8 +10,6 @@ import { execFileSync } from 'node:child_process';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { Text } from 'ink';
-import { render } from 'ink-testing-library';
 import { describe, expect, it } from 'vitest';
 
 import {
@@ -20,13 +18,13 @@ import {
 } from '../src/components/design-system/index.js';
 import { resolvePython } from '../src/protocol/client.js';
 import { displayWidth } from '../src/render/text.js';
+import { Text } from './helpers/kernel.js';
+import { renderLines } from './helpers/screen.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const noColor = (): string | undefined => undefined;
 const t = (k: string, p?: Record<string, string | number>): string =>
   k === 'key_hint' ? `${p?.shortcut} ${p?.action}` : k;
-
-const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 25));
 
 /** 让真 Python 算同一批输入（`ui.ace_widgets` 是那边唯一真相源）。 */
 function pythonSide(): {
@@ -102,24 +100,20 @@ describe('设计系统 · 与 Python 逐值对拍（同批输入）', () => {
 });
 
 describe('设计系统 · 渲染', () => {
-  it('Divider 整宽（跟终端列数走）', async () => {
-    const tree = render(<Divider color={noColor} width={24} />);
-    await tick();
-    expect(tree.lastFrame() ?? '').toContain('─'.repeat(24));
-    tree.unmount();
+  it('Divider 整宽（跟终端列数走）', () => {
+    const out = renderLines(<Divider color={noColor} width={24} />, 24).text;
+    expect(out).toContain('─'.repeat(24));
   });
 
-  it('Divider 中文标题：按**显示宽度**居中，整宽且左右对称', async () => {
+  it('Divider 中文标题：按**显示宽度**居中，整宽且左右对称', () => {
     // 不变量比背字符串稳：按码点数算的话（`" 状态 "` 码点 4 / 显示宽 6），
     // 线会比请求宽度长出 2 列，这条当场红。
     const cases: Array<[number, string]> = [
       [9, '状态'], [11, '状态'], [12, '模型'], [17, '模型 上下文'], [24, '配置'],
     ];
     for (const [width, title] of cases) {
-      const tree = render(<Divider title={title} color={noColor} width={width} />);
-      await tick();
-      const line = (tree.lastFrame() ?? '').trim();
-      tree.unmount();
+      const line = renderLines(<Divider title={title} color={noColor} width={width} />, width)
+        .text.trim();
       expect(displayWidth(line), `width=${width} title=${title}`).toBe(width);
       // 左右两侧各占多少列：差 1 列以内才算居中
       const [left = '', right = ''] = line.split(` ${title.trim()} `);
@@ -129,56 +123,48 @@ describe('设计系统 · 渲染', () => {
     }
   });
 
-  it('Divider 标题比线长：按显示宽度截断，不劈中文', async () => {
-    const tree = render(<Divider title="很长很长的标题" color={noColor} width={9} />);
-    await tick();
-    const line = (tree.lastFrame() ?? '').trim();
-    tree.unmount();
+  it('Divider 标题比线长：按显示宽度截断，不劈中文', () => {
+    const line = renderLines(<Divider title="很长很长的标题" color={noColor} width={9} />, 9)
+      .text.trim();
     expect(line).toBe('很长很长…');           // 4 个汉字 8 列 + 省略号 1 列
     expect(displayWidth(line)).toBeLessThanOrEqual(9);
   });
 
-  it('ListItem：聚焦 `❯` / 选中 `✓` / 无标记，且标记列**定宽**（文字不左右跳）', async () => {
-    const a = render(<ListItem label="甲" isFocused color={noColor} />);
-    const b = render(<ListItem label="甲" isSelected color={noColor} />);
-    const c = render(<ListItem label="甲" color={noColor} />);
-    await tick();
-    expect(a.lastFrame() ?? '').toContain('❯');
-    expect(b.lastFrame() ?? '').toContain('✓');
-    const plain = c.lastFrame() ?? '';
+  it('ListItem：聚焦 `❯` / 选中 `✓` / 无标记，且标记列**定宽**（文字不左右跳）', () => {
+    const a = renderLines(<ListItem label="甲" isFocused color={noColor} />, 100).text;
+    const b = renderLines(<ListItem label="甲" isSelected color={noColor} />, 100).text;
+    const plain = renderLines(<ListItem label="甲" color={noColor} />, 100).text;
+    expect(a).toContain('❯');
+    expect(b).toContain('✓');
     expect(plain).not.toContain('❯');
     expect(plain).not.toContain('✓');
     // 不管有没有标记，"甲"都在第 3 列（标记列宽 2 + 1）
-    expect((a.lastFrame() ?? '').indexOf('甲')).toBe((plain).indexOf('甲'));
-    a.unmount(); b.unmount(); c.unmount();
+    expect(a.indexOf('甲')).toBe(plain.indexOf('甲'));
   });
 
-  it('Tabs：当前页反显且加粗', async () => {
-    const tree = render(
+  it('Tabs：当前页反显且加粗', () => {
+    const out = renderLines(
       <Tabs tabs={[{ key: 'a', label: '甲' }, { key: 'b', label: '乙' }]} active="b" color={noColor} />,
-    );
-    await tick();
-    expect(tree.lastFrame() ?? '').toContain('乙');
-    tree.unmount();
+      100,
+    ).text;
+    expect(out).toContain('乙');
   });
 
-  it('Dialog：标题 + 整宽细线 + byline 提示', async () => {
-    const tree = render(
+  it('Dialog：标题 + 整宽细线 + byline 提示', () => {
+    const out = renderLines(
       <Dialog title="选择模型" status="info" color={noColor} width={30} hints={['Enter 确认', 'Esc 取消']}>
         <Text>甲 / 乙</Text>
       </Dialog>,
-    );
-    await tick();
-    const out = tree.lastFrame() ?? '';
+      100,
+    ).text;
     expect(out).toContain('选择模型');
     expect(out).toContain('ℹ');
     expect(out).toContain('─'.repeat(30));
     expect(out).toContain('Enter 确认 · Esc 取消');
-    tree.unmount();
   });
 
-  it('Pane / LoadingState / ProgressBar / Byline / ShortcutHint / StatusIcon 能画出来', async () => {
-    const tree = render(
+  it('Pane / LoadingState / ProgressBar / Byline / ShortcutHint / StatusIcon 能画出来', () => {
+    const out = renderLines(
       <Pane title="状态" color={noColor} width={20}>
         <LoadingState message="正在读取" subtitle="3 个文件" color={noColor} />
         <ProgressBar ratio={0.5} width={8} color={noColor} />
@@ -186,17 +172,15 @@ describe('设计系统 · 渲染', () => {
         <ShortcutHint keys="ctrl+o" action="expand" t={t} color={noColor} />
         <StatusIcon status="success" withSpace color={noColor} />
       </Pane>,
-    );
-    await tick();
-    const out = tree.lastFrame() ?? '';
+      100,
+    ).text;
     for (const probe of ['状态', '正在读取', '3 个文件', '████', '模型 · 上下文 12%',
                          'ctrl+o expand', '✓']) {
       expect(out).toContain(probe);
     }
-    tree.unmount();
   });
 
-  it('ShortcutHint：四种组合输出一致，加粗+括号时键名只出现一次', async () => {
+  it('ShortcutHint：四种组合输出一致，加粗+括号时键名只出现一次', () => {
     const cases: Array<[boolean, boolean, string]> = [
       [false, false, 'ctrl+o 展开'],
       [true, false, 'ctrl+o 展开'],
@@ -204,27 +188,24 @@ describe('设计系统 · 渲染', () => {
       [true, true, '(ctrl+o 展开)'],
     ];
     for (const [bold, parens, want] of cases) {
-      const tree = render(
-        <ShortcutHint keys="ctrl+o" action="展开" t={t} bold={bold} parens={parens} color={noColor} />,
-      );
-      await tick();
       const tag = `bold=${bold} parens=${parens}`;
-      const out = (tree.lastFrame() ?? '').trim();
-      tree.unmount();
+      const out = renderLines(
+        <ShortcutHint keys="ctrl+o" action="展开" t={t} bold={bold} parens={parens} color={noColor} />,
+        100,
+      ).text.trim();
       expect(out, tag).toBe(want);
       // 回归护栏：旧的 `body.slice(keys.length)` 在 parens 下会吐出 `ctrl+oo 展开)`
       expect(out.split('ctrl+o').length - 1, tag).toBe(1);
     }
   });
 
-  it('ShortcutHint：加粗段跟着 i18n 给的位置走（action 在前也不硬切）', async () => {
+  it('ShortcutHint：加粗段跟着 i18n 给的位置走（action 在前也不硬切）', () => {
     const tEn = (k: string, p?: Record<string, string | number>): string =>
       k === 'key_hint' ? `${p?.action} ${p?.shortcut}` : k;
-    const tree = render(
+    const out = renderLines(
       <ShortcutHint keys="ctrl+o" action="展开" t={tEn} bold parens color={noColor} />,
-    );
-    await tick();
-    expect((tree.lastFrame() ?? '').trim()).toBe('(展开 ctrl+o)');
-    tree.unmount();
+      100,
+    ).text.trim();
+    expect(out).toBe('(展开 ctrl+o)');
   });
 });

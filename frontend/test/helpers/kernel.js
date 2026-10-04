@@ -11,7 +11,13 @@
 export { renderToScreen } from '../../vendor/dsh-ink/lib/types/ink/render-to-screen.js';
 export { cellAtIndex } from '../../vendor/dsh-ink/lib/types/ink/screen.js';
 // 内核渲染器吃的就是这一份 React（19）。测试要建"内核认得的"元素树就得用它。
-export { createElement, version } from '../../vendor/dsh-ink/node_modules/react/index.js';
+// ⚠️ 走**裸 specifier**：`vendor/dsh-ink/node_modules/react` 现在**故意不建 junction**
+// （setup-deps 的 ACE_OWNED 规则：react 的唯一真源是 `frontend/node_modules/react`；
+// 建了 junction 反而会让 usehooks-ts 这类"自身 import react"的包解析到 dsh-tui 的第二份
+// React，任何调 useInput 的组件当场 Invalid hook call）。写成
+// `'../../vendor/dsh-ink/node_modules/react/index.js'` 的版本会在 collect 期
+// `Cannot find module`（vitest 还会把它重写成 `node_modules/vendor/...`）。
+export { createElement, version } from 'react';
 // 内核自己的 Box/Text —— 今天 ace 的 src 还没搬过去，自检/骨架用它们建树。
 export { default as Box } from '../../vendor/dsh-ink/lib/types/ink/components/Box.js';
 export { default as Text } from '../../vendor/dsh-ink/lib/types/ink/components/Text.js';

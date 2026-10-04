@@ -20,12 +20,9 @@
  *   2. 不需要 `await tick()`：`renderToScreen` 返回时帧已经画完（原来那两次 sleep 是在赌 Ink 的异步 flush）；
  *   3. 宽度只能由调用方给：`renderLines(tree, 80)`，跟组件自己的 `width={80}` 对齐。
  *
- * ⚠️ **`引擎分段优先` 那两条现在是 skip 的，不是写错了。** 内核渲染器跑在 **React 19**
- * 上，而此刻 `src/**` 还在 **React 18**（`frontend/package.json`）：React 19 只认
- * `react.transitional.element`，React 18 建的元素要被**静默丢弃** —— 屏幕全空、不报错
- * （`renderLines` 现在会当场抛错点名这件事）。换内核（`src` 跟着上 React 19）之后删掉
- * 两个 `.skip` 即可，断言已经是新工具的形式。下面第一个 describe 是**今天就能跑**的
- * 工具自检。
+ * ⚠️ 那两条渲染用例此前是 skip 的，**现已删掉 skip（S5）**：它们等的是"`src/**` 跟着上
+ * React 19"（内核渲染器只认 `react.transitional.element`，React 18 建的元素会被静默丢弃）。
+ * 条件已满足 —— 断言本来就是新工具的形式，所以删 skip 就绿。
  */
 
 import { describe, expect, it } from 'vitest';
@@ -84,7 +81,7 @@ describe('内核断言工具自检', () => {
 });
 
 describe('引擎分段优先', () => {
-  it.skip('有引擎分段时不再自算', () => {
+  it('有引擎分段时不再自算', () => {
     // 原来：const out = render(<StatusLine ... />).lastFrame() ?? '';
     const out = renderLines(
       h(StatusLine, {
@@ -106,7 +103,7 @@ describe('引擎分段优先', () => {
     expect(out).not.toContain('some-model');
   });
 
-  it.skip('没有引擎分段时退回自算（界面挂载早于第一个事件，那一行不该是空的）', () => {
+  it('没有引擎分段时退回自算（界面挂载早于第一个事件，那一行不该是空的）', () => {
     const out = renderLines(
       h(StatusLine, {
         meta: metaWith({ permission: 'readonly', statusSegments: [] }),

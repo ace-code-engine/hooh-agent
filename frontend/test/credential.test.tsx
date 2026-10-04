@@ -15,10 +15,10 @@
  *    也成立。对照组证明输入路径真的生效，上一条才有意义。
  */
 
-import { render } from 'ink-testing-library';
 import { describe, expect, it } from 'vitest';
 
 import { ChoiceDialog } from '../src/components/ChoiceDialog.js';
+import { mountTree } from './mount.js';
 
 const t = (k: string): string => k;
 const noColor = (): string | undefined => undefined;
@@ -29,7 +29,7 @@ const SENTINEL = 'sk-live-sentinel-9f3a';
 
 function mount(props: { secret?: boolean; defaultValue?: string }) {
   const answers: unknown[] = [];
-  const r = render(
+  const r = mountTree(
     <ChoiceDialog
       kind="text"
       title="API Key（输入时不显示）"

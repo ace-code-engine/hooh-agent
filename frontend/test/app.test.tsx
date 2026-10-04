@@ -6,15 +6,23 @@
  * 不需要模型、不需要 API key，CI 上也不会因为引擎慢而抖。
  *
  * 引擎那一侧由 Python 的 `test_all.py [69]` 负责（真子进程、真往返）。
+ *
+ * ## 迁移记录（S5，换内核）
+ * `ink-testing-library` → `./mount.js`（内核 `renderSync` + 假 stdio，见该文件头：
+ * 假 stdout 必须 `isTTY = false` 才会写**整屏**，且宽度仍是 100 列，与老工具一致）。
+ * 断言一字未改，`await tick()` 保留。两处 `\u001b`（Esc）多等了一拍：新内核把**孤立 ESC**
+ * 当"可能是 Alt+键 的前缀"，要 50ms 才吐出来（`components/app.js` 的 `NORMAL_TIMEOUT`），
+ * 老 ink 5 是立刻的 —— 这是**按键解析时序**的差异，不是"Esc 不生效"。
+ * ✅ 复查（同日）：`src/**` 已整体换到内核（`from 'ink'` 清零），本文件随全量测试转绿。
  */
 
 import { describe, expect, it, vi } from 'vitest';
-import { render } from 'ink-testing-library';
 
 import { App } from '../src/App.js';
 import { I18n } from '../src/i18n.js';
 import type { AceEvent, ConfigData, HomeData } from '../src/protocol/types.js';
 import { FakeClient, tick } from './fake-engine.js';
+import { mountTree } from './mount.js';
 
 /**
  * 假引擎在 `./fake-engine.ts` —— 与 `tools/preview.ts` 共用一份。
@@ -37,7 +45,7 @@ async function setup(init: { config?: ConfigData; home?: HomeData } = {}) {
   // 挂载后再设的话它已经拿到默认值了（踩过：横幅一直显示空配置）。
   if (init.config) client.config = init.config;
   if (init.home) client.home = init.home;
-  const tree = render(<App client={client} t={(k, p) => i18n.t(k, p)} colorOf={noColor} />);
+  const tree = mountTree(<App client={client} t={(k, p) => i18n.t(k, p)} colorOf={noColor} />);
   await tick();
   return { client, ...tree };
 }
@@ -131,6 +139,9 @@ describe('授权对话框', () => {
     client.push({ type: 'permission_request', ts: 1, tool: 'file_write', reason: 'r' });
     await tick();
     stdin.write('\u001b'); // ESC
+    // 孤立 ESC 在新内核里是"可能是 Alt+键 的前缀"，要等 50ms 超时才当 Esc 吐出来
+    await tick();
+    await tick();
     await tick();
     expect(client.calls).toContainEqual({ method: 'answerPermission', args: ['deny', undefined] });
     unmount();
@@ -182,7 +193,7 @@ describe('健壮性', () => {
     client.send = vi.fn(async () => {
       throw Object.assign(new Error('引擎忙'), { code: 'E_BUSY' });
     });
-    const { stdin, lastFrame, unmount } = render(
+    const { stdin, lastFrame, unmount } = mountTree(
       <App client={client} t={(k, p) => i18n.t(k, p)} colorOf={noColor} />,
     );
     await tick(); // 等 Ink 挂上输入监听（见 setup 的说明）
@@ -315,7 +326,7 @@ describe('主页', () => {
     client.requestHome = async () => {
       throw Object.assign(new Error('取不到'), { code: 'E_INTERNAL' });
     };
-    const { lastFrame, unmount } = render(
+    const { lastFrame, unmount } = mountTree(
       <App client={client} t={(k, p) => i18n.t(k, p)} colorOf={noColor} />,
     );
     await tick();
@@ -423,6 +434,8 @@ describe('选择对话框', () => {
     client.push(chooseReq('choose', { options: ['甲'] }));
     await tick();
     stdin.write('\u001b');
+    await tick();
+    await tick();
     await tick();
     expect(client.calls).toContainEqual({ method: 'answerChoice', args: [{ cancelled: true }] });
     unmount();

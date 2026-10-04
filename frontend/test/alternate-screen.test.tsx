@@ -7,13 +7,19 @@
  *
  * 注意时序：React 的 effect 清理**不在 `unmount()` 当场跑**，所以每次卸载后都要
  * 等一拍再断言 —— 否则第 1 条的"退出"会落进第 2 条的 spy 里（第一版就是这么红的）。
+ *
+ * ## 迁移记录（S5，换内核）
+ * `ink-testing-library` → `./mount.js` 的 `mountTree()`（内核 `renderSync` + 假 stdio）；
+ * `Text` 也从上游 `ink`（React 18）换成 `./helpers/kernel.js` 的内核 `Text`。
+ * 断言一字未改。这里**必须**挂载/卸载真跑一遍（进屏在 effect 里、退屏在清理里），
+ * 所以不能用一次性的 `renderLines`；spy 盯的仍是 `process.stdout`（组件自己写的那条路）。
  */
 
-import { Text } from 'ink';
-import { render } from 'ink-testing-library';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { AlternateScreen } from '../src/tui/alternate-screen.js';
+import { Text } from './helpers/kernel.js';
+import { mountTree } from './mount.js';
 
 const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 25));
 
@@ -24,7 +30,7 @@ async function writtenWith(isTTY: boolean): Promise<string> {
   const desc = Object.getOwnPropertyDescriptor(process.stdout, 'isTTY');
   Object.defineProperty(process.stdout, 'isTTY', { value: isTTY, configurable: true });
   const spy = vi.spyOn(process.stdout, 'write').mockReturnValue(true);
-  const tree = render(
+  const tree = mountTree(
     <AlternateScreen>
       <Text>全屏内容</Text>
     </AlternateScreen>,

@@ -8,12 +8,16 @@
  *
  * 注意用例里一律用**普通文本**而不是 `/net`：命令名会被补全菜单接住（回车先补全、
  * 不发送）—— 那是本文件之外的另一条正确行为，混进来只会让这里测不准。
+ *
+ * ## 迁移记录（S5，换内核）
+ * `ink-testing-library` → `./mount.js`（内核 `renderSync` + 假 stdio，见该文件头）；
+ * `rerender` 语义不变。断言一字未改。
  */
 
-import { render } from 'ink-testing-library';
 import { describe, expect, it } from 'vitest';
 
 import { Input } from '../src/components/Input.js';
+import { mountTree } from './mount.js';
 
 const t = (k: string, params?: Record<string, string | number>): string =>
   params ? `${k}(${Object.values(params).join(',')})` : k;
@@ -29,7 +33,7 @@ interface Mounted {
 
 function mount(busy: boolean): Mounted {
   const props = { t, color: noColor, onSubmit: () => true, width: 80, vim: false };
-  const r = render(<Input {...props} busy={busy} />);
+  const r = mountTree(<Input {...props} busy={busy} />);
   return {
     lastFrame: r.lastFrame,
     stdin: r.stdin,

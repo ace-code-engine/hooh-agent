@@ -11,15 +11,20 @@
  *
  * 探针**每条测试各带一个回调**，不用模块级变量：React 的 effect 清理是异步的，
  * 上一条测试的卸载会落进下一条里（第一版就是这么假红的）。
+ *
+ * ## 迁移记录（S5，换内核）
+ * `ink-testing-library` → `./mount.js`（内核 `renderSync` + 假 stdio）。`mount()` 依旧
+ * 没有 `waitUntilExit()`，探针那条设计**照旧**（它本来就是为这件事写的）。断言一字未改。
+ * ✅ 复查（同日）：`src/**` 已整体换到内核（`from 'ink'` 清零），本文件随全量测试转绿。
  */
 
-import { render } from 'ink-testing-library';
 import React from 'react';
 import { describe, expect, it } from 'vitest';
 
 import { App } from '../src/App.js';
 import { I18n } from '../src/i18n.js';
 import { FakeClient, tick } from './fake-engine.js';
+import { mountTree, type MountedTree } from './mount.js';
 
 const noColor = (): string | undefined => undefined;
 const i18n = new I18n('zh');
@@ -33,8 +38,8 @@ function Probe({ onUnmount }: { onUnmount: () => void }): null {
   return null;
 }
 
-function mount(client: FakeClient, onUnmount: () => void): ReturnType<typeof render> {
-  return render(
+function mount(client: FakeClient, onUnmount: () => void): MountedTree {
+  return mountTree(
     <>
       <App client={client} t={(k, p) => i18n.t(k, p)} colorOf={noColor} menuOptions={noMenu} />
       <Probe onUnmount={onUnmount} />
@@ -42,7 +47,7 @@ function mount(client: FakeClient, onUnmount: () => void): ReturnType<typeof ren
   );
 }
 
-async function submit(tree: ReturnType<typeof render>, line: string): Promise<void> {
+async function submit(tree: MountedTree, line: string): Promise<void> {
   tree.stdin.write(line);
   await tick();
   tree.stdin.write('\r');

@@ -13,6 +13,11 @@
  *
  * 手法与 `theme.test.ts` / `spinner.test.ts` 一致：**直接读 Python 源文件比对**，
  * 不靠文档提醒。每条都先断言"解析成功"，否则解析一坏就会变成"两边都空所以相等"的假绿。
+ *
+ * ## 迁移记录（S5，换内核）
+ * 三条**渲染级**用例（`Menu`，纯渲染无输入）从 `ink-testing-library` 的
+ * `render()` / `lastFrame()` 迁到 `./helpers/screen.js` 的 `renderLines()`
+ * （内核 `renderToScreen`：同步、纯 buffer、纯文本）。断言一字未改，只去掉了 `await tick()`。
  */
 
 import { execFileSync } from 'node:child_process';
@@ -20,7 +25,6 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { render } from 'ink-testing-library';
 import React from 'react';
 import { describe, expect, it } from 'vitest';
 
@@ -29,13 +33,13 @@ import { PERMISSION_OPTIONS } from '../src/components/PermissionDialog.js';
 import { READ_TOOLS, TOOL_GLYPHS } from '../src/components/ToolCard.js';
 import { MENU_GAP, labelColumn, windowBounds, type MenuItem, type MenuState } from '../src/render/menu.js';
 import { resolvePython } from '../src/protocol/client.js';
+import { renderLines } from './helpers/screen.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const PY = resolvePython();
 const readPy = (rel: string): string => readFileSync(join(ROOT, rel), 'utf-8');
 const t = (k: string): string => k;
 const noColor = (): string | undefined => undefined;
-const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 30));
 
 /** 跑一段 Python（`input` 走 stdin 的 JSON），失败返回 null（没 Python 就跳过对比）。 */
 function pythonJson(script: string, payload: unknown): unknown {
@@ -252,7 +256,7 @@ describe('R-6 菜单说明列：与 ui/ace_menu 同口径', () => {
     'print(json.dumps(m.render_menu(st, 80, max_rows=8, translate=lambda k: k)))',
   ].join('\n'), ITEMS) as string[] | null;
 
-  it.skipIf(pyRows === null)('★**渲染结果**里"说明相对标签的偏移"两侧相同（规则真被用上了）', async () => {
+  it.skipIf(pyRows === null)('★**渲染结果**里"说明相对标签的偏移"两侧相同（规则真被用上了）', () => {
     expect(pyRows, '没拿到 Python 的渲染行').not.toBeNull();
     const items: MenuItem[] = ITEMS.map(([label, desc]) => ({
       label, insert: label, desc, group: 'g', kind: 'command' as const,
@@ -260,12 +264,10 @@ describe('R-6 菜单说明列：与 ui/ace_menu 同口径', () => {
     const state: MenuState = {
       items, selected: 0, open: true, kind: 'command', query: '', span: [0, 0],
     };
-    const { lastFrame, unmount } = render(
+    const frame = renderLines(
       React.createElement(Menu, { state, t, color: noColor, height: 8, width: 80 }),
-    );
-    await tick();
-    const frame = lastFrame() ?? '';
-    unmount();
+      80,
+    ).text;
 
     // 用"说明列 - 标签列"比较：与两侧各自的前缀（标记/边框）无关
     const gapOf = (line: string, label: string, desc: string): number => {
@@ -315,15 +317,13 @@ describe('R-8 列表选中标记 = `▶`（与"提示符 `❯`"分开）', () =>
     expect(bad).toEqual([]);
   });
 
-  it('★渲染级：菜单的选中行两侧都画 `▶`', async () => {
+  it('★渲染级：菜单的选中行两侧都画 `▶`', () => {
     const items: MenuItem[] = [{ label: '/help', insert: '/help', desc: 'd', group: 'g', kind: 'command' }];
     const state: MenuState = { items, selected: 0, open: true, kind: 'command', query: '', span: [0, 0] };
-    const { lastFrame, unmount } = render(
+    const frame = renderLines(
       React.createElement(Menu, { state, t, color: noColor, height: 8, width: 80 }),
-    );
-    await tick();
-    const frame = lastFrame() ?? '';
-    unmount();
+      80,
+    ).text;
     expect(frame).toContain('▶');
     expect(frame).not.toContain('❯');
   });
@@ -345,18 +345,16 @@ describe('R-9 菜单分组标题的**前缀** = `── 组名`', () => {
     expect(pySection).toContain('── 组名');
   });
 
-  it('★浏览器/菜单渲染出的分组行以 `── 组名` 起头（TS 侧已经如此）', async () => {
+  it('★浏览器/菜单渲染出的分组行以 `── 组名` 起头（TS 侧已经如此）', () => {
     const items: MenuItem[] = [
       { label: '/help', insert: '/help', desc: 'd', group: 'grp', kind: 'command' },
       { label: '/model', insert: '/model', desc: 'd2', group: 'grp', kind: 'command' },
     ];
     const state: MenuState = { items, selected: 0, open: true, kind: 'command', query: '', span: [0, 0] };
-    const { lastFrame, unmount } = render(
+    const frame = renderLines(
       React.createElement(Menu, { state, t, color: noColor, height: 8, width: 80 }),
-    );
-    await tick();
-    const frame = lastFrame() ?? '';
-    unmount();
+      80,
+    ).text;
     expect(frame).toContain('── grp');
   });
 

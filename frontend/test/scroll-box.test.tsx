@@ -1,25 +1,30 @@
-﻿/**
+/**
  * 滚动视口 —— 主屏靠终端回滚，**备用屏（全屏）只能靠自己这个视口**。
  *
  * 这一组盯三条语义（照 pi `ScrollView` 的口径）：
  *   ① 跟随尾部：新内容到来时贴底；
  *   ② 往上翻即脱离：翻上去后不被新内容拽回底部（这条不做好，翻历史是白翻）；
  *   ③ 翻回底部即恢复跟随；滚动条只在内容溢出时出现。
+ *
+ * ## 迁移记录（S5，换内核）
+ * `ink-testing-library` → `./mount.js`（内核 `renderSync` + 假 stdio）；`Text` 也从上游
+ * `ink`（React 18）换成 `./helpers/kernel.js` 的内核 `Text`。断言一字未改。
+ * ✅ 复查（同日）：`src/**` 已整体换到内核（`from 'ink'` 清零），本文件随全量测试转绿。
  */
 
-import { Text } from 'ink';
-import { render } from 'ink-testing-library';
 import { describe, expect, it } from 'vitest';
 
 import { ScrollBox, clampOffset, windowRange } from '../src/tui/scroll-box.js';
+import { Text } from './helpers/kernel.js';
+import { mountTree, type MountedTree } from './mount.js';
 
 const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 25));
 const noColor = (): string | undefined => undefined;
 
 const items = (n: number): string[] => Array.from({ length: n }, (_, i) => `第${i}行`);
 
-function frameOf(list: string[], height: number, active = true): ReturnType<typeof render> {
-  return render(
+function frameOf(list: string[], height: number, active = true): MountedTree {
+  return mountTree(
     <ScrollBox
       items={list}
       height={height}

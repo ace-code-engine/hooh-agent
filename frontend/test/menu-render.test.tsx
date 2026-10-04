@@ -7,17 +7,22 @@
  * 重复出现、条目跨组交错，而所有测试全绿。
  *
  * 教训：**纯函数测过不等于画出来对**。组件至少要有一处把它渲染出来看一眼。
+ *
+ * ## 迁移记录（S5，换内核）
+ * `ink-testing-library` 的 `render()` / `lastFrame()` → `./helpers/screen.js` 的 `renderLines()`
+ * （内核 `renderToScreen`：同步、纯 buffer）。**断言一个字没改**，只去掉了 `await tick()`
+ * （返回时帧已经画完），并把宽度显式传给 `renderLines`（老工具的 100 列来自假 stdout）。
+ * 拿到的是**纯文本**（无 ANSI），`split('\n')` / `displayWidth` 这类断言比原来更稳。
  */
 
-import { render } from 'ink-testing-library';
 import { describe, expect, it } from 'vitest';
 
 import { Menu } from '../src/components/Menu.js';
 import { buildMenu, type BuildMenuOptions } from '../src/render/menu.js';
+import { renderLines } from './helpers/screen.js';
 
 const t = (k: string): string => k;
 const noColor = (): string | undefined => undefined;
-const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 30));
 
 /** 模拟引擎现在**按分组顺序**下发的命令表（`grouped_commands()` 的序）。 */
 const GROUPED: Record<string, string> = {
@@ -38,30 +43,23 @@ const OPTS: BuildMenuOptions = {
   translate: t,
 };
 
-async function frame(text: string, width = 100): Promise<string> {
+function frame(text: string, width = 100): string {
   const st = buildMenu(text, text.length, OPTS);
-  const { lastFrame, unmount } = render(
-    <Menu state={st} t={t} color={noColor} width={width} />,
-  );
-  await tick();
-  const out = lastFrame() ?? '';
-  unmount();
-  return out;
+  return renderLines(<Menu state={st} t={t} color={noColor} width={width} />, width).text;
 }
 
 const lines = (f: string): string[] =>
   f.split('\n').map((l) => l.replace(/^[│╭╰]\s?/, '').trimEnd());
 
 describe('分组标题', () => {
-  it('每组标题**只出现一次**', async () => {
-    const f = await frame('/');
-    const out = f;
+  it('每组标题**只出现一次**', () => {
+    const out = frame('/');
     expect(out.split('group_session').length - 1).toBe(1);
     expect(out.split('group_model').length - 1).toBe(1);
   });
 
-  it('标题在**该组第一条之前**，同组条目连在一起', async () => {
-    const ls = lines(await frame('/'));
+  it('标题在**该组第一条之前**，同组条目连在一起', () => {
+    const ls = lines(frame('/'));
     const iSession = ls.findIndex((l) => l.includes('group_session'));
     const iModel = ls.findIndex((l) => l.includes('group_model'));
     const iHelp = ls.findIndex((l) => l.includes('/help'));
@@ -74,7 +72,7 @@ describe('分组标题', () => {
     expect(iModel).toBeLessThan(iModelCmd);
   });
 
-  it('**顺序乱了也不出重复标题**（防御：引擎若换了序，界面至少不会一眼就错）', async () => {
+  it('**顺序乱了也不出重复标题**（防御：引擎若换了序，界面至少不会一眼就错）', () => {
     // 故意交错：session → model → session
     const interleaved: BuildMenuOptions = {
       commands: { '/help': 'cmd_help', '/model': 'cmd_model', '/clear': 'cmd_clear' },
@@ -82,32 +80,27 @@ describe('分组标题', () => {
       translate: t,
     };
     const st = buildMenu('/', 1, interleaved);
-    const { lastFrame, unmount } = render(
-      <Menu state={st} t={t} color={noColor} width={100} />,
-    );
-    await tick();
-    const out = lastFrame() ?? '';
-    unmount();
+    const out = renderLines(<Menu state={st} t={t} color={noColor} width={100} />, 100).text;
     expect(out.split('group_session').length - 1).toBe(1);
   });
 });
 
 describe('渲染本身', () => {
-  it('候选与说明都画出来了，选中项有标记', async () => {
-    const out = await frame('/');
+  it('候选与说明都画出来了，选中项有标记', () => {
+    const out = frame('/');
     expect(out).toContain('/help');
     expect(out).toContain('cmd_help');
     expect(out).toContain('▶');
   });
 
-  it('提及菜单五类触发词都在（含 `@session`）', async () => {
-    const out = await frame('@');
+  it('提及菜单五类触发词都在（含 `@session`）', () => {
+    const out = frame('@');
     for (const k of ['@lang', '@skill', '@file', '@folder', '@session']) {
       expect(out, k).toContain(k);
     }
   });
 
-  it('**窄终端下不崩**：长说明被截断，命令名留着', async () => {
+  it('**窄终端下不崩**：长说明被截断，命令名留着', () => {
     // 说明要够长才会触发截断 —— 短说明在窄宽度下也放得下，测不出这件事
     const opts: BuildMenuOptions = {
       commands: { '/help': 'cmd_help' },
@@ -116,17 +109,12 @@ describe('渲染本身', () => {
         k === 'cmd_help' ? '这是一段很长的说明文字，窄终端里放不下必须截断' : k,
     };
     const st = buildMenu('/', 1, opts);
-    const { lastFrame, unmount } = render(
-      <Menu state={st} t={t} color={noColor} width={40} />,
-    );
-    await tick();
-    const out = lastFrame() ?? '';
-    unmount();
+    const out = renderLines(<Menu state={st} t={t} color={noColor} width={40} />, 40).text;
     expect(out).toContain('/help'); // 命令名必须在
     expect(out).toContain('…'); // 说明被截断
   });
 
-  it('选中项滚动到可见范围时**一定画得出来**', async () => {
+  it('选中项滚动到可见范围时**一定画得出来**', () => {
     const many: Record<string, string> = {};
     for (let i = 0; i < 30; i++) many[`/c${i}`] = `cmd_c${i}`;
     const st = buildMenu('/', 1, {
@@ -138,27 +126,20 @@ describe('渲染本身', () => {
     // 用户会以为命令就只有这么多）。窗口由 Menu 组件负责，不在这里砍。
     expect(st.items.length).toBe(30);
     st.selected = 25;
-    const { lastFrame, unmount } = render(
+    const out = renderLines(
       <Menu state={st} t={t} color={noColor} width={100} height={8} />,
-    );
-    await tick();
-    const out = lastFrame() ?? '';
-    unmount();
+      100,
+    ).text;
     const sel = out.split('\n').find((l) => l.includes('▶'));
     expect(sel, '选中项必须有一行带 ▶').toBeTruthy();
   });
 
-  it('**选中项越界时也画得出标记**（夹到末项，而不是一个都不画）', async () => {
+  it('**选中项越界时也画得出标记**（夹到末项，而不是一个都不画）', () => {
     // 这是修过的真 bug：`windowBounds` 内部夹了 selected，而画标记那行比的还是
     // 原始值 —— 越界时窗口绕着末项滚、`▶` 却一个都不画，菜单看着像坏了。
     const st = buildMenu('/', 1, { commands: GROUPED, groupOf: (n) => GROUP_OF[n]!, translate: t });
     st.selected = 999;
-    const { lastFrame, unmount } = render(
-      <Menu state={st} t={t} color={noColor} width={100} />,
-    );
-    await tick();
-    const out = lastFrame() ?? '';
-    unmount();
+    const out = renderLines(<Menu state={st} t={t} color={noColor} width={100} />, 100).text;
     const sel = out.split('\n').find((l) => l.includes('▶'));
     expect(sel, '越界时也该夹到末项并画出来').toBeTruthy();
   });
