@@ -161,6 +161,22 @@ export interface InputProps {
   width?: number;
   /** vim 子集（`/vim` 开）。关着时等同普通行编辑。 */
   vim?: boolean;
+  /**
+   * **挂载时**的起始草稿（不给 = 空）。只在挂载那一次读 —— 不是受控组件，
+   * 之后外部的值变化一概不理会（值仍以内部 `valueRef` 为唯一真相）。
+   *
+   * 它是给"面板整屏换掉主界面 ⇒ `Input` 卸载重挂"那条路用的：全屏草稿编辑器
+   * （`Ctrl+G`）取消时把原文原样放回输入行（`App.tsx` 的 `draftRef`）。
+   * 光标落在末尾。
+   */
+  initialDraft?: string;
+  /**
+   * 草稿每变一次报一次（App 拿它留一份副本）。
+   *
+   * 刻意**不做受控**：输入行每敲一个字都走这里，走 state 会把整个 `App`
+   * 拉着重渲染（转录越长越贵）；不走的话面板一开那份草稿就没了。
+   */
+  onDraftChange?: (text: string) => void;
 }
 
 export function Input({
@@ -174,9 +190,12 @@ export function Input({
   menuOptions,
   width = 80,
   vim = false,
+  initialDraft,
+  onDraftChange,
 }: InputProps): React.ReactElement {
-  const [value, setValue] = useState('');
-  const [cursor, setCursor] = useState(0);
+  const seed = initialDraft ?? '';
+  const [value, setValue] = useState(seed);
+  const [cursor, setCursor] = useState(seed.length);
   const [menu, setMenu] = useState<MenuState>(CLOSED);
   const [queued, setQueued] = useState<string[]>([]);
   const [vimMode, setVimMode] = useState<'normal' | 'insert'>('normal');
@@ -185,15 +204,15 @@ export function Input({
   /** Ctrl+R 历史搜索（`null` = 没开）。 */
   const [search, setSearch] = useState<SearchState | null>(null);
 
-  const valueRef = useRef('');
-  const cursorRef = useRef(0);
+  const valueRef = useRef(seed);
+  const cursorRef = useRef(seed.length);
   const menuRef = useRef<MenuState>(CLOSED);
   const foldRef = useRef<{ lines: number } | null>(null);
   const searchRef = useRef<SearchState | null>(null);
   /** 本会话提交过的行（内存历史）—— 与 `~/.ace_history` 合并成 Ctrl+R 的来源。 */
   const historyRef = useRef<string[]>([]);
   const dismissedFor = useRef<string | null>(null);
-  const vimRef = useRef<VimLineEditor>(new VimLineEditor('', 0, vim));
+  const vimRef = useRef<VimLineEditor>(new VimLineEditor(seed, seed.length, vim));
 
   const recomputeMenu = useCallback(
     (text: string): void => {
@@ -221,9 +240,10 @@ export function Input({
       cursorRef.current = pos;
       setValue(next);
       setCursor(pos);
+      onDraftChange?.(next);
       recomputeMenu(next);
     },
-    [recomputeMenu],
+    [onDraftChange, recomputeMenu],
   );
 
   /** 把 vim 引擎的状态同步回输入行。 */
@@ -234,8 +254,9 @@ export function Input({
     setValue(ed.text);
     setCursor(cursorRef.current);
     setVimMode(ed.mode);
+    onDraftChange?.(ed.text);
     recomputeMenu(ed.text);
-  }, [recomputeMenu]);
+  }, [onDraftChange, recomputeMenu]);
 
   /** 展开折叠（任何真正的编辑动作之前都要先做这一步）。 */
   const unfold = useCallback((): void => {

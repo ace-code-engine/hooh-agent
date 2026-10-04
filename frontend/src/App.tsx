@@ -15,18 +15,24 @@ import {
 } from '../vendor/dsh-ink/kernel.js';
 
 import { ScrollBox } from './tui/scroll-box.js';
-import React, { useCallback, useEffect, useReducer, useState } from 'react';
+import React, { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 
 import { Banner } from './components/Banner.js';
 import { ChoiceDialog, type ChoiceAnswer } from './components/ChoiceDialog.js';
+import { DraftEditor } from './components/draft-editor/DraftEditor.js';
 import { Home } from './components/Home.js';
 import { Input } from './components/Input.js';
 import { PAGE_INSET, PageMargin, Rule, contentColumns } from './components/layout/PageMargin.js';
 import { PermissionDialog } from './components/PermissionDialog.js';
+import { Picker, type PickerItem } from './components/pickers/index.js';
+import { SessionTree } from './components/session-tree/index.js';
+import { SettingsPanel } from './components/settings/SettingsPanel.js';
+import { parseSettings, type SettingSection } from './components/settings/schema.js';
 import { Spinner } from './components/Spinner.js';
 import { StatusLine } from './components/StatusLine.js';
 import { TaskTree } from './components/TaskTree.js';
 import { Transcript } from './components/Transcript.js';
+import { matchesAction } from './keys/registry.js';
 import type {
   AceEvent,
   CommandResult,
@@ -66,6 +72,13 @@ export interface AceClientLike {
   requestTasks(): Promise<TasksData>;
   requestConfig(): Promise<ConfigData>;
   requestSessions(): Promise<SessionsData>;
+  /**
+   * 通用只读请求（新协议面：`sessiontree.request` / `settings.request` …）。
+   *
+   * **可选**：老引擎与测试里的假 client 没有这个方法 —— 面板那边据此显示明确的
+   * "取不到"，而不是空白屏。真 `AceClient` 从第一天就有它。
+   */
+  request?(method: string, params?: Record<string, unknown>): Promise<unknown>;
   interrupt(): Promise<unknown>;
   shutdown(): Promise<void>;
 }
@@ -98,6 +111,47 @@ export type Action =
   | { type: 'event'; ev: AceEvent }
   | { type: 'answered'; decision: GrantDecision }
   | { type: 'choice_answered' };
+
+/**
+ * 前台面板 —— **一次只开一个**，且**不卸载 `App`**：转录 / 配置 / 会话这些状态住在
+ * `App`（全屏时住在 `Root`）身上，面板只是把画面换掉。`/fullscreen` 那次"重挂清空转录"
+ * 的教训就在这里：状态不在面板里，关掉面板它就是原样。
+ */
+type Panel =
+  /** 会话树（`/tree` 的界面版）；`loading` 与"确实没有"分开显示。 */
+  | { kind: 'tree'; data: unknown; loading: boolean }
+  /** 设置面板（`/config`）；`sections` 由 `parseSettings` 兜过缺字段。 */
+  | { kind: 'settings'; sections: readonly SettingSection[] }
+  /** 选择器：`command` 是**既有命令**，选中项拼在它后面发回去。 */
+  | { kind: 'pick'; command: string; titleKey: string; items: readonly PickerItem[] }
+  /** 全屏草稿编辑器（键位 = 注册表的 `external_editor`）。 */
+  | { kind: 'draft' };
+
+/**
+ * 裸命令 → 取值闭集所在的槽位（`config.request.option_sets`，CAP-02）与标题 i18n 键。
+ *
+ * 值只有 ace 已有的那四条命令，**没有新命令**；标题键也全是既有的（`set_*`）。
+ */
+const OPTION_PICKERS: Readonly<Record<string, { slot: string; titleKey: string }>> = {
+  '/permission': { slot: 'permission', titleKey: 'set_permission' },
+  '/sandbox': { slot: 'sandbox', titleKey: 'set_sandbox' },
+  '/net': { slot: 'net', titleKey: 'set_net' },
+  '/effort': { slot: 'effort', titleKey: 'set_effort' },
+};
+
+/**
+ * 会话行的协议**超集**（`§3.7a` 的新字段）。老引擎不发这些键 ⇒ 全部可选，
+ * 缺了就退回 `label` / `path`，不猜。
+ */
+type SessionWire = SessionRow & {
+  id?: string;
+  mtime_iso?: string;
+  tools?: number;
+  compactions?: number;
+  security_denied?: number;
+  first_user?: string;
+  has_prompt?: boolean;
+};
 
 export function reducer(state: State, action: Action): State {
   if (action.type === 'event') return applyEvent(state, action.ev);
@@ -139,7 +193,25 @@ export function App({ client, t, colorOf, initialMessage, menuOptions, fullscree
    * 前端又没法在 `useMemo` 里做异步（那正是 `menuWithState` 需要的），
    * 所以用"提前取好、随状态变化重建"这条路。会话列表在一次交互里基本不变。
    */
-  const [sessions, setSessions] = useState<SessionRow[]>([]);
+  const [sessions, setSessions] = useState<SessionWire[]>([]);
+  /** 前台面板（见 `Panel`）：`null` = 主界面。 */
+  const [panel, setPanel] = useState<Panel | null>(null);
+  /**
+   * 输入行里**未提交**的那份草稿，App 自己留一份副本。
+   *
+   * 为什么必须有：面板是**整屏换掉**主界面的（见 `panelView`），一开面板 `Input` 就卸载
+   * ⇒ 它内部的草稿与光标当场蒸发。于是 `Ctrl+G` 打开草稿编辑器时要把原文带过去
+   * （`value`），`Esc` 取消时再原样放回输入行（`Input` 的 `initialDraft`）——
+   * 用户敲了一半的内容不该因为看了眼全屏编辑器就没了。
+   *
+   * 用 **ref 不用 state**：输入行每敲一个字都会来报一次，state 会把整个 `App`
+   * （转录越长越贵）拉着重渲染；ref 只记值、不触发渲染。
+   */
+  const draftRef = useRef('');
+  /** `Input` 的报值回调：只记不改（必须是稳定引用，否则 `Input` 的编辑回调每帧重建）。 */
+  const noteDraft = useCallback((text: string): void => {
+    draftRef.current = text;
+  }, []);
   const { exit } = useApp();
   // 宽度/高度走**接口 B**：新内核没有 `useStdout()`
   // （`hooks/use-stdout.*` 整块删除），终端尺寸只有一个来源 —— 内核 `<App>` 在根部提供的
@@ -250,15 +322,188 @@ export function App({ client, t, colorOf, initialMessage, menuOptions, fullscree
     };
   }, [client]);
 
+  /** 面板取不到数据时的报错（**不静默**：面板会画明确态，错误另记一条）。 */
+  const failPanel = useCallback((what: string, e: unknown): void => {
+    const msg = e instanceof Error ? e.message : String(e);
+    setErrors((prev) => [...prev, `${what}：${msg}`].slice(-5));
+  }, []);
+
+  /**
+   * 发一条**只读面板请求**（`sessiontree` / `settings`）。
+   *
+   * 新协议方法在 `AceClientLike` 上是可选的（老引擎 / 假 client 没有 `request`）⇒
+   * 这里当场拒掉，调用方落"取不到"的明确态。**不猜、不空白**。
+   */
+  const panelRequest = useCallback(
+    (method: string, params: Record<string, unknown> = {}): Promise<unknown> => {
+      const send = client.request;
+      if (typeof send !== 'function') {
+        return Promise.reject(new Error(`client has no request() (${method} unavailable)`));
+      }
+      return send.call(client, method, params);
+    },
+    [client],
+  );
+
+  /**
+   * 发一条引擎命令（斜杠命令、面板产出的那一行）。**永不 reject** —— 面板的
+   * `onSelect` / `onWrite` 直接 `.then()` 接着刷新，没有人再挂 catch。
+   */
+  const runCommand = useCallback(
+    (line: string): Promise<void> =>
+      client.command(line).then(
+        (res: unknown) => {
+          // 命令可能改了界面侧开关（`/vim` 最典型）。执行完重读一次 ——
+          // 不重读的话用户敲了 `/vim` 会看到「提示说开了，但按键没变」。
+          refreshConfig();
+          // **`keep_going: false` = 引擎说「这一行之后我就结束了」**（`/exit` 就是）。
+          // 只有**显式 false** 才退 —— 老引擎不带该字段时不许误退（原注释，语义未动）。
+          if ((res as { keep_going?: boolean } | null)?.keep_going === false) exit();
+        },
+        (e: unknown) => {
+          const msg = e instanceof Error ? e.message : String(e);
+          setErrors((prev) => [...prev, msg].slice(-5));
+          dispatch({
+            type: 'event',
+            ev: { type: 'notice', ts: Date.now() / 1000, text: `✗ ${msg}` },
+          });
+        },
+      ),
+    [client, exit, refreshConfig],
+  );
+
+  /** 会话树：`/tree` 的界面版。切分支仍发引擎既有的 `/tree <编号>`，发完**重取**（有回报）。 */
+  const reloadTree = useCallback((): void => {
+    panelRequest('sessiontree.request', {})
+      .then((data: unknown) => {
+        setPanel((cur) => (cur?.kind === 'tree' ? { kind: 'tree', data, loading: false } : cur));
+      })
+      .catch((e: unknown) => {
+        // 取不到就**退回主界面并把原因写在错误区**：面板里没有地方挂错误，留在面板里
+        // 只会是一屏看不懂的空态（老引擎没有 `sessiontree.request` 走的就是这条）。
+        failPanel(`会话树取不到`, e);
+        setPanel((cur) => (cur?.kind === 'tree' ? null : cur));
+      });
+  }, [failPanel, panelRequest]);
+
+  const openTree = useCallback((): void => {
+    setPanel({ kind: 'tree', data: null, loading: true });
+    reloadTree();
+  }, [reloadTree]);
+
+  /** 设置面板：`/config` 的界面版。写通道 = 引擎发的 `write_cmd` 模板（发 `command.exec`）。 */
+  const reloadSettings = useCallback((): void => {
+    panelRequest('settings.request', {})
+      .then((resp: unknown) => {
+        const sections = parseSettings(resp);
+        setPanel((cur) => (cur?.kind === 'settings' ? { kind: 'settings', sections } : cur));
+      })
+      .catch((e: unknown) => {
+        failPanel(`设置项取不到`, e);
+        setPanel((cur) => (cur?.kind === 'settings' ? null : cur));
+      });
+  }, [failPanel, panelRequest]);
+
+  const openSettings = useCallback((): void => {
+    setPanel({ kind: 'settings', sections: [] });
+    reloadSettings();
+  }, [reloadSettings]);
+
+  /**
+   * 会话选择器：候选就是 `@session` 那条路取的**同一份** `sessions.request`，
+   * 所以编号与引擎的 `/resume <编号>`（`pick_by_index`，1 起）同序。
+   */
+  const openResume = useCallback((): boolean => {
+    if (sessions.length === 0) return false; // 没得挑就别装样子：照旧把命令发给引擎
+    setPanel({
+      kind: 'pick',
+      command: '/resume',
+      titleKey: 'sessions_pick',
+      items: sessions.map((s, i) => ({
+        key: String(i + 1),
+        label: `${i + 1}. ${s.label || s.id || s.path}`,
+        description: [s.when, t('sessions_turns', { n: s.turns })].filter((x) => x !== '').join(' · '),
+      })),
+    });
+    return true;
+  }, [sessions, t]);
+
+  /**
+   * 闭集选择器（权限 / 沙箱 / 联网 / 强度）：候选来自引擎发的 `option_sets`（CAP-02）。
+   * **老引擎没有这个字段就不装样子** —— 返回 false，命令照旧走引擎自己那条路。
+   */
+  const openOptionPicker = useCallback(
+    (command: string, spec: { slot: string; titleKey: string }): boolean => {
+      const sets = config.option_sets;
+      const rows = typeof sets === 'object' && sets !== null ? (sets as Record<string, unknown>)[spec.slot] : undefined;
+      if (!Array.isArray(rows)) return false;
+      const items: PickerItem[] = [];
+      for (const row of rows) {
+        if (!Array.isArray(row)) continue;
+        const value = String(row[0] ?? '');
+        if (value === '') continue;
+        const labelKey = String(row[1] ?? '');
+        items.push({ key: value, label: labelKey === '' ? value : t(labelKey) });
+      }
+      if (items.length === 0) return false;
+      setPanel({ kind: 'pick', command, titleKey: spec.titleKey, items });
+      return true;
+    },
+    [config, t],
+  );
+
+  /**
+   * 裸命令 → 前台面板。**复用 ace 既有的命令入口，不发明新命令**：
+   *
+   * | 命令 | 面板 | 数据 |
+   * |---|---|---|
+   * | `/tree` | 会话树 | `sessiontree.request` |
+   * | `/config` | 设置面板 | `settings.request` |
+   * | `/resume` | 选择器 | `sessions.request` |
+   * | `/permission` `/sandbox` `/net` `/effort` | 闭集选择器 | `config.request.option_sets` |
+   *
+   * **带参数的一律返回 false**（`/tree 1`、`/permission write`、`/fullscreen on` 走引擎）：
+   * 面板自己发出去的命令也从这条闸门过，闸门必须窄。
+   */
+  const openPanelFor = useCallback(
+    (line: string): boolean => {
+      const parts = line.trim().split(/\s+/).filter((p) => p !== '');
+      if (parts.length !== 1) return false;
+      const cmd = parts[0]!;
+      if (cmd === '/tree') {
+        openTree();
+        return true;
+      }
+      if (cmd === '/config') {
+        openSettings();
+        return true;
+      }
+      if (cmd === '/resume') return openResume();
+      const spec = OPTION_PICKERS[cmd];
+      return spec === undefined ? false : openOptionPicker(cmd, spec);
+    },
+    [openOptionPicker, openResume, openSettings, openTree],
+  );
+
+  const closePanel = useCallback((): void => setPanel(null), []);
+
   useInput((input, key) => {
-    // Ctrl+C：有空输入先清空、再按才退出 —— 与 Python 侧两段式一致。
+    // Ctrl+C：**保命键**（注册表 `RESERVED_BINDINGS` 里 `ctrl+c` = interrupt / lifeline）。
+    // 面板开着也认它 —— 任何画面下都得能退出。两段式语义未动。
     if (key.ctrl && input === 'c') {
       void client.shutdown().finally(() => exit());
       return;
     }
-    // Ctrl+T：任务树开关（与 Python 侧键位一致）。**打开时才去取** ——
-    // 它每次都要问引擎，常驻拉是白费；关掉时不取，省一次往返。
-    if (key.ctrl && input === 't') {
+    // 面板开着时 App 不抢别的键（面板自己吃）—— 否则 Ctrl+T 会在设置面板背后开任务树。
+    if (panel !== null) return;
+    // 全屏草稿编辑器：键位走注册表的 `external_editor`（默认 Ctrl+G；重映射后这里跟着走）。
+    if (matchesAction('external_editor', input, key)) {
+      setPanel({ kind: 'draft' });
+      return;
+    }
+    // 任务树：键位走注册表的 `tasks`（默认 Ctrl+T，与 Python 侧键位一致）。
+    // **打开时才去取** —— 它每次都要问引擎，常驻拉是白费；关掉时不取，省一次往返。
+    if (matchesAction('tasks', input, key)) {
       setShowTasks((on) => {
         const next = !on;
         if (next) {
@@ -280,23 +525,12 @@ export function App({ client, t, colorOf, initialMessage, menuOptions, fullscree
       dispatch({ type: 'event', ev: { type: 'user_message', ts: Date.now() / 1000, text: line } });
       // 以 `/` 开头的是引擎侧的命令（`_process_line` 表驱动），走 `command.exec`；
       // 其余才是发给模型的话。分错通道的症状是"/model 被当成聊天内容发给了模型"。
-      const isCommand = line.startsWith('/');
-      const p = isCommand ? client.command(line) : client.send(line);
-      if (isCommand) {
-        void p
-          .then((res: unknown) => {
-            // 命令可能改了界面侧开关（`/vim` 最典型）。执行完重读一次 ——
-            // 不重读的话用户敲了 `/vim` 会看到「提示说开了，但按键没变」。
-            refreshConfig();
-            // **`keep_going: false` = 引擎说「这一行之后我就结束了」**（`/exit` 就是）。
-            // 不消费它的后果：输入框被禁用、窗口还在，用户只能 Ctrl+C 才退得出去
-            // （实测投诉）。只有**显式 false** 才退 —— 老引擎不带该字段时不许误退。
-            const keep = (res as { keep_going?: boolean } | null)?.keep_going;
-            if (keep === false) exit();
-          })
-          .catch(() => undefined);
+      if (line.startsWith('/')) {
+        // 裸命令可能对应一件**前台界面**（见 `openPanelFor`）：那时不进引擎，直接开面板。
+        if (!openPanelFor(line)) void runCommand(line);
+        return true;
       }
-      p.catch((e: unknown) => {
+      client.send(line).catch((e: unknown) => {
         const msg = e instanceof Error ? e.message : String(e);
         setErrors((prev) => [...prev, msg].slice(-5));
         dispatch({
@@ -306,7 +540,7 @@ export function App({ client, t, colorOf, initialMessage, menuOptions, fullscree
       });
       return true;
     },
-    [client],
+    [client, openPanelFor, runCommand],
   );
 
   const handleAnswer = useCallback(
@@ -362,6 +596,99 @@ export function App({ client, t, colorOf, initialMessage, menuOptions, fullscree
 
   const perm = state.pendingPermission;
   const choice = state.pendingChoice;
+
+  /**
+   * 面板画面 —— **整屏换掉主界面**（草图编辑器本来就要独占屏幕；树/设置/选择器同样）。
+   * `App` 不卸载 ⇒ 转录、配置、会话、任务树全都原样留着；面板自己的数据每次打开重取。
+   * 每件面板都有**明确的出口**：`Esc`（草稿编辑器另加 `Ctrl+S` = 采纳）。
+   */
+  const panelView = (): React.ReactElement | null => {
+    if (panel === null) return null;
+    if (panel.kind === 'tree') {
+      return (
+        <SessionTree
+          data={panel.data}
+          loading={panel.loading}
+          t={t}
+          color={colorOf}
+          onSelect={(_node, line) => {
+            // 切分支 = 发引擎那条命令，然后**重取**（有回报，不是盲发）。
+            void runCommand(line).then(() => reloadTree());
+          }}
+          onClose={closePanel}
+        />
+      );
+    }
+    if (panel.kind === 'settings') {
+      return (
+        <SettingsPanel
+          sections={panel.sections}
+          t={t}
+          color={colorOf}
+          onClose={closePanel}
+          onWrite={(line) => {
+            // 写通道 = 面板产出的命令行（`command.exec`），改完回读一次（值不住在前端）。
+            void runCommand(line).then(() => reloadSettings());
+          }}
+        />
+      );
+    }
+    if (panel.kind === 'pick') {
+      return (
+        <Picker
+          title={t(panel.titleKey)}
+          items={panel.items}
+          t={t}
+          color={colorOf}
+          onCancel={closePanel}
+          onConfirm={(result) => {
+            const key = result.keys[0];
+            closePanel();
+            // 既有命令 + 选中的取值（`/permission write`、`/resume 2` …）。
+            if (key !== undefined) void runCommand(`${panel.command} ${key}`);
+          }}
+        />
+      );
+    }
+    return (
+      <DraftEditor
+        // 输入行那份未提交的草稿**带进来**（`draftRef` 由 `Input.onDraftChange` 实时填）。
+        // 之前这里是写死的 `""`：哪怕输入行里躺着半句话，进去也是一张白纸。
+        value={draftRef.current}
+        t={t}
+        color={colorOf}
+        width={content}
+        rows={rows}
+        onConfirm={(text) => {
+          // `Ctrl+S` = 采纳：走与输入行回车**同一条**提交路径（命令/消息分派也在里面）。
+          const line = text.trim();
+          // 空草稿 = 什么都没采纳 ⇒ 原文原样留着（输入行重挂时按 `draftRef` 恢复）；
+          // 有内容才是"提交"，提交后输入行清空 —— 与 `Input.submit` 的回车口径一致。
+          if (line !== '') draftRef.current = '';
+          closePanel();
+          if (line !== '') handleSubmit(line);
+        }}
+        // `Esc` = 取消：**不回填动作** —— `draftRef` 里就是进去之前那份，
+        // `Input` 重挂时按它恢复，所以半截草稿一个字节都不丢。
+        onCancel={closePanel}
+      />
+    );
+  };
+
+  /**
+   * 有面板就只画面板（状态还在 `App` 里，见 `Panel` 的说明）。
+   *
+   * ⚠️ **审批 / 选择框优先**：面板开着时引擎可能弹审批（跑完一个工具就要问），那一刻
+   * 必须让位给弹框 —— 否则用户看着设置面板，而引擎在**等他答一个看不见的问题**。
+   * 面板状态留在 `App` 里，答完自动回来（代价：面板内的焦点回到第一行）。
+   */
+  if (panel !== null && !perm && !choice) {
+    return (
+      <PageMargin width={cols}>
+        <Box flexDirection="column">{panelView()}</Box>
+      </PageMargin>
+    );
+  }
 
   // **主屏（非全屏）不需要任何切分**：新内核删掉了 `<Static>`（"写一次就不再重画"的机制
   // 不存在了），它自己走的是**主屏 inline + 终端原生 scrollback** —— 全部条目一次渲染进
@@ -506,6 +833,9 @@ export function App({ client, t, colorOf, initialMessage, menuOptions, fullscree
           onSubmit={handleSubmit}
           width={content}
           vim={vim}
+          // 面板关掉时 `Input` 是**重挂**的：把进面板前那份草稿还给它（无损往返）。
+          initialDraft={draftRef.current}
+          onDraftChange={noteDraft}
           {...(menuWithState ? { menuOptions: menuWithState } : {})}
           onInterrupt={() => {
             client.interrupt().catch(() => {
