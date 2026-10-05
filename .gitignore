@@ -13,6 +13,7 @@ __pycache__/
 .poc_reports/
 .sandbox_tmp/
 .test_tmp/
+.vitest-tmp/
 .ace_shots/
 .ace_images/
 .ace_goals.json

@@ -50,7 +50,6 @@ import {
   applyEvent,
   applyPermissionAnswer,
   initialState,
-  type Item,
   type State,
 } from './state/store.js';
 
@@ -703,28 +702,16 @@ export function App({ client, t, colorOf, initialMessage, menuOptions, fullscree
   // 帧预算不再与转录长度无关 —— 内核用 node-cache 缓存在树里没变的节点的测量值来兜。
   // 长会话若真卡，先看内核的 `Slow render` 调试日志，再谈是不是要另想办法。
   //
-  // 切分只剩下**全屏（备用屏）**一个用处：备用屏里终端没有回滚，历史只能自己管，
-  // 所以定型的前缀进 `<ScrollBox>`，**仍在变的尾部钉在它下面**（这样用户往上翻历史时，
-  // 正在流的那条 / 正在跑的工具卡依然看得见）。全屏那条路与滚动视口的去重归 **S3**。
-  const mutable = (it: Item): boolean =>
-    (it.kind === 'assistant' && it.streaming)
-    || (it.kind === 'tool' && it.status === 'running')
-    || (it.kind === 'permission' && it.answered === undefined);
-  let cut = state.items.length;
-  while (cut > 0 && mutable(state.items[cut - 1]!)) cut--;
-  const frozen = state.items.slice(0, cut);
-  const live = state.items.slice(cut);
-
+  // 全屏（备用屏）底部区：直接把**全部条目**交给虚拟化的 <ScrollBox>，
+  // 不再单独渲染一段 "仍在变的 live 尾部"。原来的写法里 live 是 <ScrollBox> 之后的兄弟节点、
+  // 没有高度约束，live 一长就把状态行/输入行整排挤出可视区（"输入框没了"），而且每帧
+  // live 高度变化会触发整屏重排（"频闪"）。现在 ScrollBox 高度恒定（bodyHeight）、贴底跟随，
+  // 输入框恒在屏幕最底；备用屏没有终端回滚，历史全靠它自己的视口管。
+  // （备用屏下 <AlternateScreen> 对 "定高盒子 + flexGrow 子节点" 的组合会重复渲染，
+  // 所以这里刻意不引入那种盒子 —— 扁平结构与最初能过测试的那版一致。）
   return (
-    // 版式几何：整棵界面走**同一套**页边距（内容内缩 2 列 / 1 行），转录与底部区
-    // 因此共用一个内容列宽。`width={cols}` 传的是**终端**列数 —— `PageMargin`
-    // 自己扣掉内缩再往下发（测试里没有 Provider 时它落到 80，与 `cols` 同一档兜底）。
     <PageMargin width={cols}>
       <Box flexDirection="column">
-        {/* 首屏：横幅（logo + 身份）→ 主页分区。**只在还没有消息时出现** ——
-            打字之后整块自然滚上去，与"聊天记录是主线、首屏只是开场"一致。
-            原来的常驻头部（`ACE /path`）去掉了：那些信息现在分别在
-            横幅（首屏）和状态行（常驻）里，各出现一次就够。 */}
         {state.items.length === 0 ? (
           <Banner
             version={config.version}
@@ -740,28 +727,21 @@ export function App({ client, t, colorOf, initialMessage, menuOptions, fullscree
           <Home home={home} t={t} color={colorOf} width={content} />
         ) : null}
 
-        {/* 转录 —— 两条路：
-            主屏（默认）：**全部条目 inline 一次渲染**，滚出视口的行由内核帧引擎推进终端
-              **真实回滚缓冲**（往上翻靠终端），只有还在视口里的那几行参与 diff/重画；
-            备用屏（全屏）：终端没有回滚缓冲，交给我们自己的 `<ScrollBox>`
-              （PgUp/PgDn/↑↓/g/G 翻，滚动条自动），仍会变的那几条钉在它下面。 */}
         {fullscreen ? (
+          // 全屏：全部条目进 <ScrollBox>（虚拟化滚动视口，PgUp/PgDn/↑↓/g/G 翻、贴底跟随）。
           <ScrollBox
-            items={frozen}
+            items={state.items}
             height={bodyHeight}
             active={!perm && !choice}
             color={colorOf}
             hint={t('scroll_hint')}
             renderItem={(it) => <Transcript key={it.id} items={[it]} t={t} color={colorOf} />}
           />
-        ) : null}
+        ) : (
+          // 主屏：整段转录 inline 一次渲染，历史交给终端回滚缓冲。
+          <Transcript items={state.items} t={t} color={colorOf} />
+        )}
 
-        {/* 动态帧：主屏是**整段转录**（历史由终端回滚缓冲接住）；全屏只剩"仍在变的尾部"
-            + 底部区（对话框/任务树/状态行/输入框）。 */}
-        <Transcript items={fullscreen ? live : state.items} t={t} color={colorOf} />
-
-        {/* 转录与底部区之间的**版面级**结构线：出血直通终端左右边缘（正文仍留在
-            内容列里）。转录**内部**那条轮次线不出血 —— 见 `Transcript.tsx` 的说明。 */}
         <Rule color={colorOf} />
 
         {perm ? (
@@ -809,8 +789,6 @@ export function App({ client, t, colorOf, initialMessage, menuOptions, fullscree
           </Box>
         ) : null}
 
-        {/* 等待指示器：只在"确实在跑、且没有弹框占着屏幕"时出现。
-            有授权框时不该再转 —— 那会让人以为"它还在自己干"，而事实是**它在等你**。 */}
         {state.busy && !perm ? (
           <Box marginBottom={1}>
             <Spinner
@@ -833,7 +811,6 @@ export function App({ client, t, colorOf, initialMessage, menuOptions, fullscree
           onSubmit={handleSubmit}
           width={content}
           vim={vim}
-          // 面板关掉时 `Input` 是**重挂**的：把进面板前那份草稿还给它（无损往返）。
           initialDraft={draftRef.current}
           onDraftChange={noteDraft}
           {...(menuWithState ? { menuOptions: menuWithState } : {})}
