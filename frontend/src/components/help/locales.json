@@ -1,0 +1,32 @@
+{
+  "zh": {
+    "help_ov_title": "帮助 · 键位与命令总览",
+    "help_ov_col_keys": "动作",
+    "help_ov_col_reserved": "保留键（不许改）",
+    "help_ov_col_commands": "命令",
+    "help_ov_reserved_mark": "（保护的是 {action}）",
+    "help_ov_no_commands": "暂无命令（引擎还没回命令表）",
+    "help_ov_close_hint": "Esc / q 关闭",
+    "help_ov_scroll_hint": "↑↓ 选中 · PgUp/PgDn 翻页"
+  },
+  "en": {
+    "help_ov_title": "Help — keys and commands",
+    "help_ov_col_keys": "Actions",
+    "help_ov_col_reserved": "Reserved keys (locked)",
+    "help_ov_col_commands": "Commands",
+    "help_ov_reserved_mark": "(guards {action})",
+    "help_ov_no_commands": "No commands (engine hasn't answered yet)",
+    "help_ov_close_hint": "Esc / q to close",
+    "help_ov_scroll_hint": "↑↓ select · PgUp/PgDn page"
+  },
+  "ja": {
+    "help_ov_title": "ヘルプ — キーとコマンド一覧",
+    "help_ov_col_keys": "アクション",
+    "help_ov_col_reserved": "予約キー（変更不可）",
+    "help_ov_col_commands": "コマンド",
+    "help_ov_reserved_mark": "（{action} を守る）",
+    "help_ov_no_commands": "コマンド無し（エンジンが未応答）",
+    "help_ov_close_hint": "Esc / q で閉じる",
+    "help_ov_scroll_hint": "↑↓ 選択 · PgUp/PgDn ページ送り"
+  }
+}
