@@ -96,7 +96,10 @@ export function buildSegments(meta: Meta, busy: boolean, t: StatusLineProps['t']
   if (meta.mock) segs.push({ name: 'mock', text: 'mock', priority: 3, token: 'warn' });
   if (meta.model) segs.push({ name: 'model', text: meta.model, priority: 10 });
   if (meta.sandbox && meta.sandbox !== 'off') {
-    segs.push({ name: 'sandbox', text: t('footer_sandbox', { mode: meta.sandbox }), priority: 11, token: 'info' });
+    // 沙箱状态是**元信息**（"我现在跑在哪种隔离里"），不是状态标记，用灰阶 `dim`
+    // 而非 `info` 的青 —— 规范 §4 明令"info 的青是装饰，降为灰"。状态行整行只剩
+    // 权限三色（产品契约）与 mock/忙碌这类语义色，不再掺第二个装饰色。
+    segs.push({ name: 'sandbox', text: t('footer_sandbox', { mode: meta.sandbox }), priority: 11, token: 'dim' });
   }
   if (meta.tools > 0) {
     segs.push({ name: 'tools', text: t('footer_tools', { n: meta.tools }), priority: 20, token: 'dim' });

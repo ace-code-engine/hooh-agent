@@ -61,7 +61,10 @@ export function Banner({
     bold: true,
   });
   const env = [model, permission].filter(Boolean).join(' · ');
-  if (env) right.push({ text: env, token: 'info' });
+  // 环境行（模型 · 权限）是**元信息**，用灰阶 `dim` 而不是 `info` 的青 —— 规范 §4
+  // 明令"info 的青是装饰，降为灰"。整屏只剩 logo（品牌青）与 folder（强调色）两个彩色，
+  // 其余全是灰阶，层级更干净。
+  if (env) right.push({ text: env, token: 'dim' });
   if (folder) right.push({ text: folder, token: 'accent' });
 
   const height = Math.max(ACE_LOGO.length, right.length);

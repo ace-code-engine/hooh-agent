@@ -34,8 +34,11 @@ function Spans({ spans, color }: { spans: Span[]; color: MarkdownProps['color'] 
     <>
       {spans.map((s, i) => {
         if (s.code) {
+          // 行内代码是**内容**不是状态标记，按规范 §4 "info 的青是装饰，降为灰"
+          // 用灰阶 `dim` 而非 `info` 的青，避免正文里冒出一个装饰色。
+          // （瑞士风格里强调靠字重/灰阶，不靠第二个彩色。）
           return (
-            <Text key={i} color={color('info')}>
+            <Text key={i} color={color('dim')}>
               {s.text}
             </Text>
           );
