@@ -18,6 +18,7 @@ import { Box, Text } from '../../vendor/dsh-ink/kernel.js';
 import React from 'react';
 
 import type { HomeData, HomeItem, HomeSection } from '../protocol/types.js';
+import { displayWidth } from '../render/text.js';
 import { permissionToken } from './StatusLine.js';
 
 export interface HomeProps {
@@ -51,25 +52,33 @@ function ItemRow({
   const hint = item.hint_key ? t(item.hint_key) : '';
   const value = item.value ? t(item.value) || item.value : '';
 
-  // 窄终端下先丢括注（"怎么改"），保住标签与当前值 —— 那两样是每次都要看的。
-  const budget = Math.max(0, width - label.length - value.length - 6);
-  const showHint = hint.length > 0 && hint.length <= budget;
+  // **瑞士风格 §2「定宽右对齐列」是核心**：值右对齐到内容右缘，整列对齐、便于扫读。
+  // 只在够宽、且标签与值之间容得下留白时启用；否则退化成左对齐（标签 值），
+  // 窄终端里强行右对齐只会让值飘到右缘、和标签挤成一团。宽度按**显示宽度**算（CJK 双宽）。
+  const indentW = 2;
+  const labelW = displayWidth(label);
+  const valueW = value ? displayWidth(value) : 0;
+  const valueStart = width - valueW; // 值左缘（值右缘贴内容右缘）
+  const labelEnd = indentW + labelW;
+  const hintClean = hint.length ? `(${hint})` : '';
+  const hintW = hint.length ? displayWidth(hintClean) : 0;
+  const roomy = width >= 40 && valueW > 0 && valueStart - labelEnd >= 3;
+  const hintStart = valueStart - 1 - hintW; // 括注与值之间留 1 格
+  const showHint = hint.length > 0 && roomy && hintStart - labelEnd >= 1;
+  const gap = Math.max(1, (showHint ? hintStart : valueStart) - labelEnd);
 
   return (
     <Text color={item.enabled ? color('text') : color('dim')}>
       {'  '}
       {label}
+      {' '.repeat(gap)}
+      {showHint ? (
+        <Text color={color('dim')}>{hintClean}</Text>
+      ) : null}
       {value ? (
         <Text color={color(valueToken(item))}>
-          {'  '}
+          {showHint ? ' ' : ''}
           {value}
-        </Text>
-      ) : null}
-      {showHint ? (
-        <Text color={color('dim')}>
-          {'  ('}
-          {hint}
-          {')'}
         </Text>
       ) : null}
     </Text>
