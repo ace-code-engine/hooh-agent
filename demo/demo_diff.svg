@@ -101,12 +101,12 @@ text{white-space:pre;dominant-baseline:middle}
 <text class="r14" x="22" y="388" xml:space="preserve"><tspan fill="#d7dce5">◐ ∴ 思考中 ○ 0s   ◈</tspan></text>
 <text class="r15" x="22" y="412" xml:space="preserve">&#160;</text>
 <text class="r16" x="22" y="436" xml:space="preserve"><tspan fill="#d7dce5">▅ 正在执行 demo_notes.md 0s</tspan></text>
-<text class="r17" x="22" y="460" xml:space="preserve"><tspan fill="#5fd68a">  + file_write </tspan><tspan fill="#5fd68a">✓</tspan><tspan fill="#d7dce5"> [SUCCESS]</tspan></text>
+<text class="r17" x="22" y="460" xml:space="preserve"><tspan fill="#5fd68a">  + file_write </tspan><tspan fill="#5fd68a">✓</tspan><tspan fill="#d7dce5"> [SUCCESS] · 0.00s</tspan></text>
 <text class="r18" x="22" y="484" xml:space="preserve">&#160;</text>
 <text class="r19" x="22" y="508" xml:space="preserve"><tspan fill="#d7dce5">◐ ∴ 思考中 ○ 0s   ◈</tspan></text>
 <text class="r20" x="22" y="532" xml:space="preserve">&#160;</text>
 <text class="r21" x="22" y="556" xml:space="preserve"><tspan fill="#d7dce5">▅ ⚙ 2 个工具 · 1 完成 · 1 待跑 0s</tspan></text>
-<text class="r22" x="22" y="580" xml:space="preserve"><tspan fill="#5fd68a">  % str_replace </tspan><tspan fill="#5fd68a">✓</tspan><tspan fill="#d7dce5"> [SUCCESS] · 0.00s · +1 -0</tspan></text>
+<text class="r22" x="22" y="580" xml:space="preserve"><tspan fill="#5fd68a">  % str_replace </tspan><tspan fill="#5fd68a">✓</tspan><tspan fill="#d7dce5"> [SUCCESS] · 0.01s · +1 -0</tspan></text>
 <text class="r23" x="22" y="604" xml:space="preserve"><tspan fill="#7d879c">    已替换 1 处（匹配方式: exact）</tspan></text>
 <text class="r24" x="22" y="628" xml:space="preserve"><tspan fill="#7d879c">    --- a/demo_notes.md</tspan></text>
 <text class="r25" x="22" y="652" xml:space="preserve"><tspan fill="#7d879c">    +++ b/demo_notes.md</tspan></text>
@@ -119,7 +119,7 @@ text{white-space:pre;dominant-baseline:middle}
 <text class="r32" x="22" y="820" xml:space="preserve"><tspan fill="#d7dce5">改好了：只加了一行，卡片里的 + 行就是新增内容。</tspan></text>
 <text class="r33" x="22" y="844" xml:space="preserve"><tspan fill="#d7dce5">已替换 1 处（匹配方式: exact）</tspan></text>
 <text class="r34" x="22" y="868" xml:space="preserve">&#160;</text>
-<text class="r35" x="22" y="892" xml:space="preserve"><tspan fill="#7d879c">⚙   2 次工具调用 · 0.00s · file_write ✓ · str_replace ✓</tspan></text>
-<text class="r36" x="22" y="916" xml:space="preserve"><tspan fill="#5fd68a">  ✓ 完成（3 轮, 1.0s）</tspan></text>
+<text class="r35" x="22" y="892" xml:space="preserve"><tspan fill="#7d879c">⚙   2 次工具调用 · 0.02s · file_write ✓ · str_replace ✓</tspan></text>
+<text class="r36" x="22" y="916" xml:space="preserve"><tspan fill="#5fd68a">  ✓ 完成（3 轮, 1.6s）</tspan></text>
 <text class="r37" x="22" y="940" xml:space="preserve"><tspan fill="#7d879c">  再见，HooH 已退出。</tspan></text>
 </svg>

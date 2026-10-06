@@ -9,7 +9,7 @@ import {
 import { displayWidth } from "../src/render/text.js";
 import { renderLines } from "./helpers/screen.js";
 import { tick } from "./fake-engine.js";
-import { mountTree } from "./mount.js";
+import { mountTree, waitFor } from "./mount.js";
 
 const t = (k: string) => (STREAM_LOCALES.zh as Record<string, string>)[k] ?? k;
 
@@ -81,8 +81,9 @@ describe("streaming/", () => {
     await tick();
     expect(q).toContain("ab");
     tree.stdin.write("\u001b");
-    await tick();
-    await tick();
+    // 单个 ESC 在内核里先被判成"不完整转义序列"，延迟 NORMAL_TIMEOUT(50ms) 才 flush 成
+    // Escape 键 —— 固定两次 `tick()`（40ms）等不到，改用 waitFor 等它真落地。
+    await waitFor(() => closed === 1);
     expect(closed).toBe(1);
     tree.unmount();
   });

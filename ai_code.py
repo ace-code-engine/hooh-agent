@@ -9290,7 +9290,6 @@ def _run_serve(cli: "AgentCLI", srv) -> int:
         `limits` 里的数字全部来自既有常量，不发手抄副本。
         """
         kind = str(params.get("kind") or "").strip().lstrip("@")
-        query = str(params.get("query") or "")
         try:
             limit = int(params.get("limit") or 20)
         except (TypeError, ValueError):
