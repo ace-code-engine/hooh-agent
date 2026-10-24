@@ -289,6 +289,46 @@ _EXECUTOR_ASSETS = {
     ("darwin", "arm64"): ("hooh-executor-darwin-arm64", "ace-executor-darwin-arm64"),
 }
 
+_EXECUTOR_BIN = "ace-executor.exe" if os.name == "nt" else "ace-executor"
+
+
+def _sandbox_probe(docker_bin: Optional[str] = None,
+                   executor_path: Optional[str] = None) -> Dict[str, str]:
+    """执行边界体检（WP-AGENCY 前置小件）：`ace --setup` 末尾的一次性门。
+
+    为什么值得做：执行边界的三条出路（docker / Job Object / 显式无边界）都是
+    **运行期才知道没有**的 —— 模型第一次想跑命令时吃到 503，用户看到的不是
+    "少装了个东西"，而是"工具坏了"。setup 时把家底盘一遍，缺什么、补一句
+    **确切要跑的命令**，把 503 惊喜提前变成安装清单。
+
+    纯查询：不装任何东西、不改任何配置；`docker_bin` / `executor_path` 可注入
+    （测试要能钉住两个分支，而不是取决于跑测试的机器装了什么）。
+    """
+    docker = shutil.which("docker") if docker_bin is None else (docker_bin or "")
+    exe = Path(executor_path) if executor_path else (FOLDER / "executor" / _EXECUTOR_BIN)
+    has_executor = exe.is_file()
+    if docker and has_executor:
+        advice = ("两条真边界都在。需要内核边界时用 --sandbox docker（更硬）"
+                  "或 --sandbox job（更轻）。")
+    elif docker:
+        advice = f"执行器缺：ace --install-executor（预编译）或 cd executor && go build -o {_EXECUTOR_BIN} ."
+    elif has_executor:
+        advice = "docker CLI 缺：装 Docker Desktop / 引擎后用 --sandbox docker；Job Object 档已可用（--sandbox job）。"
+    else:
+        advice = (f"两条真边界都缺：① ace --install-executor（Job Object 档）；"
+                  f"② 装 Docker 后用 --sandbox docker。在此之前 --sandbox off = 无边界，"
+                  f"确认过的命令直接跑在你机器上。")
+    return {"docker": docker or "", "executor": str(exe), "advice": advice}
+
+
+def _print_sandbox_probe() -> None:
+    """把体检结果打成 setup 尾巴上的几行（dim，不抢戏）。"""
+    r = _sandbox_probe()
+    print(c("dim", "—— 执行边界体检（WP-AGENCY）——"))
+    print(c("dim", f"  docker CLI : {'✓ ' + r['docker'] if r['docker'] else '✗ 未找到'}"))
+    print(c("dim", f"  Go 执行器  : {'✓ ' + r['executor'] if Path(r['executor']).is_file() else '✗ 未找到'}"))
+    print(c("dim", f"  {r['advice']}"))
+
 
 def _install_executor() -> bool:
     """下载官方预编译 ace-executor 到 executor/，替代手工 go build。
@@ -9811,6 +9851,8 @@ def main() -> None:
         else:
             print(f"❌ 没能准备好环境: {_res['note']}")
             print("   离线环境可把 wheel 放进 vendor/ 再重试（见 vendor/README.md）。")
+        print()
+        _print_sandbox_probe()
         return
 
     if args.install_executor:

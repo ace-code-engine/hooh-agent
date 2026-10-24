@@ -273,9 +273,10 @@ class TerminalExec:
                 return ExecutionResult(
                     status="error", error_code="503",
                     message=("Job Object 沙箱不可用（执行器未编译、起不来，或本平台"
-                             "不支持 Tier-1），已拒绝执行。在 executor/ 下跑 "
-                             "`go build -o ace-executor.exe .`，或用 --sandbox off "
-                             "显式改回宿主执行。"))
+                             "不支持 Tier-1），已拒绝执行。补执行器的两条路："
+                             "`ace --install-executor`（官方预编译，替代手工编译）"
+                             "或在 executor/ 下 `go build -o ace-executor.exe .`；"
+                             "或用 --sandbox off 显式改回宿主执行。"))
 
 
         # 不经 shell 则连"万一漏了一个元字符"的余地也没有。

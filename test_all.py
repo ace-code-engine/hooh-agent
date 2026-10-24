@@ -1607,6 +1607,25 @@ if _want("9"):
         ai_code.load_cli_config, ai_code.load_claude_settings = (
             _orig_load_cli_ag, _orig_load_cs_ag)
 
+    # —— WP-AGENCY 前置小件：执行边界体检（ace --setup 的一次性门） ——
+    # 纯查询、可注入：测试钉的是「四种家底 × 四条建议」，不是这台机器装了什么。
+    _probe_exe = mktemp() / "ace-executor.exe"
+    _probe_exe.write_text("stub", encoding="utf-8")
+    _r = ai_code._sandbox_probe(docker_bin="/usr/bin/docker", executor_path=str(_probe_exe))
+    check("[WP-AGENCY] 体检：两条边界都在 → 建议按需选档（docker/job）",
+          _r["docker"] and "--sandbox docker" in _r["advice"]
+          and "--sandbox job" in _r["advice"], _r["advice"])
+    _r = ai_code._sandbox_probe(docker_bin="/usr/bin/docker",
+                                executor_path=str(mktemp() / "nope.exe"))
+    check("[WP-AGENCY] 体检：只差执行器 → 指到 ace --install-executor",
+          "ace --install-executor" in _r["advice"], _r["advice"])
+    _r = ai_code._sandbox_probe(docker_bin="", executor_path=str(_probe_exe))
+    check("[WP-AGENCY] 体检：只差 docker → 指到 Docker 且说明 job 档已可用",
+          "--sandbox job" in _r["advice"] and "Docker" in _r["advice"], _r["advice"])
+    _r = ai_code._sandbox_probe(docker_bin="", executor_path=str(mktemp() / "nope.exe"))
+    check("[WP-AGENCY] 体检：两条都缺 → 给两条补救命令并把「无边界」说穿",
+          "ace --install-executor" in _r["advice"] and "无边界" in _r["advice"], _r["advice"])
+
     # —— 登录页 / 首页（AI-CLI 启动平台同款） ——
     check("ACE logo 存在", "██" in ai_code.ACE_LOGO)
     check("首页菜单 7 项且含进入聊天", len(ai_code.AgentCLI.LANDING_ITEMS) == 7
