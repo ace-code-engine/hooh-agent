@@ -29,6 +29,7 @@ import { SessionManager } from './components/sessions/SessionManager.js';
 import { SessionTree } from './components/session-tree/index.js';
 import { SettingsPanel } from './components/settings/SettingsPanel.js';
 import { parseSettings, type SettingSection } from './components/settings/schema.js';
+import { EffortBadge } from './components/EffortBadge.js';
 import { Spinner } from './components/Spinner.js';
 import { StatusLine } from './components/StatusLine.js';
 import { TaskTree } from './components/TaskTree.js';
@@ -199,6 +200,9 @@ export function App({ client, t, colorOf, initialMessage, menuOptions, fullscree
   const [sessions, setSessions] = useState<SessionWire[]>([]);
   /** 前台面板（见 `Panel`）：`null` = 主界面。 */
   const [panel, setPanel] = useState<Panel | null>(null);
+  // 切档徽标（照搬 dsh 的 EffortTierBadge）：`/effort <值>` 成功后在输入行上方
+  // 放一次聚拢档名。key 用时间戳——连续切同一档也要重放。
+  const [effortBadge, setEffortBadge] = useState<{ label: string; key: number } | null>(null);
   /**
    * 输入行里**未提交**的那份草稿，App 自己留一份副本。
    *
@@ -372,6 +376,10 @@ export function App({ client, t, colorOf, initialMessage, menuOptions, fullscree
           // 命令可能改了界面侧开关（`/vim` 最典型）。执行完重读一次 ——
           // 不重读的话用户敲了 `/vim` 会看到「提示说开了，但按键没变」。
           refreshConfig();
+          // 切档徽标：三条写通道（手敲 / 选择器确认 / 设置面板）都汇经这里，
+          // 所以钩在成功回执上——引擎拒了的取值不放动画。
+          const effortPick = /^\/effort\s+(\S+)\s*$/.exec(line);
+          if (effortPick) setEffortBadge({ label: effortPick[1]!, key: Date.now() });
           // **`keep_going: false` = 引擎说「这一行之后我就结束了」**（`/exit` 就是）。
           // 只有**显式 false** 才退 —— 老引擎不带该字段时不许误退（原注释，语义未动）。
           if ((res as { keep_going?: boolean } | null)?.keep_going === false) exit();
@@ -830,6 +838,16 @@ export function App({ client, t, colorOf, initialMessage, menuOptions, fullscree
         ) : null}
 
         <StatusLine meta={state.meta} busy={state.busy} color={colorOf} width={content} t={t} />
+
+        {effortBadge !== null ? (
+          <EffortBadge
+            key={effortBadge.key}
+            label={effortBadge.label}
+            columns={content}
+            color={colorOf}
+            onDone={() => setEffortBadge(null)}
+          />
+        ) : null}
 
         <Input
           t={t}
