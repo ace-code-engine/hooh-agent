@@ -20,7 +20,7 @@
 | **脊柱全落地（仅 HL-04 的 ACC 接线待 WP-10）** | `RL-01~04` · `DL-01~04` · `HL-01/02/03/05` 已落地；`HL-04` 的可判定机器也已落地（§9.14：`MaterialIncomplete` + `build_material` + `[73]` 五种偷换），只剩「接 ACC 门槛」仍被 WP-10 的 before/after 数据卡着 | [`docs/design/THREE-LAYERS.md`](design/THREE-LAYERS.md) §9 |
 | **界面按需补齐（v1.1.0 之后）** | 设计系统 12 件已就位并与终端逐值对拍；**未搬的是「没有真实场景」的那些**：`Pane`/`Tabs` 要有分页/分组需求的屏幕才值得落地；`ListItem` 换进菜单**会降级**（菜单已有列对齐 + 显示宽度截断，换过去说明会掉到第二行）。另：**30 秒自动消失的引导卡**（照 Claude Code `EffortCallout`）**等一个真实触发场景**再写 —— 编一个「启动就弹」纯属噪音 | [`docs/design/UI-OVERHAUL.md`](design/UI-OVERHAUL.md) · [`docs/design/TUI-PRIOR-ART.md`](design/TUI-PRIOR-ART.md) |
 | **只剩批次 6 与 WP-10** | 批次 −1…5 已关闭；**批次 6** = 非 URL 出网通道（WP-8 后半，**Linux seccomp 已落地**，Windows 仍待 WFP / macOS 仍待 seatbelt）＋ CubeSandbox 沙箱后端（WP-9）；**WP-10** = Rust 核心化（**快照哈希下沉已实测否决**，见 engine/README.md；**grep/glob 也已实测否决**——regex 语义 + 零依赖 + 非热路径；剩 **流式客户端 / LSP / 路径判定下沉**） | [`docs/ROADMAP.md`](ROADMAP.md) §7.2 |
-| **WP-AGENCY 阶段 2** | 四刀 + 前置小件 + 指标已落地（默认档按通道分流 / 快照增量化 5.8× / 授权框「记住并写规则」/ 原生 tool-calling 转正进 /config / 边界体检进 --setup / 交互度量进 /audit stats）；**剩**：TUI 设置面板显示端点实际 tools 状态（`tools_ok` / `tools_degraded`）、原生路径跑一轮真实端点 e2e、新默认档下的 `asks_per_task` 首份实测读数 | [`docs/design/WP-AGENCY.md`](design/WP-AGENCY.md) |
+| **WP-AGENCY 阶段 2** | 四刀 + 前置小件 + 指标已落地（默认档按通道分流 / 快照增量化 5.8× / 授权框「记住并写规则」含 persist_ok 显隐 / 原生 tool-calling 转正进 /config / 边界体检进 --setup / 交互度量进 /audit stats / 多 tool_call 显式化不静默）；配套安全债同批清完（本地端点 Bearer+Host 鉴权、CI 进 windows runner、信任锚进敏感名单）；文本协议真端点冒烟已过；**剩**：TUI 面板显示 tools 状态、原生协议真端点一轮、新默认档的 `asks_per_task` 首份读数、并行工具调用的管线改造 | [`docs/design/WP-AGENCY.md`](design/WP-AGENCY.md) |
 
 ## 仍未验证
 
