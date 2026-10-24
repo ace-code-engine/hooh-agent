@@ -96,7 +96,12 @@ export function App({ snapshot, engine, initialPrompt }: AppProps): React.ReactE
           // 命令：引擎不回放用户行，自己补一条（与轮次的回放同一形状）。
           eventsRef.current = [...eventsRef.current, { type: 'user_message', text: line }]
           reproject()
-          await engine.command(line)
+          const res = await engine.command(line, (ev) => {
+            eventsRef.current = [...eventsRef.current, ev]
+            reproject()
+          })
+          // `/exit` 等命令以 keep_going=false 收工（引擎侧已保存会话）。
+          if (!res.keepGoing) process.exit(0)
         } else {
           // 轮次：引擎自己回放 user_message（延迟本地进程级，可接受）——
           // 不做乐观插入，行状态保持单一来源（全量事件投影）。

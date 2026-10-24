@@ -56,6 +56,14 @@
   对应物的动作如实进 notice),参数段铭牌(模型/强度/预设/权限)点击打开
   对应命令,命令候选点击直接执行,工作区名牌如实告知未接入。已知残留:
   命令候选表还是 entry 里硬编码的六条,待接 initialize 握手的 commands。
+- 2026-10-24 第四批(用户实测"卡死在 /help 首屏"):**命令路径没挂监听**——
+  /help 等命令的可见输出全部以 notice 事件回流,而 engine.command() 不挂
+  listener,输出进不了投影 → 行永不增长 → 永远停在首屏。修复:command 挂
+  listener(onEvent → 重投影)+ 读取 resp 的 keep_going(/exit 生效)。
+  另:busy 时 Esc/Ctrl+C 可中断挂起轮次(session.interrupt + 本地解锁),
+  进程退出时引擎子进程跟随关闭(孤儿防护)。winpty 探针里观察到的引擎
+  code=null 退出经二分判定为探针自身 kill 的 job 树连带(纯管道同参数
+  引擎全程存活),非产品缺陷;真控制台若复现,死亡提示会带 stderr 尾部。
 - 2026-10-24 第三批续(用户实测"说话没任何回应"):第二层根因——壳把项目根
   取成 `process.cwd()`(ace.cmd pushd frontend 后 = frontend,相对路径),
   引擎 spawn 的 cwd 变成 frontend/frontend(不存在)→ 异步 ENOENT →

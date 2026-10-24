@@ -277,6 +277,7 @@ export class AceEngine {
   private waiters = new Map<string, () => void>()
   private permissionCb: ((req: PendingPermission) => void) | null = null
   private choiceCb: ((req: PendingChoice) => void) | null = null
+  private lastKeepGoing = true
 
   constructor(private opts: EngineOptions) {
     const py = process.env.ACE_PYTHON || resolvePython()
@@ -377,6 +378,11 @@ export class AceEngine {
         }
       } else if (frame.type === 'resp') {
         const id = String(frame.id ?? '')
+        // `/exit` 等命令经 result.keep_going=false 告诉外壳该收工了。
+        const result = frame.result as Record<string, unknown> | undefined
+        if (result && result.keep_going !== undefined) {
+          this.lastKeepGoing = result.keep_going !== false
+        }
         this.waiters.get(id)?.()
       }
     }
@@ -410,15 +416,24 @@ export class AceEngine {
    * 斜杠命令走 `command.exec`（**不是** user.message——那条路会把 "/model x"
    * 当聊天文本喂给模型）。命令的可见输出以 `notice` 事件回流，走同一套行投影。
    */
-  async command(line: string): Promise<{ keepGoing: boolean }> {
+  async command(line: string,
+                onEvent?: (ev: AceEvent) => void): Promise<{ keepGoing: boolean }> {
     const id = String(++this.seq)
+    // **命令必须挂监听**：/help 这类命令的可见输出全部以 notice 事件回流——
+    // 不挂监听的话输出进不了投影，界面原地不动（2026-10-24「卡死在首屏」）。
+    const listener = (ev: AceEvent): void => { onEvent?.(ev) }
+    this.listeners.add(listener)
     const done = new Promise<void>((resolve) => {
       const timer = setTimeout(resolve, 60_000)
       this.waiters.set(id, () => { clearTimeout(timer); resolve() })
     })
     this.write('command.exec', { line }, id)
     await done
-    return { keepGoing: true }
+    // 尾部 notice（命令输出常在 resp 前后各来几条）——多收 300ms 再撤监听。
+    await new Promise((r) => setTimeout(r, 300))
+    this.listeners.delete(listener)
+    this.waiters.delete(id)
+    return { keepGoing: this.lastKeepGoing }
   }
 
   /** 跑一轮；`onEvent` 每来一条事件回调一次（流式画界面用）。返回这一轮的**全部**事件。 */
