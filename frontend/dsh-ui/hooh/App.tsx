@@ -215,7 +215,15 @@ export function App({ snapshot, engine, initialPrompt }: AppProps): React.ReactE
       }
       return
     }
-    if (busy) return                      // 忙时不吃键（审批/选择已在上面接管）
+    if (busy) {
+      // 挂住的轮次必须能被放弃（钱在烧：杀窗重试=再烧一次）。Esc/Ctrl+C 请求
+      // 引擎在轮边界停下；本地同时解除 busy 锁——引擎收尾事件晚到也照常投影。
+      if (key.escape || (key.ctrl && input === 'c')) {
+        engine?.interrupt()
+        setBusy(false)
+      }
+      return
+    }
     if (key.escape) {
       if (query !== '') setQuery('')
       else process.exit(0)

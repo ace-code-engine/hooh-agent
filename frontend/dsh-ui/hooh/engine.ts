@@ -433,9 +433,20 @@ export class AceEngine {
     })
     this.write('user.message', { text }, id)
     await finished
+    // 中断路径的收尾事件（引擎在轮边界停下，final/notice 晚于 waiter 释放）——
+    // 多收 800ms 尾巴再撤监听，转录不丢尾巴。
+    await new Promise((r) => setTimeout(r, 800))
     this.listeners.delete(listener)
     this.waiters.delete(id)
     return collected
+  }
+
+  /**
+   * 请求中断当前轮（引擎在轮边界与工具执行前停下——不硬杀，快照/日志保持一致）。
+   * 调用方应在 UI 上同时解除 busy 锁（本地兜底），别让人被挂住的轮次锁在门外。
+   */
+  interrupt(): void {
+    this.write('session.interrupt', {}, 'intr' + String(++this.id))
   }
 
   private write(method: string, params: Record<string, unknown>, id: string): void {

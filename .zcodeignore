@@ -1,0 +1,123 @@
+# Python 运行时
+__pycache__/
+*.py[cod]
+*.pyo
+.ruff_cache/
+.pytest_cache/
+.mypy_cache/
+
+# 执行层运行时产物（快照/飞轮/报告/记忆/沙箱/测试/数据库/截图/图片/通知）
+.guardian/
+.agent_flywheel/
+.agent_memory.json
+.poc_reports/
+.sandbox_tmp/
+.test_tmp/
+.vitest-tmp/
+.ace_shots/
+.ace_images/
+.ace_goals.json
+.ace_sessions/
+.ace_kb/
+agent.db
+notifications.log
+*.jsonl
+
+# 项目级 Agent 配置里**本机私有**的那两份（见 docs/design/SAFETY-HARDENING.md H-17）：
+# `hooks.json` 里的命令在 ExecutionLayer 初始化时以 shell 执行（任何权限判定之前），
+# `permissions*.json` 记的是本机授权决定 —— 两者都不该被 clone 下来就直接生效。
+# 团队若要共享，请 git add -f；`.ace/commands` 与 `.ace/plugins` 不受此规则影响。
+.ace/hooks.json
+.ace/permissions*.json
+
+# 虚拟环境与依赖
+.venv/
+venv/
+
+# Go 执行器编译产物（宿主按 ace_executor.py 里的固定名去找它，就地编译）
+executor/ace-executor
+executor/ace-executor.exe
+executor/executor.exe
+# 交叉编译出来的带后缀版本（release-executor.yml 的产物名就是 hooh-executor-<target>；
+# 旧名 ace-executor-* 保留 —— 改名前构建出来的本地文件还在盘上）
+executor/ace-executor-*
+executor/hooh-executor-*
+
+# Rust 内置引擎（engine/）构建产物。注意**必须与 core/guardian.py 的
+# EXCLUDE_DIRS 成对**：漏了这边只是脏树，漏了那边是每次写快照都多拷 30MB。
+engine/target/
+
+
+# 日志与临时文件
+*.log
+*.tmp
+
+# 冒烟脚本的原始证据：每次跑都重写，属于本机产物（脚本自己会重建目录）
+e2e/_rel03_evidence/
+
+# 图标生成时的预览图（packaging/make_icon.py --preview；构建产物，不入库）
+assets/_preview_*.png
+
+# 打包产物（packaging/build_exe.ps1 生成；要发布的是 dist/ace 整个目录，不入库）
+build/
+dist/
+packaging/_smoke/
+
+# 基准报告本机生成、不入库（CI bench 任务在工作区自产自销）
+benchmarks/results/
+
+# 示例场景：用户自己丢进去的文档不入库，只保留占位说明
+examples/02_document_parsing/drop_docs_here/*
+!examples/02_document_parsing/drop_docs_here/README.md
+
+# 本地虚拟环境（setup_env.py 建的，不入库）
+.ace_env/
+# 密钥类：本项目今天没有 .env，但测试套件自己会写 .env 夹具，且"以后不会有人放"
+# 这种假设在密钥这件事上从来不成立 —— 规则先立着，比事后 filter-repo 便宜太多
+.env
+.env.*
+!.env.example
+# 注意：vendor/*.whl 是**故意入库**的——离线环境靠它 `setup_env.py --ensure` 一把装好，
+# 所以这里没有 vendor 的忽略规则。详见 vendor/README.md。
+
+# 本地汉化产出（Claude Code 泄漏源码中文版）—— 不进版本库，等人工检验
+.ace-cc-zh/
+
+# 生成物 / 本地工作目录（不属于源码，不进库）
+.acl-recovery/
+previews/
+video_work/
+
+# 并行侦察/研读的中间产物（整合后按需入库或删除）
+.recon/
+
+
+# ===== ↑ 以上同步自 .gitignore（「从 .gitignore 同步」只重写以上部分）=====
+.git/
+.hg/
+.svn/
+node_modules/
+bower_components/
+jspm_packages/
+site-packages/
+coverage/
+htmlcov/
+lcov-report/
+cmakefiles/
+cmake-build-*/
+bazel-*/
+pods/
+deriveddata/
+storybook-static/
+playwright-report/
+test-results/
+allure-results/
+allure-report/
+cdk.out/
+*.egg-info/
+*.dist-info/
+eggs/
+pip-wheel-metadata/
+wheels/
+# ----- ↑ 以上为 ZCode 默认排除规则（自定义规则请写在本行下方，不会被同步/恢复改动）-----
+# 自定义规则写在下方（本行提示可删除）

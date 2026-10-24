@@ -69,6 +69,13 @@ export async function main(argv: readonly string[]): Promise<void> {
       ...(prompt ? { initialPrompt: prompt } : {}),
     }),
   )
+  // 孤儿防护：窗口被叉掉/进程被杀时，引擎子进程必须跟着死——否则一个挂着
+  // 真模型轮次的引擎在后台继续烧钱，而没有人看得见它。正常退出走下面的
+  // waitUntilExit → engine.close()；这里兜**非正常**退出。
+  const cleanup = (): void => engine.close()
+  process.on('exit', cleanup)
+  process.on('SIGINT', () => { cleanup(); process.exit(0) })
+  process.on('SIGTERM', () => { cleanup(); process.exit(0) })
   await app.waitUntilExit?.()
   engine.close()
 }
