@@ -982,6 +982,31 @@ if _want("8"):
         {"function": {"name": "math_calc", "arguments": '{"expression": "1+1"}'}}])
     check("原生工具调用转协议文本",
           '"tool": "math_calc"' in proto and '"expression": "1+1"' in proto, proto)
+    check("单调用协议不含多余内容（格式守卫：多调用改造不影响正常路径）",
+          proto.startswith("<INTERNAL>\n[INTERNAL_THINKING]\n[ACT] 原生工具调用: math_calc\n"
+                           "[/INTERNAL_THINKING]")
+          and "暂存" not in proto, proto)
+    # WP-AGENCY 后续：多 tool_call 不再静默丢弃——第一个执行，其余点名留痕
+    import io as _io_ar  # noqa: E402
+    _err_ar = _io_ar.StringIO()
+    import sys as _sys_ar  # noqa: E402
+    _orig_err_ar = _sys_ar.stderr
+    _sys_ar.stderr = _err_ar
+    try:
+        _multi = tool_calls_to_protocol([
+            {"function": {"name": "file_read", "arguments": '{"path": "a.txt"}'}},
+            {"function": {"name": "grep", "arguments": '{"pattern": "x"}'}},
+        ])
+    finally:
+        _sys_ar.stderr = _orig_err_ar
+    check("[WP-AGENCY] 多调用：第一个照常转协议",
+          '"tool": "file_read"' in _multi and '"path": "a.txt"' in _multi, _multi)
+    check("[WP-AGENCY] 多调用：其余在 INTERNAL 点名留痕（不静默丢弃）",
+          "另有 1 个并行调用被暂存" in _multi and "grep" in _multi, _multi)
+    check("[WP-AGENCY] 多调用：stderr 有告知（用户看得见）",
+          "已暂存并要求逐个重发" in _err_ar.getvalue(), _err_ar.getvalue())
+    check("[WP-AGENCY] 多调用：第二个调用没有混进 EXTERNAL（管线仍是单调用契约）",
+          '"tool": "grep"' not in _multi.split("<EXTERNAL>")[1], _multi)
     ollama_json = content_to_tool_protocol(
         '{"name": "datetime_now", "arguments": {"format": "%Y-%m-%d"}}')
     check("兼容 Ollama 文本 JSON 工具调用",

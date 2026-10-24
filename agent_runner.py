@@ -169,9 +169,17 @@ TOOL_NAMES = {t["function"]["name"] for t in TOOLS}
 
 
 def tool_calls_to_protocol(tool_calls: List[Dict]) -> str:
-    """把原生工具调用转换为 <INTERNAL>/<EXTERNAL> 协议文本，复用执行层同一代码路径"""
+    """把原生工具调用转换为 <INTERNAL>/<EXTERNAL> 协议文本，复用执行层同一代码路径。
+
+    **每轮只执行第一个调用** —— 执行层管线是单调用契约（权限/快照/审计按一次一个
+    裁决），`agent_system_prompt_tools.md` 也明确要求模型一次只发一个。模型一次发了
+    多个时**不再静默丢弃**（那会让模型以为都执行了——正是反幻觉闸门要抓的"说了没做"
+    的机器版）：多余的调用在 INTERNAL 里点名留痕（进会话日志可查）并打 stderr；
+    执行结果只含第一个调用，模型据此逐个重发（提示词同时写明这条规则）。
+    """
     if not tool_calls:
         return ""
+    extras = tool_calls[1:]
     tc = tool_calls[0]
     fn = tc.get("function") or {}
     name = fn.get("name", "")
@@ -194,9 +202,20 @@ def tool_calls_to_protocol(tool_calls: List[Dict]) -> str:
         args = tc["arguments"]
     if not isinstance(args, dict):
         args = {}
+    # 多余调用：点名 + 留痕，绝不静默（模型会以为"都做了"）
+    extra_note = ""
+    if extras:
+        names = ", ".join(str((c.get("function") or {}).get("name") or c.get("name")
+                              or "?") for c in extras)
+        extra_note = (f"[ACT] ⚠ 另有 {len(extras)} 个并行调用被暂存（每轮只执行一个）：{names}。"
+                      f"结果回来后请逐个重发。")
+        print(f"  ⚠ 模型一次发了 {len(extras) + 1} 个工具调用：执行第一个（{name}），"
+              f"其余已暂存并要求逐个重发", file=sys.stderr, flush=True)
     body = json.dumps({"tool": name, **args}, ensure_ascii=False)
     return (f"<INTERNAL>\n[INTERNAL_THINKING]\n"
-            f"[ACT] 原生工具调用: {name}\n[/INTERNAL_THINKING]\n</INTERNAL>\n"
+            f"[ACT] 原生工具调用: {name}\n"
+            + (extra_note + "\n" if extra_note else "")
+            + f"[/INTERNAL_THINKING]\n</INTERNAL>\n"
             f"<EXTERNAL>\nanswer.\n{body}\n</EXTERNAL>")
 
 
