@@ -573,6 +573,8 @@
   "input_busy_hint": "回车排队（不打断当前轮）· Esc 请求中断",
   "frontend_needs_tty": "Ink 前端需要真终端（它要独占 stdin 才能读按键），当前 stdin 不是 TTY。",
   "frontend_needs_tty_hint": "脚本 / 管道 / CI 里请改用 `python ai_code.py --json`（一行一个 JSON 事件）或 `--serve`（双向协议）。要跑界面请直接在终端里执行 npm start。",
+  "boot_banner": "  HooH（ace 前端）· 正在启动引擎…",
+  "boot_timing": "[HooH] 启动 {total}ms（载入 {boot} · 引擎握手 {handshake}）",
   "sessions_title": "  最近会话（{n} 个，用 /resume <编号> 续聊）：",
   "sessions_none": "  还没有其它会话记录。",
   "sessions_turns": "{n} 轮",

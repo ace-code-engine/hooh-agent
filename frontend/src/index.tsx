@@ -144,6 +144,10 @@ const HELP = `HooH 前端（TypeScript + Ink）
 `;
 
 async function main(): Promise<number> {
+  // 启动时间线（把"打开慢"变成可定位的数字）：`process.uptime()` 在这里读出的
+  // 就是**模块图加载**花的时长（main 是模块图尾端）；握手时长从 t0 起算。
+  const bootMs = Math.round(process.uptime() * 1000);
+  const t0 = Date.now();
   const args = parseArgs(process.argv.slice(2));
   if (args.help) {
     process.stdout.write(HELP);
@@ -185,6 +189,13 @@ async function main(): Promise<number> {
     ],
   });
 
+  // 首帧先行：握手在最坏情况（冷缓存 / 杀软逐文件扫描 node_modules）下要好几秒，
+  // 干等 = 白屏 = "打开太长"。先用一行**纯 stdout** 横幅占住视线 —— 不占 ink 实例，
+  // Root 挂载后它自然留在 scrollback 顶部当启动横幅。同时把**这是哪个壳**写在明面上：
+  // 两个壳都印 HooH，而报错栈里全是 vendored 内核（dsh-ui）的路径 —— 用户看到
+  // "dsh-ui" 三个字会以为自己被路由到了别的产品。从这里开始就不会了。
+  process.stdout.write(`\x1b[2m${i18n.t('boot_banner')}\x1b[0m\n`);
+
   let caps;
   try {
     caps = await client.start(args.stream);
@@ -203,6 +214,13 @@ async function main(): Promise<number> {
   // 字形降级表：引擎按**当前控制台编码**算好的。必须在 render 之前设好，
   // 否则首屏那一帧就已经印出控制台画不出的字了（cp936 下提示符会变成乱码）。
   setGlyphs(caps.glyphs);
+
+  // 启动时间线落一行（stderr —— stdout 是画面）。热启动约 1s；若用户的这行数字
+  // 明显偏大，"打开慢"就有了第一个可指认的嫌疑人（载入 = 模块图，握手 = 引擎起）。
+  const handshakeMs = Date.now() - t0;
+  process.stderr.write(
+    i18n.t('boot_timing', { total: bootMs + handshakeMs, boot: bootMs, handshake: handshakeMs }) + '\n',
+  );
 
   // 补全菜单的候选来自握手：命令表由引擎给（那是唯一真相源），
   // 描述与分组是 **i18n 键**，由前端自己查字典 —— 这样 `/lang` 切换后菜单会跟着变。

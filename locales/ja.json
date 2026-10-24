@@ -573,6 +573,8 @@
   "input_busy_hint": "Enter でキュー追加（現在のターンは中断しません）· Esc で中断要求",
   "frontend_needs_tty": "Ink 前端には本物のターミナルが必要です（キー入力を読むため stdin を占有します）。現在の stdin は TTY ではありません。",
   "frontend_needs_tty_hint": "スクリプト／パイプ／CI では `python ai_code.py --json`（1 行 1 JSON イベント）か `--serve`（双方向プロトコル）を使ってください。UI を動かすにはターミナルから npm start を実行してください。",
+  "boot_banner": "  HooH（ace フロントエンド）· エンジン起動中…",
+  "boot_timing": "[HooH] 起動 {total}ms（ロード {boot} · エンジンハンドシェイク {handshake}）",
   "sessions_title": "  最近のセッション（{n} 件、/resume <番号> で継続）:",
   "sessions_none": "  他のセッション記録はまだありません。",
   "sessions_turns": "{n} ターン",

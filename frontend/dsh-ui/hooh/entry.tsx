@@ -35,6 +35,9 @@ function snapshot(): AceSnapshot {
 }
 
 export async function main(argv: readonly string[]): Promise<void> {
+  // 自我标识：两个壳的启动画面都印 HooH，用户（和报错栈里的 dsh-ui 路径）分不清
+  // 自己进了哪个。stderr 一行说清楚 —— 走 stderr 而不是 stdout：stdout 是画面。
+  console.error('[HooH × dsh-TUI 壳]（ace ui）正在启动引擎…')
   const prompt = argv.filter((a) => !a.startsWith('-')).join(' ').trim()
   const engine = await openEngine({
     projectRoot: snapshot().cwd,

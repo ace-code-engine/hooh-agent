@@ -573,6 +573,8 @@
   "input_busy_hint": "Enter queues it (does not interrupt) · Esc requests interrupt",
   "frontend_needs_tty": "The Ink frontend needs a real terminal (it takes over stdin to read keys); stdin here is not a TTY.",
   "frontend_needs_tty_hint": "In scripts / pipes / CI, use `python ai_code.py --json` (one JSON event per line) or `--serve` (bidirectional protocol). To run the UI, launch npm start from a terminal.",
+  "boot_banner": "  HooH (ace frontend) · starting engine…",
+  "boot_timing": "[HooH] startup {total}ms (load {boot} · engine handshake {handshake})",
   "sessions_title": "  Recent sessions ({n}; continue one with /resume <index>):",
   "sessions_none": "  No other sessions recorded yet.",
   "sessions_turns": "{n} turns",
