@@ -93,13 +93,19 @@ if /i "%~1"=="tui" (
         pause
         exit /b 1
     )
-    echo [HooH] ace engine endpoint: http://127.0.0.1:8787/v1  (model: ace)
+    rem PARENS ARE BANNED INSIDE THIS BLOCK - echo, rem, everything. Inside an
+    rem if-block cmd closes the block at the FIRST bare close-paren it scans,
+    rem even inside a rem or an echo: the rest of the block then runs
+    rem unconditionally on EVERY launch. That is exactly how plain "ace" ended
+    rem up in dsh-tui on 2026-10-24 - the user saw it auto-route to the dsh UI
+    rem and never reached the real frontend dispatch. Escape with ^ if you must.
+    echo [HooH] ace engine endpoint: http://127.0.0.1:8787/v1  - model: ace
     echo        First run only, inside dsh-tui: /provider  then add a custom one
     echo          baseURL   http://127.0.0.1:8787/v1
     echo          protocol  openai-completions
-    echo          apiKey    anything (not checked)
+    echo          apiKey    anything - not checked
     echo        then pick the discovered model "ace" and run /model ace
-    rem Branding + provider route (idempotent): dsh-tui's splash says HooH, the
+    rem Branding + provider route, idempotent: dsh-tui splash says HooH, the
     rem whale is off, and the "ace" route points at the endpoint below.
     "%_ACE_PY%" "%~dp0tools\dsh_bridge_setup.py"
     start "ace-proxy" /min "%_ACE_PY%" "%~dp0tools\ace_openai_proxy.py" --project-root "%~dp0" --permission readonly
