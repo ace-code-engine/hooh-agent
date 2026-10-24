@@ -62,7 +62,9 @@
   独立检查点入库,与新工作分离。基线:`test_all.py` 全绿(7 项能力探测跳过;
   需 `ACE_DISPLAY_ENCODING=utf-8`),前端 vitest 652 过 / 2 失败
   (dsh-ui-engine / dsh-ui-smoke / integration,迁入中状态,非本项目范围)。
-- [ ] 刀1 默认档反转
+- [x] 刀1 默认档反转——`merge_config(default_permission=…)` 按通道分流：交互 `write` /
+      headless 显式 `readonly`（`--mcp` 与冻结入口都钉死）；设置注册表默认同步；
+      GETTING-STARTED / INTERFACES / MCP-SERVER / SECURITY-MODEL 四处契约文档改口
 - [ ] 刀2 快照增量化
 - [ ] 刀3 命令形状记忆
 - [ ] 前置小件:可行动 503/403 文案

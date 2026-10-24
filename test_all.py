@@ -1517,9 +1517,32 @@ if _want("9"):
     except ValueError:
         _cfg_bad2 = True
     check("CLIConfig 校验负数 max_history", _cfg_bad2)
-    check("CLIConfig 默认 readonly（写权限需显式 /permission 开启）",
+    check("CLIConfig 默认 readonly（库层保守兜底；产品层默认见下两条）",
           ai_code.CLIConfig.from_dict({}).permission == "readonly"
           and ai_code.CLIConfig.from_dict({}).max_history == 0)
+
+    # —— WP-AGENCY 刀1：默认权限档按通道分流 ——
+    # 交互式（REPL/TUI/--serve）= write：项目内写有写前快照兜底 = 可逆 = 免确认，
+    # 「问」只留给不可逆 × 范围外；headless（--mcp / 冻结入口）= readonly：没人看着，从严。
+    from types import SimpleNamespace as _NS_AG  # noqa: E402
+    _orig_load_cli_ag, _orig_load_cs_ag = ai_code.load_cli_config, ai_code.load_claude_settings
+    ai_code.load_cli_config = lambda: {}
+    ai_code.load_claude_settings = lambda: {}
+    try:
+        _ns_ag = _NS_AG(base_url=None, api_key=None, model=None, permission=None,
+                        project_root=None, kb=None, skills=None,
+                        approval_policy=None, color=None)
+        check("[WP-AGENCY] 交互式默认权限档 = write（项目内可逆写免确认）",
+              ai_code.merge_config(_ns_ag)["permission"] == "write")
+        check("[WP-AGENCY] headless 默认权限档 = readonly（显式传参，从严）",
+              ai_code.merge_config(_ns_ag, default_permission="readonly")
+              ["permission"] == "readonly")
+        check("[WP-AGENCY] 显式配置压过默认档（readonly 仍是合法选择）",
+              ai_code.merge_config(_NS_AG(
+                  **{**vars(_ns_ag), "permission": "readonly"}))["permission"] == "readonly")
+    finally:
+        ai_code.load_cli_config, ai_code.load_claude_settings = (
+            _orig_load_cli_ag, _orig_load_cs_ag)
 
     # —— 登录页 / 首页（AI-CLI 启动平台同款） ——
     check("ACE logo 存在", "██" in ai_code.ACE_LOGO)
@@ -16576,9 +16599,12 @@ if _want("72"):
             _miss72 = [n for n in _direct72 if not hasattr(_ns72, n)]
             check("[72] 冻结入口补齐了 merge_config 直接读的每个属性",
                   not _miss72, "缺: %s" % _miss72)
-            check("[72] 冻结入口的默认权限是 readonly（与 CLI 同口径，不是 write）",
+            check("[72] 冻结入口的默认权限是 readonly（headless 口径显式钉死，不随 WP-AGENCY 交互默认走 write）",
                   _m72b._parse([]).permission is None
                   and _ns72.tools is False and _ns72.fullscreen is False)
+            check("[72] 冻结入口源码显式传 default_permission=readonly（防止有人删参后静默继承 write）",
+                  'default_permission="readonly"'
+                  in _entry72.read_text(encoding="utf-8"))
 
     # —— ② 协议层：假引擎（不碰执行层）——
     _calls72: list = []

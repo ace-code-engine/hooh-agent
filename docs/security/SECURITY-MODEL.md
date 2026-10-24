@@ -7,7 +7,7 @@
 
 **权限与授权**
 
-- 默认 `readonly`；写工具需显式 `/permission write` 或 `--permission write`
+- 默认档按通道分流（WP-AGENCY，2026-10-24）：**交互式**（REPL/TUI/`--serve`）默认 `write`——项目内写免确认，依据是「写前快照兜底 = 可逆 = 免确认」，而「不可逆 × 项目外」（覆盖/删除已存在文件、未白名单外发）**仍逐次确认**；**headless**（`--mcp`、冻结入口）默认显式钉死 `readonly`。更严的选择永远是合法的：`--permission readonly` 或 `/permission readonly`
 - 授权两档：「本次」用后即焚，「本会话」本会话内不再询问
 - `terminal_exec` 强制逐次确认，不接受会话级授权
 - **外发工具**（`api_get` / `api_post` / `browser_open` / `browser_navigate` / `notify_send`）在目的地不在白名单内时逐次确认，同样不接受会话级授权——会话级授权是按工具名给的，不区分目的地，"本会话 api_post 免问"等于把出口整个打开

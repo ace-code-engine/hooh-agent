@@ -79,9 +79,11 @@ ctx = el.prepare_context(user_input)          # 记忆预注入(可独立调用)
 
 ## 5. 权限模型
 
-- 档位:`readonly`(起步默认)/ `write` / `full`;**默认只读**是产品契约。
-  三个入口实测一致(v3.8 收口,SEC-03 已闭环):`agent_runner.py:838`、
-  `execution_layer.py`、`ai_code.py` 的 `--permission` 默认均为 `readonly`。
+- 档位:`readonly` / `write`(交互式起步默认) / `full`。**默认档按通道分流**(WP-AGENCY,
+  2026-10-24):交互式(REPL/TUI/`--serve`)默认 `write` —— 项目内写有写前快照兜底 =
+  可逆 = 免确认;headless(`--mcp`、冻结入口 `packaging/hooh_mcp.py`)默认仍钉
+  `readonly`。库层默认(`agent_runner.py`、`execution_layer.py` 的签名默认值)保持
+  `readonly`:库的调用方必须自己选档,产品层的默认在 `ai_code.merge_config` 一处。
 - 工具权限组:`PERM_READ` / `PERM_WRITE` / `PERM_HIGH_RISK`;另有 `CONTROL_TOOLS`
   (`plan_propose`/`request_permission`,任何档位都在)与 `CONFIRM_TOOLS`。
 - 授权:单次(用后即焚)或会话级;`terminal_exec` 只接受逐次确认,永不会话级。

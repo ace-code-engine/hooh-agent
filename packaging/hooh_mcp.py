@@ -112,7 +112,11 @@ def main(argv=None) -> int:
     # Imported after the path bootstrap; these are the same modules the CLI uses.
     import ai_code  # noqa: E402
 
-    cfg = ai_code.merge_config(_as_config_args(_parse(argv)))
+    # Headless door: pin the conservative default explicitly (WP-AGENCY flipped
+    # the interactive CLI default to "write"; an MCP exe driven by a host agent
+    # must not inherit that).
+    cfg = ai_code.merge_config(_as_config_args(_parse(argv)),
+                               default_permission="readonly")
 
     # --- stdout is the PROTOCOL channel -------------------------------------
     # Same swap as ai_code.main()'s --mcp branch, for the same reason: one stray

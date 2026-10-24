@@ -49,13 +49,14 @@ Windows 上两点经验（来自本项目自己的 `--serve`/子进程调试）�
 
 | 旋钮 | 决定什么 | 怎么给 |
 |---|---|---|
-| **权限档** | *哪些工具够得着* | `--permission readonly`（默认）/ `write` / `full`，或配置文件里的 `permission` |
+| **权限档** | *哪些工具够得着* | `--permission readonly`（headless 默认，显式钉死）/ `write` / `full`，或配置文件里的 `permission` |
 | **授权令** | *哪些确认会收拢* | 配置文件里的 `mandate`（下面给命令） |
 
 沙箱档（`--sandbox job|docker`）是第三个**可选**的东西：它不改裁决，改的是"跑起来之后还有没有
 第二道边界"。headless + 没有内核边界时 HooH 会在 stderr 打一条无人值守提示（行为不变）。
 
-**默认只读**：读类工具（`file_read` / `grep` / `glob` / `terminal_view` …）直接能用；
+**headless 默认只读**（WP-AGENCY 起显式钉死，不随交互式 CLI 的 `write` 默认走）：
+读类工具（`file_read` / `grep` / `glob` / `terminal_view` …）直接能用；
 写类工具会返回 `isError`，理由里写明"这是权限档拦下的"。
 
 **要让它写**：加 `--permission write`。此时**项目内**的写不需要令；而"要问人的那几处"

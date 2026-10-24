@@ -37,8 +37,8 @@ HooH 的所有配置混乱几乎都来自把这三件事混成一件事：
 | 你想干什么 | 命令 | 为什么这么配 |
 |---|---|---|
 | 第一次试用 | `python ai_code.py --mock` | 离线、零风险、不用密钥 |
-| 读别人的代码、问答为主 | `python ai_code.py` | 默认 `readonly`：写工具直接 403 |
-| 让它改自己的项目 | `python ai_code.py --permission write` | 每次写前自动快照，`/undo` 一键回滚 |
+| 读别人的代码、更谨慎的场合 | `python ai_code.py --permission readonly` | 写工具直接 403 |
+| 让它改自己的项目 | `python ai_code.py`（默认 `write`） | 项目内写免确认；每次写前自动快照，`/undo` 一键回滚 |
 | 跑它给的命令 | `--permission write --sandbox job`（Windows）/ `--sandbox docker` | 真内核边界；拿不到边界就 503，**绝不回退宿主** |
 | 接真实模型 | `python ai_code.py` → 首页选 `2` 走配置向导 | 需要 `pip install requests`；或直接 `/provider deepseek <key>` |
 | 只让它干一件小事 | `python ai_code.py --input "现在几点"` | 单轮、非交互 |
@@ -46,7 +46,7 @@ HooH 的所有配置混乱几乎都来自把这三件事混成一件事：
 
 ## 3 · 该懂的七件事
 
-1. **默认只读。** 起步权限是 `readonly`；提权是**人的动作**（`/permission write`、`F1`），模型只能 `request_permission` 求你。
+1. **默认 `write`（项目内），从严可以调回去。** 项目内的写有写前快照兜底 = 可逆 = 免确认（WP-AGENCY，2026-10-24）；**不可逆 × 项目外**的动作仍逐次确认（见第 4 条）。想更严用 `--permission readonly`；提权到 `full` 是**人的动作**（`/permission full`、`F1`），模型只能 `request_permission` 求你。headless 通道（`--mcp`）默认仍是 `readonly`。
 2. **写前自动快照。** 每次写操作都留物理快照：`/snapshots` 看列表，`/undo` 回滚最近一次；`.guardian/` 目录 Agent 自己改不了。回滚范围**就是那一轮动过的路径** —— 你同时自己改的文件不会被一起退回去（H-08）。用 `terminal_exec` / `code_execute` 这类"能任意写盘"的工具时范围说不清，会退回整树还原：宁可多退，不可少退。
 3. **`terminal_exec` 每次都问。** 它的危险命令黑名单可被引号/长选项/变量展开绕开，所以"人看一眼"是唯一有效防线——它不接受会话级授权。
 4. **外发要人点头。** 数据发往模型指定的目的地（`api_post`/`api_get`/`browser_*`/`notify_send` 的 email）、以及**覆盖/删除项目外已存在的文件**，都会逐次确认；配 `egress_allowlist` 等于把这件事一次性授权掉。
@@ -56,7 +56,7 @@ HooH 的所有配置混乱几乎都来自把这三件事混成一件事：
 
 ## 4 · 新手最容易踩的十个坑
 
-1. **"我让它写文件，它说 403"** —— 默认只读，先用 `/permission write`。
+1. **"我让它写文件，它说 403"** —— 默认 `write` 下项目内写不该 403；真遇到，看理由：**项目外 / 敏感目标**（该走的确认没走）或你显式配了 `readonly`（`/permission write` 提权）。
 2. **管道 / CI 里 `terminal_exec` 用不了** —— 非交互下审批统一 fail-close（拒绝）。要无人值守就得给真边界：`--sandbox docker` + `--approval-policy on_failure`。
 3. **`--sandbox job` 在 Linux/macOS 上不存在** —— Job Object 是 Windows 专有原语；启动时会提示，改用 `--sandbox docker`。
 4. **接不了真实模型** —— 缺 `requests`；`python ai_code.py --install-ui` 还能顺手装补全。

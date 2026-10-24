@@ -931,8 +931,14 @@ def load_cli_config() -> Dict:
     return {}
 
 
-def merge_config(args) -> Dict:
-    """配置合并：args > ~/.ai_code.json > ~/.claude/settings.json（本机已有配置） > 环境变量"""
+def merge_config(args, default_permission: str = "write") -> Dict:
+    """配置合并：args > ~/.ai_code.json > ~/.claude/settings.json（本机已有配置） > 环境变量
+
+    `default_permission`：交互式产品（REPL/TUI/`--serve`）默认 `write` —— 项目内写
+    有写前快照兜底 = 可逆 = 免确认，只把「问」留给不可逆 × 范围外的动作（WP-AGENCY）；
+    **headless 通道**（`--mcp`、冻结入口 `packaging/hooh_mcp.py`）必须显式传
+    `readonly`：没人看着，从严——这是两种通道各自的产品契约。
+    """
     cfg: Dict = {}
     cfg.update(load_claude_settings())
     cfg.update(load_cli_config())
@@ -949,7 +955,7 @@ def merge_config(args) -> Dict:
     cfg.setdefault("base_url", os.environ.get("AGENT_BASE_URL", ""))
     cfg.setdefault("api_key", os.environ.get("AGENT_API_KEY", ""))
     cfg.setdefault("model", os.environ.get("AGENT_MODEL", "default"))
-    cfg.setdefault("permission", "readonly")
+    cfg.setdefault("permission", default_permission)
     cfg.setdefault("project_root", ".")
     cfg.setdefault("bait", True)
     cfg.setdefault("tools", bool(getattr(args, "tools", False)))
@@ -8785,7 +8791,7 @@ _SETTINGS_SECTIONS: Tuple[Dict[str, Any], ...] = (
     {"id": "security", "label_key": "set_sec", "items": (
         {"key": "permission", "type": "enum", "scope": "global",
          "label_key": "set_permission", "hints": "/permission", "hot": True,
-         "default": "readonly"},
+         "default": "write"},
         {"key": "sandbox", "type": "enum", "scope": "global",
          "label_key": "set_sandbox", "hints": "/sandbox", "hot": True,
          "default": "off"},
@@ -9782,7 +9788,10 @@ def main() -> None:
     if args.install_executor:
         sys.exit(0 if _install_executor() else 1)
 
-    cfg = merge_config(args)
+    # 权限默认档按通道分流：交互式（REPL/TUI/--serve）= write（WP-AGENCY）；
+    # `--mcp` 是 headless 通道，没人看着就从严 —— 默认 readonly。
+    cfg = merge_config(args, default_permission=(
+        "readonly" if getattr(args, "mcp", False) else "write"))
     # 配色要在**任何一屏画面之前**定下来：`c()`（传统 REPL/首屏/卡片）、引擎屏的
     # `cell()`、SVG 预览三处都从同一个色板取值，所以只在这里应用一次。
     # 同时写回 ACE_THEME：引擎屏（ui/ace_engine_repl.py）与被拉起的子进程读的是

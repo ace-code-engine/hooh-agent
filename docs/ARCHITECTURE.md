@@ -85,6 +85,7 @@ ace-agent/
 │   ├── ace_engine_repl.py      #   把 REPL 接到引擎上（`--engine`，真终端下默认）：worker 跑轮次 + 队列回收输出
 │   ├── ace_swatches.py         #   风格词典屏（瑞士风格试点）+ 13 组断言（含 golden 与帧预算）
 │   ├── ace_widgets.py          #   边角小零件：状态图标六态 / 整宽分隔线(标题可居中) / 八分之一块进度条 / 快捷键提示 / byline / 方块小人
+│   ├── ace_noise_circle.py     #   开场揭幕的噪声圆盘（fBm 成团生长，一次性 ≤1.2s，规范 §6 例外）
 │   └── i18n.py                 #   轻量国际化（zh / en / ja 字典在根级 locales/）
 ├── frontend/                   # 主前端（TypeScript + Ink，独立进程）：经 `ace --serve` 的双向 NDJSON 协议驱动引擎；与 ui/ 并存，内部结构见 frontend/README.md
 ├── cli/                        # 操作者侧工具：自检 / 上下文 / 会话日志
@@ -161,7 +162,9 @@ ace-agent/
 │   ├── subagent_tools.py       #   子代理（spawn/fork，独立工具执行循环）
 │   ├── skill_tools.py          #   文件式技能库（SKILL.md 目录扫描）
 │   ├── kb_tools.py             #   自定义知识库（kb_search/kb_add/kb_list）
-│   └── docker_sandbox.py       #   容器执行层（--sandbox docker）
+│   ├── docker_sandbox.py       #   容器执行层（--sandbox docker）
+│   ├── ace_openai_proxy.py     #   OpenAI 兼容本地端点（DSH-TUI-BRIDGE B 方案：审批默认拒绝）
+│   └── dsh_bridge_setup.py     #   DSH 桥接一键配置（写 provider/模型指向本地端点）
 ├── gateway_v2/                 # 网关包：intent(L1/L2) · guard(L4) · flywheel(L5)
 ├── locales/                    # 国际化字典（zh / en / ja JSON），由 ui/i18n.py 读取
 ├── prompts/                    # 系统提示词：v7 完整版 · v8 精简版 · tools 原生调用版
@@ -239,6 +242,10 @@ ace-agent/
 │   │   └── ACE-MCP-SEC-SUBAGENT.md  #   WP-11 立项卡（**SEC-022**）：HooH 作为 MCP 安全子层 + 共用 CubeSandbox 底座
 │   │   ├── TUI-PRIOR-ART.md       #   同行研读：pi 与 Claude Code 的界面源码（控制层 / 设计系统 / 可搬清单）
 │   │   ├── UI-OVERHAUL.md         #   界面重做立项书（现状取证 / 路线 A·B·C / 分期 / 可执行验收 / 明确不做）
+│   │   ├── GUI-OVERHAUL.md        #   WP-GUI 总纲：把 TUI 当 GUI 写（鼠标/触摸板 / 浮层窗口 / ≤5Hz 动画；只动 frontend/）
+│   │   ├── DSH-TUI-PORT.md        #   dsh-TUI 配色+布局移植立项（阶段①色板唯一真相源已完成）
+│   │   ├── DSH-TUI-BRIDGE.md      #   B 方案立项：UI 用 dsh-TUI、引擎用 ace（本地 OpenAI 兼容端点桥接）
+│   │   ├── WP-AGENCY.md           #   WP-AGENCY 立项卡：把正常 Agent 的体感拿回来（默认档按通道分流 / 快照增量化 / 命令形状记忆 / 原生 tool-calling；fail-close 与不可逆×范围外确认不动）
 │   │   └── DshShell-AceCapabilities.md # 整壳换 DSH TUI 后 ace 六项本体的露出设计卡（CAP-01~07：逐能力落点 / 优先级 / 最小新协议面 / 验收 / 上游冲突；§0 范围决定（ui/ 保留为降级路径）/ §3.7 引擎先行项（会话浏览器·树·设置的数据源）/ §6 前置门 G1（IME 候选框）与落点勘误（PageMargin 合并 · ui.js 唯一公开面 · 内核 vendor 落点））
 │   └── history/                #   会话纪要 / 调研 / 规范历史
 │       ├── SESSION-2026-09-06.md   #   评审会话纪要（风险清单→决策→提交→OPEN）
