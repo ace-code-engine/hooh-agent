@@ -42,8 +42,7 @@ except Exception:  # noqa: BLE001 —— 加固失败也要能跑
 
 
 # 测试临时目录统一放在工作区（部分受限环境禁止写系统临时区 / mkdtemp 目录）
-import uuid  # noqa: E402
-import tempfile  # noqa: E402
+import uuid  # noqa: E402   （tempfile 顶部已 import —— 此处重复会被 ruff F811 判红）
 
 TEST_TMP = FOLDER / ".test_tmp"
 TEST_TMP.mkdir(exist_ok=True)
