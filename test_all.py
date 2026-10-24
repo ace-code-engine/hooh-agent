@@ -2217,6 +2217,15 @@ if _want("10"):
           _sens("proj/.guardian/snapshots/x/meta.json")
           and _sens("C:\\proj\\.guardian\\rollback_backups") is not None
           and _sens("proj/guardian_notes.md") is None)
+    # —— WP-AGENCY 加固收尾：信任锚（签名密钥/端点 token）不再漏出名单外 ——
+    # 锚在 `%LOCALAPPDATA%\ace-agent\state\<项目哈希>\`，此前一次已确认的
+    # `type ...signing_key` 只落到 prompt 档（点一次 y 就能重签整条审计链）。
+    check("[WP-AGENCY] sensitive_target 命中信任锚（ace-agent\\state 下的密钥/token）",
+          _sens("C:\\Users\\x\\AppData\\Local\\ace-agent\\state\\ab12cd34\\signing_key")
+          and _sens("C:/Users/x/AppData/Local/ace-agent/state/ab12cd34/proxy_key")
+          and _sens("C:/Users/x/AppData/Local/ace-agent/README.md") is not None
+          and _sens("proj/ace-agent-notes.md") is None,
+          str(_sens("C:/Users/x/AppData/Local/ace-agent/state/ab12cd34/signing_key")))
     _el_g = ExecutionLayer(project_root=str(mktemp()), permission_level="full")
     (_el_g.project_root / "app.py").write_text("orig = 1", encoding="utf-8")
     _r = run_agent(_el_g, "file_write", path="app.py", content="changed = 2")

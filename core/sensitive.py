@@ -159,6 +159,13 @@ def _match(spelled: str) -> Optional[str]:
         return "版本库元数据（.gitmodules，改它等于给子模块换仓库）"
     if any(fr in low for fr in AUTH_STATE_PATH_FRAGMENTS):
         return "Agent 自身的授权规则文件（改它等于给自己发通行证）"
+    if "ace-agent" in parts:
+        # 信任锚（RG-01）：快照签名密钥 / 本地端点 token 落在
+        # `%LOCALAPPDATA%\ace-agent\state\<项目哈希>\`。此前不在任何名单里 ——
+        # 一次已确认的 `type %LOCALAPPDATA%\ace-agent\state\...\signing_key`
+        # 就能把密钥读出去重签整条审计链。引擎进程自己直读密钥不走工具层，
+        # 不受此判定影响（它本来就该读）；挡的是**被管的模型**借工具够到它。
+        return "信任锚（快照签名密钥 / 端点 token）"
     if name.endswith(CREDENTIAL_SUFFIXES):
         return f"私钥/证书文件: {name}"
     for d in SENSITIVE_DIRNAMES:
