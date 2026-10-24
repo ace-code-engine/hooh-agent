@@ -4023,7 +4023,7 @@ class _SlashCommands:
         return str(picked)
 
     def _config_steps(self, answers: Dict[str, str]) -> List["ace_dialog.WizardStep"]:
-        """向导的三步（数据驱动）：提供商 → 密钥 → 模型。
+        """向导的四步（数据驱动）：提供商 → 密钥 → 模型 → 原生工具调用。
 
         每一步的默认值取**当前配置**，所以"回车跳过"永远是"保持原值"；模型那一步的
         可选值跟着上一步选的提供商走（选了 Kimi 却列出 DeepSeek 的模型，是让人按错）。
@@ -4059,6 +4059,14 @@ class _SlashCommands:
                             self.cfg.get("model", "")),
                 choices=model_choices, choice_values=model_choices,
                 help_text=t("wizard_help_model")),
+            # WP-AGENCY 刀4：原生工具调用是一等公民，就该在首次配置时问一次——
+            # 它是"快/省 token/杀掉协议死路"的那一刀，藏在一个没人知道的 flag 后面
+            # 等于没有。端点不支持时引擎会自动降级并声明（_stream_openai 的 400/404 判据）。
+            ace_dialog.WizardStep(
+                "tools", t("wizard_step_tools"), t("wizard_ask_tools"),
+                default="on" if self.cfg.get("tools") else "off",
+                choices=["on", "off"], choice_values=["on", "off"],
+                help_text=t("wizard_help_tools")),
         ]
 
     def _apply_config_answers(self, answers: Dict[str, str]) -> None:
@@ -4075,6 +4083,9 @@ class _SlashCommands:
         model = str(answers.get("model") or "")
         if model:
             self.cfg["model"] = model
+        tools = str(answers.get("tools") or "").strip().lower()
+        if tools in ("on", "off"):
+            self.cfg["tools"] = (tools == "on")
 
     def _handle_cli_mistype(self, line: str) -> None:
         """防蠢处理：识别并接管误打进 REPL 的命令行指令"""
@@ -8871,6 +8882,12 @@ _SETTINGS_SECTIONS: Tuple[Dict[str, Any], ...] = (
         {"key": "api_key", "type": "str", "scope": "global",
          "label_key": "set_api_key", "write_cmd": "/config", "hot": True,
          "secret": True, "default": ""},
+        # WP-AGENCY 刀4：原生工具调用（OpenAI 兼容 function calling）。写通道
+        # `/config` 第 4 步；`hot: False` —— client 的 tools 面在会话开始时定型，
+        # 改完下次会话生效（与 provider/model 换档同寿命）。
+        {"key": "tools", "type": "bool", "scope": "global",
+         "label_key": "set_tools", "write_cmd": "/config", "hot": False,
+         "default": "off"},
     )},
     {"id": "model", "label_key": "set_model_sec", "items": (
         {"key": "model", "type": "str", "scope": "global",

@@ -9353,14 +9353,28 @@ if _want("50"):
                              "bait": False, "base_url": "", "api_key": "",
                              "model": "m1"}, mock=True)
     _cfg_steps50 = _cli50._config_steps({})
-    check("/config 向导：三步（提供商/密钥/模型），密钥步是隐藏输入",
-          [s.key for s in _cfg_steps50] == ["provider", "api_key", "model"]
+    check("/config 向导：四步（提供商/密钥/模型/原生工具），密钥步是隐藏输入",
+          [s.key for s in _cfg_steps50] == ["provider", "api_key", "model", "tools"]
           and _cfg_steps50[1].hidden is True, [s.key for s in _cfg_steps50])
     check("/config 向导：模型步的可选值跟着上一步选的提供商走",
           _cli50._config_steps({"provider": "2"})[2].choices
           == list(_ai50.PROVIDERS[1]["models"][:8]), "")
     check("/config 向导：非法提供商标号当场拒绝并说清范围",
           _cfg_steps50[0].check("99") != "" and _cfg_steps50[0].check("1") == "", "")
+    # WP-AGENCY 刀4：原生工具调用进首次配置（第四步），答案 on/off 落 cfg["tools"]
+    check("[WP-AGENCY] /config 第 4 步是 on/off 二选一，默认跟当前配置",
+          _cfg_steps50[3].choice_values == ["on", "off"]
+          and _cfg_steps50[3].default == "off", _cfg_steps50[3].default)
+    _cli50._apply_config_answers({"tools": "on"})
+    check("[WP-AGENCY] 向导答案 tools=on 落库", _cli50.cfg.get("tools") is True, "")
+    _cli50._apply_config_answers({"tools": "off"})
+    check("[WP-AGENCY] 向导答案 tools=off 落库", _cli50.cfg.get("tools") is False, "")
+    _sec50 = next(s for s in _ai50._SETTINGS_SECTIONS if s["id"] == "security")
+    _tools_item = next((i for i in _sec50["items"] if i["key"] == "tools"), None)
+    check("[WP-AGENCY] 设置注册表登记 tools（写通道 /config，hot=False 与换档同寿命）",
+          _tools_item is not None and _tools_item["write_cmd"] == "/config"
+          and _tools_item["hot"] is False and _tools_item["default"] == "off",
+          str(_tools_item))
 
     # —— H-35：`hidden` 必须走到外壳（上面那条只钉"步骤**声明了** hidden" = 意图）——
     # 这一组钉**效果**：通道里有没有这个属性、渲染会不会画出值、兜底会不会用明文 input()。
@@ -9499,11 +9513,14 @@ if _want("50"):
         _ai50.save_cli_config = _orig_save50w
         _cli50w._reload_client_for = _orig_reload50w
     check("★/config 的提供商与模型步走**选择框**（不是打印清单再让人手输编号）",
-          [c[0] for c in _h50w.calls] == ["choose", "text", "choose"]
+          [c[0] for c in _h50w.calls] == ["choose", "text", "choose", "choose"]
           and _h50w.calls[1][2] is True
           and _cli50w.cfg.get("base_url") == _ai50.PROVIDERS[1]["base_url"]
           and _cli50w.cfg.get("model") == _ai50.PROVIDERS[1]["models"][0],
           (_h50w.calls, _cli50w.cfg.get("base_url"), _cli50w.cfg.get("model")))
+    # 第 4 个 choose = 原生工具调用步（选了第 1 项 = on）—— WP-AGENCY 刀4
+    check("[WP-AGENCY] 向导第 4 步（原生工具）的选择也落库",
+          _cli50w.cfg.get("tools") is True, _cli50w.cfg.get("tools"))
 
     # ★H-31 追加（**子进程也守**）：`ACE_NO_SAVE_CONFIG=1` 时真实配置一个字节都不落盘。
     # 上面那把桩只在进程内生效，而本套件会 spawn `ai_code.py` —— 光靠桩挡不住子进程；
@@ -9835,7 +9852,7 @@ if _want("50"):
     _orig_getpass50 = _gp50.getpass
     _ai50.save_cli_config = lambda _cfg: None
     _cli50._reload_client = lambda: None
-    _answers50 = iter(["3", "sk-test", "deepseek-chat"])
+    _answers50 = iter(["3", "sk-test", "deepseek-chat", "on"])
     _bi50.input = lambda *_a, **_k: next(_answers50)
     _gp50.getpass = lambda *_a, **_k: next(_answers50)
     _buf50 = _io50.StringIO()

@@ -222,6 +222,21 @@ python -m cli.ace_mandate show --file mandate.json      # 检查签名/有效期
 无人值守（CI / 管道 / 无 tty）请**显式**组合 `--sandbox job|docker` + `approval_policy: on_failure`。默认档下需要审批的动作在非交互里会被直接拒绝（`terminal_exec` 在 CI 里不可用），而无需审批的写工具照跑——见 [`SECURITY-MODEL.md`](security/SECURITY-MODEL.md) 的「无人值守 / 自动化部署」；启动时也会对"非交互 + `off` 档 + 非只读"这个组合主动打提示。
 **`code_execute` 例外（H-30）**：它不再属于"无需审批就照跑"的那一类 —— 见下一节。
 
+### 原生工具调用（`tools`，同 `--tools`，WP-AGENCY 刀4）
+
+模型侧走哪条协议：`on` = OpenAI 兼容 function calling（`tools` 参数 + `tool_calls` 应答），
+`off` = 文本协议（`<INTERNAL>/<EXTERNAL>` 标签）。**执行层裁决两边完全一致**——原生调用
+在进执行层前被转成同一种内部表示（`agent_runner.tool_calls_to_protocol`），权限/快照/审计
+一步不少。
+
+- **写通道**：`/config` 向导第 4 步（或配置文件 `"tools": true`、CLI `--tools`）。
+  设置面板可显示但 `hot: false`——工具面在会话开始时定型，改完下次会话生效。
+- **自动降级（有声明）**：端点不认 `tools` 参数（HTTP 400/404）时当次起降级为文本协议，
+  `tools_ok=False` 永久关掉以免每轮撞一次；stderr 与 `/model` 的状态里都会说明
+  （HL-03 规则②：降级不许静默）。
+- **建议**：OpenAI 兼容端点（智谱/DeepSeek/Kimi/OpenRouter/本地 Ollama 等）建议 `on`——
+  更快（无协议 token 税）、更稳（无 FORMAT_ERROR 死路）；只有纯文本补全端点才需要 `off`。
+
 ### 无边界时的 `code_execute`（`sandbox.code_execute_host`，H-30）
 
 `code_execute` 有三条可能落到宿主进程内执行的路，改动前后各一条：

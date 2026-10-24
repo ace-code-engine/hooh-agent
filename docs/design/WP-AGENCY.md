@@ -79,5 +79,12 @@
       一次点击就长期生效的动作,闸门建在建议端;分层一致性(UNSAFE_RULE_HEADS ↔
       BANNED_AUTO_PREFIXES、组合正则)由守卫测试钉住。
 - [ ] 前置小件:可行动 503/403 文案
-- [ ] 刀4 原生 tool-calling 阶段 1
+- [x] 刀4 原生 tool-calling 阶段 1——**验证：骨架已在**（`agent_runner`/`ai_code` 全链路：
+      tools 参数 + `tool_calls_to_protocol` 复用执行层 + 400/404 自动降级并声明 +
+      tools 模式纯文本清洗），离线冒烟通过（mock 原生 tool_call → 执行 → final，2 轮）。
+      本刀做的是把它从暗门变成一等公民：/config 向导加第 4 步「原生工具调用」
+      （on/off，答案落 `cfg["tools"]`）、设置注册表登记（hot=False，与换档同寿命）、
+      CONFIGURATION.md 立契约（含自动降级语义与建议矩阵）、三语 locale 4 键。
+      阶段 2（待做）：TUI 设置面板显示端点实际状态（tools_ok/tools_degraded）。
+
 - [ ] 指标入统计
