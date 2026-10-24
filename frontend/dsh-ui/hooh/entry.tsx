@@ -12,12 +12,17 @@
  */
 
 import React from 'react'
-import { basename } from 'node:path'
+import { basename, join } from 'node:path'
 
 import { App } from './App.js'
 import { render } from '../ui.js'
 import { openEngine } from './engine.js'
 import type { AceSnapshot } from './adapter.js'
+
+/** 仓库根（本文件在 `frontend/dsh-ui/hooh/`）。**绝对路径**——ace.cmd 是 pushd
+ *  frontend 之后起壳的，`process.cwd()` 是 frontend，拿它当项目根会让引擎的
+ *  cwd 变成 frontend/frontend（不存在），spawn 直接死（2026-10-24 说话没回应）。 */
+const REPO = join(import.meta.dirname, '..', '..', '..')
 
 /** 从环境读快照；读不到的字段退回中性默认值（不编造一个假的模型名/权限档）。 */
 function snapshot(): AceSnapshot {
@@ -25,8 +30,8 @@ function snapshot(): AceSnapshot {
   return {
     version: env.ACE_VERSION ?? '1.1.0',
     model: env.ACE_MODEL ?? 'deepseek-v4-flash',
-    permission: env.ACE_PERMISSION ?? 'readonly',
-    cwd: env.ACE_PROJECT_ROOT ?? process.cwd(),
+    permission: env.ACE_PERMISSION ?? 'write',
+    cwd: env.ACE_PROJECT_ROOT ?? REPO,
     effort: env.ACE_EFFORT ?? 'max',
     preset: env.ACE_PRESET ?? 'code',
     ...(env.ACE_LAST_SESSION ? { lastSessionTitle: env.ACE_LAST_SESSION } : {}),

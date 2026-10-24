@@ -16,9 +16,9 @@
  * 上游那套投影器一行都不用改 —— 这正是"迁到我们自己这边"而不是"改它的代码"。
  */
 
-import { spawn } from 'node:child_process'
+import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
 import { existsSync } from 'node:fs'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 
 import { resolvePython } from '../../src/protocol/client.js'
 
@@ -62,12 +62,12 @@ export async function runAceTurn(opts: EngineOptions): Promise<AceEvent[]> {
   const entry = join(REPO, 'ai_code.py')
   if (!existsSync(entry)) throw new Error('找不到引擎入口: ' + entry)
 
-  const args = [entry, '--serve', '--project-root', opts.projectRoot,
-                '--permission', opts.permission ?? 'readonly']
+  const args = [entry, '--serve', '--project-root', resolve(opts.projectRoot),
+                '--permission', opts.permission ?? 'write']
   if (opts.mock === true) args.push('--mock')          // 默认**不** mock：真入口走真模型
 
   const child = spawn(py, args, {
-    cwd: opts.projectRoot,
+    cwd: resolve(opts.projectRoot),
     env: { ...process.env, PYTHONIOENCODING: 'utf-8', ACE_NO_ANIM: '1' },
     stdio: ['pipe', 'pipe', 'ignore'],
   })
@@ -280,17 +280,50 @@ export class AceEngine {
 
   constructor(private opts: EngineOptions) {
     const py = process.env.ACE_PYTHON || resolvePython()
+    // **必须解析成绝对路径**：ace.cmd 是 pushd frontend 之后起的壳，entry 里的
+    // cwd 是 `frontend`（相对）——拿它当子进程 cwd，Node 会对着 frontend 再拼一层
+    // （frontend/frontend，不存在），spawn 异步 ENOENT，而引擎死了无人知晓，
+    // 轮次干等 120s 超时、busy 锁死所有按键（2026-10-24「说话没回应」的根因）。
+    const root = resolve(opts.projectRoot)
     const args = [join(REPO, 'ai_code.py'), '--serve',
-                  '--project-root', opts.projectRoot,
+                  '--project-root', root,
                   '--permission', opts.permission ?? 'write']
     if (opts.mock === true) args.push('--mock')        // 默认真模型；只有测试/离线演示才 mock
     this.child = spawn(py, args, {
-      cwd: opts.projectRoot,
+      cwd: root,
       env: { ...process.env, PYTHONIOENCODING: 'utf-8', ACE_NO_ANIM: '1' },
-      stdio: ['pipe', 'pipe', 'ignore'],
-    })
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }) as ChildProcessWithoutNullStreams
     this.child.stdout.setEncoding('utf-8')
     this.child.stdout.on('data', (chunk: string) => this.feed(chunk))
+    this.child.stderr.setEncoding('utf-8')
+    this.child.stderr.on('data', (chunk: string) => { this.stderrText += chunk })
+    // spawn 失败（解释器不存在 / cwd 无效）与引擎中途退出都必须**可见**：
+    // 不挂 error 监听的话 EventEmitter 直接抛；不处理 exit 的话所有 waiter
+    // 挂到 120s 超时。两条路都发 notice + 释放等待者（fail-visible）。
+    this.child.on('error', (err: Error) => {
+      this.emitLocal('notice', `✗ 引擎启动失败：${err.message}（引擎 stderr：${this.stderrText.slice(-200)}）`)
+      this.releaseWaiters()
+    })
+    this.child.on('exit', (code) => {
+      this.emitLocal('notice', `✗ 引擎已退出（code=${code ?? 'null'}）。stderr 尾部：${this.stderrText.slice(-200)}`)
+      this.releaseWaiters()
+    })
+    this.child.stdout.on('close', () => this.releaseWaiters())
+  }
+
+  private stderrText = ''
+
+  /** 给所有订阅者发一条本地 notice（引擎死了也要让用户看见死因）。 */
+  private emitLocal(type: string, text: string): void {
+    this.listeners.forEach((fn) => fn({ type, text }))
+  }
+
+  /** 释放所有挂起的往返（引擎没了，等不到 final/resp 了）。 */
+  private releaseWaiters(): void {
+    const done = [...this.waiters.values()]
+    this.waiters.clear()
+    done.forEach((fn) => fn())
   }
 
   private feed(chunk: string): void {

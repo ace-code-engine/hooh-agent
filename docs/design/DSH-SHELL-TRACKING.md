@@ -56,6 +56,14 @@
   对应物的动作如实进 notice),参数段铭牌(模型/强度/预设/权限)点击打开
   对应命令,命令候选点击直接执行,工作区名牌如实告知未接入。已知残留:
   命令候选表还是 entry 里硬编码的六条,待接 initialize 握手的 commands。
+- 2026-10-24 第三批续(用户实测"说话没任何回应"):第二层根因——壳把项目根
+  取成 `process.cwd()`(ace.cmd pushd frontend 后 = frontend,相对路径),
+  引擎 spawn 的 cwd 变成 frontend/frontend(不存在)→ 异步 ENOENT →
+  AceEngine 没挂 error 监听,引擎死了无人知晓,轮次干等 120s 超时且 busy
+  锁死全部按键。修复:项目根解析到**仓库绝对路径**(entry/engine 双处),
+  spawn error/exit/EOF 全部可见化(发 notice + 释放等待者),stderr 从
+  ignore 改为管道留档。实测(engine 层,frontend cwd + mock):完整事件流
+  session_start→user_message→tool_call→model_delta→final 全部到达。
 - 2026-10-24 第三批(用户实测"一按 / 就闪退"):根因是 commands 形状——
   CommandSuggestions 对每条取 `stringWidth(c.name)`,壳喂的是字符串数组,
   当场炸渲染树。改喂上游 LocalCommand 形状({name, description});同批把
