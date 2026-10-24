@@ -16,6 +16,29 @@ guardian.py —— 物理快照回滚
     1. 写入操作前自动创建项目快照（完整文件树，排除 .git / __pycache__ / .venv 等）
     2. 回滚前执行完整性预检：快照非空、元信息完整、文件校验和一致
     3. 回滚时先备份当前状态，再恢复快照，恢复成功后清理备份
+
+增量存储（WP-AGENCY 刀2，2026-10-24）：
+    每次 file_write 都要建快照 —— 若每次都"整树复制 + 全树哈希"，写热路径就背着
+    一次全树读的代价（实测 347 文件 / 11.4 MB 夹具单次 ~2 s）。于是内容寻址：
+
+      .guardian/objects/<sha256[:2]>/<sha256>   内容对象（**只写不删不改**， immutable）
+      .guardian/objects/index.json              rel 路径 → {size, mtime_ns, sha256} 缓存
+      .guardian/snapshots/<id>/files/<rel>      指向对象的**硬链接**（旧消费者零改动）
+
+    快照时逐文件看 `(size, mtime_ns)`：与 index 一致且对象在 → 直接硬链接，**不读不哈希**；
+    不一致/新文件 → 拷进对象库（temp+rename 原子落盘）+ 哈希一次。哈希只发生在
+    "真变了的文件"上。meta.json 的每文件 sha256 **语义与格式不变**——所以
+    `verify_snapshot()` / `rollback()` / 外部工具全部零改动；硬链接损坏、对象缺失
+    都会在校验那一步如实暴露（默认 verify_policy="create" 时在写之前暴露）。
+
+    知情取舍（写明不装糊涂）：
+    - **mtime 欺骗**：能改 mtime 的进程（同用户）可让"变了"的文件被当成"没变"，
+      于是新快照按 index 复用**旧内容**对象——注意这是往旧退的方向，不是把篡改
+      藏进新快照；且 meta 里记录的 sha256 与硬链接内容仍由校验步骤对账。
+      要彻底关掉这层缓存：删掉 `objects/index.json`（下次快照自动全量重建）。
+    - **index.json 是缓存不是真相**：丢了/坏了只是退回全量哈希，绝不 fail-close。
+    - **对象库回收**：`prune()` 删快照后跟着 `gc_objects()`，只删没有任何存活
+      快照引用的对象。
 """
 
 import hashlib
@@ -165,6 +188,13 @@ class Guardian:
         self.store = Path(store_dir) if store_dir else self.project_root / ".guardian"
         self.snap_dir = self.store / "snapshots"
         self.backup_dir = self.store / "rollback_backups"
+        # 增量对象库（WP-AGENCY 刀2）：内容寻址 + 硬链接进快照。index 是**缓存**：
+        # 丢了坏了只退回全量哈希，绝不 fail-close。
+        self.objects_dir = self.store / "objects"
+        self._index_path = self.objects_dir / "index.json"
+        self._index: Optional[Dict] = None          # 惰性加载；None = 还没读过
+        self._index_dirty = False
+        self._link_ok: Optional[bool] = None        # None = 还没试过；False = 本卷不支持硬链接
         # 信任锚（RG-01）：签名密钥放工作区之外。快照本身**仍留在 `.guardian/snapshots/`** ——
         # 那是数据不是锚，搬它等于同时动 /undo、/rollback、gc 与一堆既有断言，收益却与 I1 无关。
         self.anchor = anchor_dir_for(self.project_root, anchor_dir)
@@ -203,7 +233,7 @@ class Guardian:
                   file=sys.stderr)
             verify_policy = "create"
         self.verify_policy = verify_policy
-        for d in (self.snap_dir, self.backup_dir):
+        for d in (self.snap_dir, self.backup_dir, self.objects_dir):
             d.mkdir(parents=True, exist_ok=True)
 
     def _sign(self, content: str) -> str:
@@ -250,6 +280,80 @@ class Guardian:
                 return list(ex.map(self._sha256, items))
         except RuntimeError:
             return [self._sha256(p) for p in items]
+
+    # ---------- 增量对象库（WP-AGENCY 刀2） ----------
+
+    def _load_index(self) -> Dict:
+        """读 `(size, mtime_ns) → sha256` 缓存。**缓存不是真相**：坏了就退回全量哈希。"""
+        if self._index is None:
+            try:
+                raw = json.loads(self._index_path.read_text(encoding="utf-8"))
+                self._index = raw if isinstance(raw, dict) else {}
+            except (OSError, json.JSONDecodeError):
+                self._index = {}
+        return self._index
+
+    def _save_index(self) -> None:
+        if not self._index_dirty or self._index is None:
+            return
+        self.objects_dir.mkdir(parents=True, exist_ok=True)
+        tmp = self._index_path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps(self._index, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(self._index_path)
+        self._index_dirty = False
+
+    def _object_path(self, sha: str) -> Path:
+        return self.objects_dir / sha[:2] / sha
+
+    def _link_into(self, src: Path, dst: Path) -> None:
+        """把对象接进快照：优先硬链接（零拷贝），这一卷不支持就退回 copy2。
+
+        单独成方法是为了让测试可以覆盖（"硬链接失败也要能出快照"那条）。
+        第一次失败就记住 `_link_ok=False`，后面全部走拷贝，免得逐文件白试。
+        """
+        if self._link_ok is not False:
+            try:
+                os.link(src, dst)
+                self._link_ok = True
+                return
+            except OSError:
+                if self._link_ok is None:
+                    self._link_ok = False
+        shutil.copy2(src, dst)
+
+    def _stage_file(self, src: Path, rel_posix: str, dst: Path) -> Tuple[str, int]:
+        """把一个源文件"装进"快照，返回 `(sha256, size)`。
+
+        - `(size, mtime_ns)` 与 index 一致且对象还在 → 直接硬链接，**不读不哈希**
+          （这正是增量化省下的钱：哈希只发生在真变了的文件上）；
+        - 否则 → 哈希一次 + 拷进对象库（temp+rename 原子落盘）+ 更新 index。
+        对象**只写一次、永不二次打开写**：硬链接共享数据，快照文件因此在回滚前
+        不会被后续写入污染——这是硬链接方案安全的前提，别改成原地写对象。
+        """
+        st = src.stat()
+        index = self._load_index()
+        entry = index.get(rel_posix)
+        if (entry and isinstance(entry, dict)
+                and entry.get("size") == st.st_size
+                and entry.get("mtime_ns") == st.st_mtime_ns):
+            cand = self._object_path(str(entry.get("sha256") or ""))
+            if cand.is_file():
+                dst.parent.mkdir(parents=True, exist_ok=True)
+                self._link_into(cand, dst)
+                return str(entry["sha256"]), st.st_size
+        sha = self._sha256(src)
+        obj = self._object_path(sha)
+        if not obj.is_file():
+            obj.parent.mkdir(parents=True, exist_ok=True)
+            tmp = obj.with_name(f".tmp_{uuid.uuid4().hex}")
+            shutil.copy2(src, tmp)
+            os.replace(tmp, obj)
+        index[rel_posix] = {"size": st.st_size, "mtime_ns": st.st_mtime_ns,
+                            "sha256": sha}
+        self._index_dirty = True
+        dst.parent.mkdir(parents=True, exist_ok=True)
+        self._link_into(obj, dst)
+        return sha, st.st_size
 
     def count_credential_only_files(self) -> int:
         """数出"文件存在、却只因为像凭据而进不了快照"的个数（H-06）。
@@ -372,11 +476,11 @@ class Guardian:
             for src in files:
                 rel = src.relative_to(self.project_root)
                 dst = files_dest / rel
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copy2(src, dst)
+                # 增量：未变文件直接硬链接对象库（不读不哈希），只有真变的文件付拷贝+哈希。
+                sha, size = self._stage_file(src, rel.as_posix(), dst)
                 meta["files"][rel.as_posix()] = {
-                    "size": src.stat().st_size,
-                    "sha256": self._sha256(src),
+                    "size": size,
+                    "sha256": sha,
                 }
             # 元信息原子写入（配置签名密钥时附 HMAC 签名）
             meta_path = dest_root / "meta.json"
@@ -394,6 +498,9 @@ class Guardian:
                 if not ok:
                     raise SnapshotError(f"快照创建后完整性校验失败: {reason}")
             created = True
+            # index 是缓存：快照建成才落盘；半途失败的话，内存里已更新的条目留给
+            # 下一次快照再落盘（对象本身已有效，条目不亏）。
+            self._save_index()
         finally:
             if not created:
                 shutil.rmtree(dest_root, ignore_errors=True)
@@ -612,6 +719,50 @@ class Guardian:
         for s in to_remove:
             shutil.rmtree(self.snap_dir / s["id"], ignore_errors=True)
             removed += 1
+        if removed:
+            self.gc_objects()
+        return removed
+
+    def gc_objects(self) -> int:
+        """删除没有任何存活快照引用的内容对象，返回清理数量。
+
+        对象库是内容寻址的：快照被 `prune()` 删掉后，只剩它引用的对象成了孤儿。
+        这里按**存活快照的 meta** 重建引用集再删——比数硬链接可靠（硬链接数在
+        拷贝语义/跨平台下不可依赖）。进程内这是安全的（prune 在 snapshot 尾声
+        调用，刚建的快照 meta 已落盘）；两个引擎进程写同一项目时存在极窄的竞态
+        （刚 put 的对象被另一个进程 gc 掉），后果是该次快照失败重试，不产生错误数据。
+        """
+        if not self.objects_dir.is_dir():
+            return 0
+        referenced: set = set()
+        if self.snap_dir.is_dir():
+            for d in self.snap_dir.iterdir():
+                mp = d / "meta.json"
+                if not (d.is_dir() and mp.exists()):
+                    continue
+                try:
+                    meta = json.loads(mp.read_text(encoding="utf-8"))
+                except (json.JSONDecodeError, OSError):
+                    continue
+                for info in (meta.get("files") or {}).values():
+                    sha = str((info or {}).get("sha256") or "")
+                    if sha:
+                        referenced.add(sha)
+        removed = 0
+        for sub in self.objects_dir.iterdir():
+            if not sub.is_dir() or len(sub.name) != 2:
+                continue            # index.json / tmp / 陌生文件一律不动
+            for obj in sub.iterdir():
+                if obj.is_file() and obj.name not in referenced:
+                    try:
+                        obj.unlink()
+                        removed += 1
+                    except OSError:
+                        pass
+            try:
+                sub.rmdir()         # 清空了的分片目录顺手删
+            except OSError:
+                pass
         return removed
 
     def gc_orphans(self) -> int:
@@ -642,7 +793,9 @@ if __name__ == "__main__":
     args = parser.parse_args()
     g = Guardian(args.project)
     if args.gc:
-        print(f"清理孤儿快照目录: {g.gc_orphans()} 个")
+        n1 = g.gc_orphans()
+        n2 = g.gc_objects()
+        print(f"清理孤儿快照目录: {n1} 个；回收无引用内容对象: {n2} 个")
     elif args.list:
         print(json.dumps(g.list_snapshots(), ensure_ascii=False, indent=2))
     else:

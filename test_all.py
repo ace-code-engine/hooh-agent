@@ -430,6 +430,69 @@ if _want("3"):
     check("快照后新增文件已清理", not (proj / "new.txt").exists())
     check("回滚后备份已清理", len(list(g.backup_dir.iterdir())) == 0)
 
+    # —— WP-AGENCY 刀2：增量对象库（内容寻址 + 硬链接 + 跨快照去重） ——
+    def _obj_count(gi: Guardian) -> int:
+        return sum(1 for p in gi.objects_dir.glob("*/*") if p.is_file())
+
+    proj_inc = mktemp()
+    (proj_inc / "a.txt").write_text("same-a", encoding="utf-8")
+    (proj_inc / "sub").mkdir()
+    (proj_inc / "sub" / "b.txt").write_text("same-b", encoding="utf-8")
+    gi = Guardian(str(proj_inc))
+    _s1 = gi.snapshot("inc1")
+    check("增量：首个快照落对象库", _s1 is not None and _obj_count(gi) == 2,
+          f"objects={_obj_count(gi)}")
+    _n1 = _obj_count(gi)
+    _s2 = gi.snapshot("inc2")
+    check("增量：内容未变时零新对象（哈希被 index 跳过）",
+          _s2 is not None and _obj_count(gi) == _n1,
+          f"{_n1} → {_obj_count(gi)}")
+    check("增量：第二个快照校验通过", gi.verify_snapshot(_s2)[0])
+    (proj_inc / "a.txt").write_text("CHANGED-a", encoding="utf-8")
+    _s3 = gi.snapshot("inc3")
+    _meta3 = json.loads((gi.snap_dir / _s3 / "meta.json").read_text(encoding="utf-8"))
+    _meta2 = json.loads((gi.snap_dir / _s2 / "meta.json").read_text(encoding="utf-8"))
+    check("增量：只变化的文件产生新对象（恰 +1）",
+          _obj_count(gi) == _n1 + 1, f"{_n1} → {_obj_count(gi)}")
+    check("增量：变了的文件换了 sha，没变的复用同一 sha",
+          _meta3["files"]["a.txt"]["sha256"] != _meta2["files"]["a.txt"]["sha256"]
+          and _meta3["files"]["sub/b.txt"]["sha256"] == _meta2["files"]["sub/b.txt"]["sha256"])
+    (proj_inc / "a.txt").write_text("AFTER-S3", encoding="utf-8")
+    check("增量快照回滚：内容恢复", gi.rollback(_s3)
+          and (proj_inc / "a.txt").read_text(encoding="utf-8") == "CHANGED-a")
+    # 对象库回收：只删没有存活快照引用的对象
+    gi.prune(keep=1)
+    _alive = set()
+    for _d in gi.snap_dir.iterdir():
+        _mp = _d / "meta.json"
+        if _d.is_dir() and _mp.exists():
+            for _info in json.loads(_mp.read_text(encoding="utf-8"))["files"].values():
+                _alive.add(_info["sha256"])
+    _removed = gi.gc_objects()
+    check("增量：gc_objects 只留存活引用（孤儿对象被回收）",
+          _obj_count(gi) == len(_alive),
+          f"objects={_obj_count(gi)} 引用={len(_alive)} 删除={_removed}")
+    # 硬链接不可用的卷：退回拷贝也要出正确的快照（把 _link_ok 钉成 False 走真实回退分支）
+    class _NoLinkGuardian(Guardian):
+        def __init__(self, *a, **k):
+            super().__init__(*a, **k)
+            self._link_ok = False
+    gi_nolink = _NoLinkGuardian(str(mktemp()))
+    (gi_nolink.project_root / "x.txt").write_text("nolink", encoding="utf-8")
+    _snl = gi_nolink.snapshot("nolink")
+    check("增量：硬链接失败退回拷贝，快照仍正确",
+          _snl is not None and gi_nolink.verify_snapshot(_snl)[0])
+    # index.json 是缓存不是真相：写坏它，下一次快照退回全量哈希而不是崩
+    gi_idx = Guardian(str(mktemp()))
+    (gi_idx.project_root / "y.txt").write_text("idx", encoding="utf-8")
+    check("增量：首快照正常", gi_idx.snapshot("i1") is not None)
+    (gi_idx._index_path).write_text("{broken json", encoding="utf-8")
+    gi_idx._index = None                      # 模拟新进程读到坏缓存
+    (gi_idx.project_root / "y.txt").write_text("idx2", encoding="utf-8")
+    _si2 = gi_idx.snapshot("i2")
+    check("增量：index 损坏只退回性能，快照仍建成且通过校验",
+          _si2 is not None and gi_idx.verify_snapshot(_si2)[0])
+
     empty_g = Guardian(str(mktemp()))
     check("空项目快照返回 None", empty_g.snapshot("x") is None)
 

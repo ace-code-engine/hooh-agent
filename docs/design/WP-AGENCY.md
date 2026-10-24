@@ -65,7 +65,11 @@
 - [x] 刀1 默认档反转——`merge_config(default_permission=…)` 按通道分流：交互 `write` /
       headless 显式 `readonly`（`--mcp` 与冻结入口都钉死）；设置注册表默认同步；
       GETTING-STARTED / INTERFACES / MCP-SERVER / SECURITY-MODEL 四处契约文档改口
-- [ ] 刀2 快照增量化
+- [x] 刀2 快照增量化——`core/guardian.py` 内容寻址对象库（`.guardian/objects/`）
+      + 跨快照硬链接 + `(size, mtime_ns)` 索引跳过未变文件的哈希；meta.json 格式
+      不变（verify/rollback/外部工具零改动）；`prune()` 顺带 `gc_objects()` 回收
+      孤儿对象；mtime 欺骗的知情取舍（往旧退的方向）写在模块 docstring。
+      实测（300 文件夹具）：基线 2074ms → 未变树 360ms（5.8×）→ 单文件改动 304ms。
 - [ ] 刀3 命令形状记忆
 - [ ] 前置小件:可行动 503/403 文案
 - [ ] 刀4 原生 tool-calling 阶段 1
