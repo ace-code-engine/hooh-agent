@@ -775,6 +775,7 @@ export function App({ client, t, colorOf, initialMessage, menuOptions, fullscree
             <PermissionDialog
               tool={perm.tool}
               reason={perm.reason}
+              persistOk={perm.persistOk}
               t={t}
               color={colorOf}
               onAnswer={handleAnswer}

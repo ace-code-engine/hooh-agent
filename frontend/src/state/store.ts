@@ -74,7 +74,8 @@ export interface State {
   items: Item[];
   meta: Meta;
   /** 正在等待答案的审批（有值 = 应弹授权框）。 */
-  pendingPermission: { tool: string; reason: string; itemId: number } | null;
+  pendingPermission: { tool: string; reason: string; itemId: number;
+                       persistOk?: boolean } | null;
   /** 正在等待答案的选择（有值 = 应弹选择框）。同一时刻只会有一个。 */
   pendingChoice: {
     kind: ChoiceKind;
@@ -261,10 +262,13 @@ export function applyEvent(state: State, ev: AceEvent): State {
     case 'permission_request': {
       const tool = str(ev.tool);
       const reason = str(ev.reason);
+      // `persist_ok`（WP-AGENCY）：引擎说这次不适配「记住并写规则」（外发工具/
+      // 组合命令/危险包装）就隐藏第 4 项。字段缺失 = 旧引擎 = 照常显示（向后兼容）。
+      const persistOk = ev.persist_ok === false ? false : undefined;
       const next = push(state, { kind: 'permission', tool, reason });
       return {
         ...next,
-        pendingPermission: { tool, reason, itemId: next.seq },
+        pendingPermission: { tool, reason, itemId: next.seq, persistOk },
       };
     }
 

@@ -24,6 +24,12 @@ import { gstr } from '../render/glyphs.js';
 export interface PermissionDialogProps {
   tool: string;
   reason: string;
+  /**
+   * 引擎的「这次适不适合记规则」信号（WP-AGENCY 刀3）：`false` = 隐藏第 4 项
+   * （外发工具 / 组合命令 / 危险包装——引擎的 `suggest_rule_safe` 不会给出建议模式）。
+   * 缺省/undefined = 照常显示（旧引擎没有这个字段，点了也只会收到解释 notice）。
+   */
+  persistOk?: boolean;
   t: (key: string, params?: Record<string, string | number>) => string;
   color: (token: string) => string | undefined;
   /** 递答案。调用方负责发给引擎 —— 本组件不碰协议。`persist` 只在 session 上有意义。 */
@@ -58,6 +64,7 @@ export const PERMISSION_OPTIONS: Array<{
 export function PermissionDialog({
   tool,
   reason,
+  persistOk,
   t,
   color,
   onAnswer,
@@ -66,6 +73,9 @@ export function PermissionDialog({
   const [cursor, setCursor] = useState(0);
   const [feedback, setFeedback] = useState('');
   const [typingReason, setTypingReason] = useState(false);
+  // 选项表按 persist_ok 过滤：隐藏第 4 项时编号/方向键自动收回到三态
+  // （数字键 '4' 落在越界分支，天然无效）。persistOk 在一次弹窗内不变。
+  const opts = persistOk === false ? PERMISSION_OPTIONS.slice(0, 3) : PERMISSION_OPTIONS;
 
   useInput(
     (input, key) => {
@@ -94,10 +104,10 @@ export function PermissionDialog({
       }
 
       if (key.upArrow) {
-        setCursor((c) => (c - 1 + PERMISSION_OPTIONS.length) % PERMISSION_OPTIONS.length);
+        setCursor((c) => (c - 1 + opts.length) % opts.length);
       }
       if (key.downArrow) {
-        setCursor((c) => (c + 1) % PERMISSION_OPTIONS.length);
+        setCursor((c) => (c + 1) % opts.length);
       }
 
       // Esc = 拒绝。这是全局约定（对话里 Esc 也是中断），授权框里沿用同一条。
@@ -111,13 +121,13 @@ export function PermissionDialog({
         return;
       }
       if (key.return) {
-        const o = PERMISSION_OPTIONS[cursor]!;
+        const o = opts[cursor]!;
         onAnswer(o.decision, undefined, o.persist);
         return;
       }
       const idx = '1234'.indexOf(input);
-      if (idx >= 0 && idx < PERMISSION_OPTIONS.length) {
-        const o = PERMISSION_OPTIONS[idx]!;
+      if (idx >= 0 && idx < opts.length) {
+        const o = opts[idx]!;
         onAnswer(o.decision, undefined, o.persist);
       }
     },
@@ -144,7 +154,7 @@ export function PermissionDialog({
           <Text color={color('dim')}>{gstr('▌')}</Text>
         </Text>
       ) : (
-        PERMISSION_OPTIONS.map((o, i) => (
+        opts.map((o, i) => (
           <Text key={o.decision}
                 color={cursor === i ? color('accent') : o.danger ? color('warn') : color('text')}>
             {gstr(cursor === i ? '▶ ' : '  ')}

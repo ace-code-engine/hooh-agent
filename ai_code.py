@@ -330,6 +330,32 @@ def _print_sandbox_probe() -> None:
     print(c("dim", f"  {r['advice']}"))
 
 
+def _persist_ok_for(tool_name: str, params: Dict) -> bool:
+    """这次确认适不适合提供「记住并写规则」（授权框第 4 项的显隐信号，WP-AGENCY）。
+
+    三不：外发工具不（规则按工具名给等于出口全开）；组合命令不（H-27，前缀不是
+    "一条命令"的形状）；危险包装第一词不（`python:*` 会连 `python -c` 一起放行）。
+    判据就是「`suggest_rule_safe` 给不给得出建议模式」—— 不另立一套标准。
+    """
+    try:
+        suggested, _why = ace_rules.suggest_rule_safe(tool_name, params or {})
+    except Exception:  # noqa: BLE001 —— 判定失败按"不提供"处理（安全方向）
+        return False
+    return bool(suggested)
+
+
+def _auto_persist_requested(ui_host, decision: str) -> bool:
+    """前端随授权答案带来的「记住并写规则」意图（只认 session 决策）。
+
+    宿主没有这个接口（终端问答 / 组件界面）= False；`pop_persist_request` 取走
+    即清零，不会把上一次的意图漏到下一次。
+    """
+    if decision != GRANT_SESSION or ui_host is None:
+        return False
+    pop = getattr(ui_host, "pop_persist_request", None)
+    return bool(pop()) if callable(pop) else False
+
+
 def _install_executor() -> bool:
     """下载官方预编译 ace-executor 到 executor/，替代手工 go build。
 
@@ -5104,7 +5130,8 @@ class AgentCLI(_AtCommands, _SlashCommands, _LandingUI):
     def clear_stop(self) -> None:
         self._stop_event.clear()
 
-    def _ask_permission(self, tool_name: str, reason: str) -> str:
+    def _ask_permission(self, tool_name: str, reason: str,
+                        persist_ok: bool = True) -> str:
         """问人要不要授权：有界面走界面的模态框，没有就回落到终端问答。
 
         三条路（组件界面 / 协议前端 / 终端问答）都守着同一条口径：**拿不到答案就拒绝**。
@@ -5119,8 +5146,16 @@ class AgentCLI(_AtCommands, _SlashCommands, _LandingUI):
         ui = self._ui
         if ui is not None and hasattr(ui, "ask_permission"):
             try:
-                return str(ui.ask_permission(tool_name, reason,
-                                             ace_turn.PERMISSION_OPTIONS) or "deny")
+                try:
+                    return str(ui.ask_permission(tool_name, reason,
+                                                 ace_turn.PERMISSION_OPTIONS,
+                                                 persist_ok=persist_ok) or "deny")
+                except TypeError:
+                    # 旧宿主没有 persist_ok 形参（组件界面那路）—— 原样重调。
+                    # 风险如实说：宿主内部恰好抛 TypeError 也会走到这里重调一次，
+                    # 代价是重复问一遍，不会放行（答案仍由宿主给，方向安全）。
+                    return str(ui.ask_permission(tool_name, reason,
+                                                 ace_turn.PERMISSION_OPTIONS) or "deny")
             except Exception:  # noqa: BLE001 —— 界面答不了就回落，不把流程卡死
                 pass
         return ask_grant(c("yellow", t("perm_approve_q")),
@@ -7840,8 +7875,10 @@ class AgentCLI(_AtCommands, _SlashCommands, _LandingUI):
                 # 这就是「体感税」的主体 —— 先测出来（收尾落 session/interaction，
                 # /audit stats 聚合），才谈得上逐项拿回来。
                 _gate_t0 = time.monotonic()
-                decision = self._ask_permission(str(tool_name or ""),
-                                                str(result.get("reason") or ""))
+                decision = self._ask_permission(
+                    str(tool_name or ""), str(result.get("reason") or ""),
+                    persist_ok=_persist_ok_for(str(tool_name or ""),
+                                               result.get("params") or {}))
                 _gs = getattr(self, "_gate_stats", None)
                 if _gs is None:
                     _gs = self._gate_stats = {"asks": 0, "wait_ms": 0.0}
@@ -7865,11 +7902,8 @@ class AgentCLI(_AtCommands, _SlashCommands, _LandingUI):
                 # 顺手把这次允许固化成规则（只有"本会话允许"才走）：
                 # 协议前端在授权框里显式点了「记住」→ 直接按建议模式落规则（auto）；
                 # 终端交互 → 问一句再落。选了"仅本次"的人刚刚明确说了"就这一次"，不劝。
-                _ui_host = getattr(self, "_ui", None)
-                _auto_persist = (
-                    decision == GRANT_SESSION and _ui_host is not None
-                    and hasattr(_ui_host, "pop_persist_request")
-                    and _ui_host.pop_persist_request())
+                _auto_persist = _auto_persist_requested(
+                    getattr(self, "_ui", None), decision)
                 self._maybe_persist_rule(
                     str(tool_name or ""), result.get("params") or {}, decision,
                     auto=_auto_persist)

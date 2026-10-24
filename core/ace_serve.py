@@ -476,8 +476,13 @@ class ServeUIHost:
     # ---- 四问 ----
 
     def ask_permission(self, tool: str, reason: str,
-                       options: Any = None) -> str:
+                       options: Any = None, persist_ok: bool = True) -> str:
         """授权：三态（once / session / deny）。拿不到答案 → deny。
+
+        `persist_ok=False` 时事件里带 `persist_ok: false` —— 前端据此**隐藏**
+        「记住并写规则」第 4 项（外发工具不能按工具名记规则；组合/危险包装命令
+        的建议模式会被 `suggest_rule_safe` 拒掉）。缺省 True（= 无信号就显示，
+        旧调用方行为不变；点了不适用的情况只会收到引擎的解释 notice——安全方向）。
 
         **防误触宽限期**（`R-2`；与终端 `agent_runner._read_answer`、TUI 的
         `ui/ace_turn.TurnController` 同一条口径，逻辑在 `ui/ace_grace`）：对话框刚弹出来
@@ -497,7 +502,8 @@ class ServeUIHost:
         gate = ace_grace.GraceGate(self._grace_ms)
         while True:
             gate.arm()
-            self.srv.send_event("permission_request", tool=tool, reason=reason)
+            self.srv.send_event("permission_request", tool=tool, reason=reason,
+                                persist_ok=bool(persist_ok))
             try:
                 ans = self.srv.wait_for("permission.answer", timeout=self.timeout)
             except ServeError:

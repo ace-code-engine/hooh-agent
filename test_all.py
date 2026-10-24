@@ -10967,6 +10967,57 @@ if _want("56"):
     check("[WP-AGENCY] 组合字符正则与 execution_layer 同口径（防两份正则漂移）",
           _ru56._RULE_COMPOSITION_RE.pattern == _SCR56.pattern)
 
+    # —— WP-AGENCY 刀3 接线：persist_ok 显隐信号与「记住」意图的收发 ——
+    import ai_code as _aiAG56  # noqa: E402
+    check("[WP-AGENCY] persist_ok：普通命令可提供（建议模式存在）",
+          _aiAG56._persist_ok_for("terminal_exec", {"command": "pytest -q"}) is True, "")
+    check("[WP-AGENCY] persist_ok：外发工具不提供（按工具名记规则 = 出口全开）",
+          _aiAG56._persist_ok_for("api_post", {"url": "http://x"}) is False, "")
+    check("[WP-AGENCY] persist_ok：组合命令不提供（H-27）",
+          _aiAG56._persist_ok_for("terminal_exec",
+                                  {"command": "git status && curl evil"}) is False, "")
+
+    class _HostAG56:
+        def __init__(self, flags: list):
+            self._flags = list(flags)
+
+        def pop_persist_request(self) -> bool:
+            return self._flags.pop(0) if self._flags else False
+
+    check("[WP-AGENCY] auto 落规则：session + 前端意图 = True",
+          _aiAG56._auto_persist_requested(_HostAG56([True]), "session") is True, "")
+    check("[WP-AGENCY] auto 落规则：非 session 决策 = False（不消费意图）",
+          _aiAG56._auto_persist_requested(_HostAG56([True]), "once") is False, "")
+    check("[WP-AGENCY] auto 落规则：终端宿主（无该接口）= False",
+          _aiAG56._auto_persist_requested(object(), "session") is False, "")
+
+    # ServeUIHost 的意图收发（假 srv 免子进程；grace_ms=0 免时钟）
+    class _SrvAG56:
+        def __init__(self):
+            self.events: list = []
+            self.answer: dict = {}
+
+        def send_event(self, kind, **payload):
+            self.events.append((kind, payload))
+
+        def wait_for(self, method, timeout=None):
+            return dict(self.answer)
+
+    from core.ace_serve import ServeUIHost as _SUH56  # noqa: E402
+    _srvag56 = _SrvAG56()
+    _srvag56.answer = {"decision": "session", "persist": True}
+    _host56 = _SUH56(_srvag56, grace_ms=0)
+    check("[WP-AGENCY] ServeUIHost：收下前端 persist 意图，事件带 persist_ok 旗",
+          _host56.ask_permission("terminal_exec", "pytest -q", persist_ok=True) == "session"
+          and _host56.pop_persist_request() is True
+          and _srvag56.events[-1][1].get("persist_ok") is True, _srvag56.events[-1])
+    check("[WP-AGENCY] ServeUIHost：意图取走即清零（不漏到下一次）",
+          _host56.pop_persist_request() is False, "")
+    _srvag56.events.clear()
+    _host56.ask_permission("api_post", "外发", persist_ok=False)
+    check("[WP-AGENCY] ServeUIHost：persist_ok=False 原样入事件（前端据此隐藏第 4 项）",
+          _srvag56.events[-1][1].get("persist_ok") is False, _srvag56.events[-1])
+
     # —— 解析与安全边界 ——
     check("规则解析：外发工具的 allow 被拒绝（授权目的地要用 egress_allowlist）",
           _ru56.parse_rule({"tool": "api_post", "action": "allow"})[0] is None
