@@ -70,7 +70,14 @@
       不变（verify/rollback/外部工具零改动）；`prune()` 顺带 `gc_objects()` 回收
       孤儿对象；mtime 欺骗的知情取舍（往旧退的方向）写在模块 docstring。
       实测（300 文件夹具）：基线 2074ms → 未变树 360ms（5.8×）→ 单文件改动 304ms。
-- [ ] 刀3 命令形状记忆
+- [x] 刀3 命令形状记忆(「记住并写规则」)——复用 `ace_rules` 持久规则面,不发明新存储:
+      授权框新增第 4 项「记住并写规则」(decision 仍 `session` + `persist` 标志,
+      协议三态不动;Python 侧等价动作是确认后的文字追问,shell-parity R-1 改记
+      「TS 超集」契约);引擎按建议模式落 `.ace/permissions.local.json` 并 notice
+      说清记了什么/怎么删。**建议端安全闸 `suggest_rule_safe`**:H-27 组合命令与
+      危险包装第一词(`python:*` 会连 `python -c` 一起放行)一律拒绝建议——
+      一次点击就长期生效的动作,闸门建在建议端;分层一致性(UNSAFE_RULE_HEADS ↔
+      BANNED_AUTO_PREFIXES、组合正则)由守卫测试钉住。
 - [ ] 前置小件:可行动 503/403 文案
 - [ ] 刀4 原生 tool-calling 阶段 1
 - [ ] 指标入统计

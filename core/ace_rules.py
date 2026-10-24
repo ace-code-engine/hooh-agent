@@ -28,15 +28,17 @@ r"""ace_rules —— 持久授权规则：`allow` / `deny` + 作用域（项目�
 from __future__ import annotations
 
 import json
+import re
 import os
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from core.targets import destructive_targets   # H-13：破坏性目标的唯一入口
 
 __all__ = ["Rule", "RULES_FILENAME", "LOCAL_RULES_FILENAME", "SCOPES",
+           "UNSAFE_RULE_HEADS",
            "parse_rule", "rule_matches", "match_rule", "load_rules",
            "load_rules_file", "save_rules", "describe_rule", "shadowed_rules",
-           "rules_path", "suggest_rule", "parse_persist_answer"]
+           "rules_path", "suggest_rule", "suggest_rule_safe", "parse_persist_answer"]
 
 # 文件名与作用域（顺序 = 优先级，前面的赢）
 RULES_FILENAME = "permissions.json"
@@ -49,6 +51,21 @@ EGRESS_TOOL_PREFIXES = ("api_", "browser_", "notify_", "image_")
 EGRESS_TOOL_NAMES = frozenset(("api_get", "api_post", "browser_open",
                                "browser_navigate", "notify_send", "image_generate",
                                "search", "web_fetch"))
+
+
+# 「顺手记成规则」**永不**建议指向这些第一词：它们是 execution_layer.BANNED_AUTO_PREFIXES
+# 的前半截 —— `python:*` 这样的规则会把 `python -c <任意代码>` 一并放行（规则 allow ⇒
+# ctx.confirmed ⇒ 审批 hook 直接通过），等于用配置文件把 H-27 拆了。
+# （core/ 不能反向 import 顶层 execution_layer —— 会成环 —— 所以名单在这里再列一份；
+#  两边的一致性由 test_all 的守卫测试钉住：BANNED 的每个首词都必须在本集合里。）
+UNSAFE_RULE_HEADS = frozenset((
+    "bash", "sh", "zsh", "dash", "python", "python3", "py",
+    "node", "cmd", "cmd.exe", "powershell", "powershell.exe", "pwsh",
+))
+
+# 与 execution_layer._SHELL_COMPOSITION_RE 同口径（同样因分层不能 import；守卫测试钉住）：
+# 含 shell 组合/替换/重定向字符的命令不是"一条命令"，它的前缀不该被记成长期规则。
+_RULE_COMPOSITION_RE = re.compile(r"[;&|<>()`$\n\r]")
 
 
 def is_egress_tool(tool: str) -> bool:
@@ -188,6 +205,32 @@ def suggest_rule(tool: str, params: Dict[str, Any]) -> str:
             return norm.rsplit("/", 1)[0] + "/"
         return norm
     return ""
+
+
+def suggest_rule_safe(tool: str, params: Dict[str, Any]) -> Tuple[str, str]:
+    """`suggest_rule` 的安全包装 → `(模式, 拒绝原因)`。模式为空 = **不该建议**。
+
+    「顺手记成规则」是**一次点击就长期生效**的动作（TUI 上是一个按钮），建议必须
+    自带两道闸，而不是指望用户看懂模式再决定：
+    - H-27：命令含 shell 组合/替换/重定向字符 → 不建议。组合命令的前缀不是
+      "一条命令"的形状——`git:*` 会连 `git status && curl -d @.env` 一起放行；
+    - 危险包装第一词（`UNSAFE_RULE_HEADS`）→ 不建议。`python:*` 会把
+      `python -c <任意代码>` 一并放行（规则 allow ⇒ ctx.confirmed ⇒ 审批 hook 通过）。
+    文件类/其它工具的建议不指向 shell，原样给出。
+    """
+    suggested = suggest_rule(tool, params)
+    if not suggested:
+        return "", ""
+    p = params if isinstance(params, dict) else {}
+    cmd = " ".join(str(p.get("command") or p.get("code") or "").split())
+    if not cmd:
+        return suggested, ""            # 文件类/路径类建议：不指向 shell
+    if _RULE_COMPOSITION_RE.search(cmd):
+        return "", "composition"
+    head = suggested.split(":")[0].split(" ")[0].lower()
+    if head in UNSAFE_RULE_HEADS:
+        return "", f"unsafe_head:{head}"
+    return suggested, ""
 
 
 def match_rule(rules: Sequence[Rule], tool: str, params: Dict[str, Any]

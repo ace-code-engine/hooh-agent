@@ -110,10 +110,25 @@ describe('R-1 授权三态：与 ui/ace_turn.PERMISSION_OPTIONS 一致', () => {
     expect(py.map((o) => o.value)).toEqual(['once', 'session', 'deny']);
   });
 
-  it('★顺序 / 取值 / i18n 键 / **危险标记**四项全一致', () => {
-    expect(PERMISSION_OPTIONS.map((o) => o.decision)).toEqual(py.map((o) => o.value));
-    expect(PERMISSION_OPTIONS.map((o) => o.key)).toEqual(py.map((o) => o.key));
-    expect(PERMISSION_OPTIONS.map((o) => o.danger)).toEqual(py.map((o) => o.danger));
+  it('★前三项 顺序 / 取值 / i18n 键 / **危险标记**四项全一致', () => {
+    expect(PERMISSION_OPTIONS.length).toBeGreaterThanOrEqual(py.length);
+    expect(PERMISSION_OPTIONS.slice(0, py.length).map((o) => o.decision))
+      .toEqual(py.map((o) => o.value));
+    expect(PERMISSION_OPTIONS.slice(0, py.length).map((o) => o.key))
+      .toEqual(py.map((o) => o.key));
+    expect(PERMISSION_OPTIONS.slice(0, py.length).map((o) => o.danger))
+      .toEqual(py.map((o) => o.danger));
+  });
+
+  it('已知超集（**记账**，不是漂移）：第 4 项「记住并写规则」是 TS 增强项', () => {
+    // WP-AGENCY 刀3：协议三态不动，`session` 决策多带一个 `persist` 标志；
+    // Python 侧的等价动作是确认后的文字追问（`ai_code._maybe_persist_rule`），
+    // 三态对话框本身不收这一项 —— 所以这里是**超集**，不是不一致。
+    const persist = PERMISSION_OPTIONS[3];
+    expect(persist?.decision).toBe('session');
+    expect(persist?.persist).toBe(true);
+    expect(persist?.danger).toBe(false);
+    expect(persist?.key).toBe('perm_opt_persist');
   });
 
   it('危险那一档就是 `session`（"本会话允许"= 权力扩张，不是"就这一次"）', () => {

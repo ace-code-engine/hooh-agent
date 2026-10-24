@@ -468,6 +468,10 @@ class ServeUIHost:
         # 宽限期毫秒：`None` = 读 `ACE_PERM_GRACE_MS`（与另两条路同一个来源）。
         # 允许显式传入**只为可测**：测试要能钉住"刚好过界"而不用去改环境变量。
         self._grace_ms = grace_ms
+        # 「记住并写规则」意图（WP-AGENCY 刀3）：前端在 `permission.answer` 里多给的
+        # `persist` 标志。这里只**收下**（`pop_persist_request` 由调用方取走）——
+        # 真正写规则的是调用方（它才有工具参数、规则文件路径与 suggest 安全闸）。
+        self._persist_request = False
 
     # ---- 四问 ----
 
@@ -505,6 +509,8 @@ class ServeUIHost:
         decision = str(ans.get("decision") or "deny")
         if decision not in ("once", "session", "deny"):
             return "deny"
+        # 「记住并写规则」只在 session 决策上有意义（只记住一次却没有"以后"可记）。
+        self._persist_request = bool(ans.get("persist")) and decision == "session"
         feedback = str(ans.get("feedback") or "")
         if feedback and self._on_deny_feedback is not None:
             try:
@@ -512,6 +518,17 @@ class ServeUIHost:
             except Exception:  # noqa: BLE001 —— 登记不上不该把授权流程带崩
                 pass
         return decision
+
+    def pop_persist_request(self) -> bool:
+        """取走（并清零）前端随**最近一次授权答案**带来的「记住并写规则」意图。
+
+        放在宿主上而不是协议往返的返回值里：`ask_permission` 的返回值是三条 UI 路
+        （终端 / 组件界面 / 协议前端）共用的 `str` 契约，动它就是三处一起改；意图
+        只是协议前端多出的一步，收发都挂宿主，另两路自然取不到（False）。
+        """
+        val = self._persist_request
+        self._persist_request = False
+        return val
 
     def choose(self, title: str, options: Any,
                with_effort: bool = False) -> Optional[str]:

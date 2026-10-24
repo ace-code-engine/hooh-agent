@@ -5213,28 +5213,46 @@ class AgentCLI(_AtCommands, _SlashCommands, _LandingUI):
         except Exception as e:  # noqa: BLE001 —— 读不动就保持原样并说一声
             print(c("yellow", t("prules_reload_failed", err=type(e).__name__)))
 
-    def _maybe_persist_rule(self, tool_name: str, params: Dict, decision: str) -> None:
-        """选了「本会话允许」之后，问一句"要不要顺手记成持久规则"。
+    def _maybe_persist_rule(self, tool_name: str, params: Dict, decision: str,
+                            auto: bool = False) -> None:
+        """把一次「本会话允许」固化成持久规则（`/rules` 那套，落 `.ace/permissions*.json`）。
 
-        为什么放在这一步：用户刚刚明确说"这个我允许"，正是把意图固化成规则的最佳时机；
-        等他下次开新会话再想起来，就得自己去翻 `/rules add` 的语法了。
-        回车 = 不记（最省事的路径永远是不做额外的事），`!` 前缀可以改成拒绝。
+        两条入口：
+        - 终端交互（auto=False）：选了「本会话允许」之后问一句"要不要顺手记成规则"，
+          回车 = 不记 —— 用户刚刚明确说"这个我允许"，正是固化意图的最佳时机。
+        - 协议前端（auto=True，WP-AGENCY 刀3）：用户在授权框里**显式**点了「记住并
+          写规则」，意图已经表达完毕，不再追问一句 —— 直接按建议模式落本地规则，
+          结果用 notice 说清（记了什么模式、落在哪个文件、怎么删）。
+
+        建议模式走 `suggest_rule_safe`：组合命令（H-27）与危险包装第一词
+        （`python:*` 会连 `python -c` 一起放行）一律拒绝建议 —— 一次点击就长期
+        生效的动作，安全闸必须建在建议端，不能指望用户看懂模式。
         """
-        if decision != GRANT_SESSION or not self._interactive_tty():
+        if decision != GRANT_SESSION:
+            return
+        if not auto and not self._interactive_tty():
             return
         if ace_rules.is_egress_tool(tool_name):
             return                      # 外发工具只能 deny，不适合在这里"顺手允许"
-        suggested = ace_rules.suggest_rule(tool_name, params or {})
-        print(c("dim", t("rule_persist_ask", tool=tool_name,
-                         pattern=suggested or "*")))
-        try:
-            answer = str(self._ask_text(t("rule_persist_prompt")) or "").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
+        suggested, unsafe = ace_rules.suggest_rule_safe(tool_name, params or {})
+        if unsafe:
+            _msg = t("rule_persist_unsafe", why=unsafe)
+            print(c("yellow", _msg))
+            self._notice(_msg, "info")
             return
+        if not auto:
+            print(c("dim", t("rule_persist_ask", tool=tool_name,
+                             pattern=suggested or "*")))
+            try:
+                answer = str(self._ask_text(t("rule_persist_prompt")) or "").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
+                return
+        else:
+            answer = "y"                # 前端已显式表达意图：按建议模式记
         rule, why = ace_rules.parse_persist_answer(answer, suggested)
         if rule is None:
-            if why:
+            if why and not auto:
                 print(c("yellow", t("prules_rejected", why=why)))
             return
         rule.tool = tool_name
@@ -5245,8 +5263,11 @@ class AgentCLI(_AtCommands, _SlashCommands, _LandingUI):
         keep.append(rule)
         if ace_rules.save_rules(keep, path):
             self._reload_rules()
-            print(c("green", t("rule_persist_saved",
-                               desc=ace_rules.describe_rule(rule), path=path)))
+            _msg = t("rule_persist_saved",
+                     desc=ace_rules.describe_rule(rule), path=path)
+            print(c("green", _msg))
+            if auto:
+                self._notice(_msg, "info")
         else:
             print(c("red", t("prules_save_failed", path=path)))
 
@@ -7760,10 +7781,17 @@ class AgentCLI(_AtCommands, _SlashCommands, _LandingUI):
                     if decision == GRANT_SESSION:
                         print(c("yellow", t("perm_session_refused", tool=tool_name)))
                     print(c("green", t("perm_granted_msg")))
-                # 顺手把这次允许固化成规则（只有"本会话允许"才问：选了"仅本次"的人
-                # 刚刚明确说了"就这一次"，再劝他存规则是没听懂）
+                # 顺手把这次允许固化成规则（只有"本会话允许"才走）：
+                # 协议前端在授权框里显式点了「记住」→ 直接按建议模式落规则（auto）；
+                # 终端交互 → 问一句再落。选了"仅本次"的人刚刚明确说了"就这一次"，不劝。
+                _ui_host = getattr(self, "_ui", None)
+                _auto_persist = (
+                    decision == GRANT_SESSION and _ui_host is not None
+                    and hasattr(_ui_host, "pop_persist_request")
+                    and _ui_host.pop_persist_request())
                 self._maybe_persist_rule(
-                    str(tool_name or ""), result.get("params") or {}, decision)
+                    str(tool_name or ""), result.get("params") or {}, decision,
+                    auto=_auto_persist)
                 continue
 
             if result["status"] == "ASK_USER":

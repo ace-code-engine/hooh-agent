@@ -4,8 +4,10 @@
  * 引擎需要一个答案时会阻塞等 `permission.answer`。所以这个框弹出来的时候，
  * 那边是真的停住等着的：**不答就一直等**（超时 600s 后 fail-close 拒绝）。
  *
- * 三个选项的顺序与 `ui/ace_turn.PERMISSION_OPTIONS` 一致（once / session / deny）——
+ * 前三个选项的顺序与 `ui/ace_turn.PERMISSION_OPTIONS` 一致（once / session / deny）——
  * 方向键的顺序、数字键的编号，两边必须一样，否则同一个用户在两套界面里会按错。
+ * 第 4 项「记住并写规则」是**本界面的增强项**（WP-AGENCY 刀3）：决策仍是 `session`
+ * （协议三态不动），多带一个 `persist` 标志；Python 侧的等价动作是确认后的文字追问。
  *
  * 「本会话允许」是一次真实的权力扩张，所以它**不长得像**「就这一次」：
  * 单独一行、带说明。这是 Python 侧写在注释里的口径，这里照样遵守。
@@ -24,28 +26,33 @@ export interface PermissionDialogProps {
   reason: string;
   t: (key: string, params?: Record<string, string | number>) => string;
   color: (token: string) => string | undefined;
-  /** 递答案。调用方负责发给引擎 —— 本组件不碰协议。 */
-  onAnswer: (decision: GrantDecision, feedback?: string) => void;
+  /** 递答案。调用方负责发给引擎 —— 本组件不碰协议。`persist` 只在 session 上有意义。 */
+  onAnswer: (decision: GrantDecision, feedback?: string, persist?: boolean) => void;
   /** 引擎已断开 / 会话已结束：框不该还能按。 */
   disabled?: boolean;
 }
 
 /**
- * 授权三态：顺序 = 界面上 1/2/3 = 方向键顺序。
+ * 授权选项：前三项 = 授权三态（与 `ui/ace_turn.PERMISSION_OPTIONS` **逐项对齐**，
+ * `test/shell-parity.test.ts` 的 R-1 钉住）；第 4 项 = 「记住并写规则」（TS 增强，
+ * decision 仍是 session + `persist: true`）。
  *
- * `danger` 与 `ui/ace_turn.PERMISSION_OPTIONS` **逐项对齐**（`test/shell-parity.test.ts` 的 R-1 钉住）：
  * "本会话允许"是一次**真实的权力扩张**，不该长得像"就这一次" —— 所以它带 `danger`，
- * 渲染时用告警色，**即使没被选中**也看得出来。
+ * 渲染时用告警色，**即使没被选中**也看得出来。写规则比会话允许更持久，但它落盘的
+ * 是**有明确模式**的规则（引擎侧 `suggest_rule_safe` 拒绝危险形状），且 /rules 随时
+ * 可删 —— 所以不带 danger，跟「仅本次」一样是平静的选择。
  */
 export const PERMISSION_OPTIONS: Array<{
   decision: GrantDecision;
   key: string;
   hintKey: string;
   danger: boolean;
+  persist?: boolean;
 }> = [
   { decision: 'once', key: 'perm_opt_once', hintKey: 'perm_opt_once_hint', danger: false },
   { decision: 'session', key: 'perm_opt_session', hintKey: 'perm_opt_session_hint', danger: true },
   { decision: 'deny', key: 'perm_opt_deny', hintKey: 'perm_opt_deny_hint', danger: false },
+  { decision: 'session', key: 'perm_opt_persist', hintKey: 'perm_opt_persist_hint', danger: false, persist: true },
 ];
 
 export function PermissionDialog({
@@ -104,12 +111,14 @@ export function PermissionDialog({
         return;
       }
       if (key.return) {
-        onAnswer(PERMISSION_OPTIONS[cursor]!.decision);
+        const o = PERMISSION_OPTIONS[cursor]!;
+        onAnswer(o.decision, undefined, o.persist);
         return;
       }
-      const idx = '123'.indexOf(input);
+      const idx = '1234'.indexOf(input);
       if (idx >= 0 && idx < PERMISSION_OPTIONS.length) {
-        onAnswer(PERMISSION_OPTIONS[idx]!.decision);
+        const o = PERMISSION_OPTIONS[idx]!;
+        onAnswer(o.decision, undefined, o.persist);
       }
     },
     { isActive: !disabled },

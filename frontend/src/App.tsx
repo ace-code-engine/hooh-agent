@@ -61,7 +61,8 @@ export interface AceClientLike {
   on(event: string, listener: (...args: any[]) => void): unknown;
   send(text: string): Promise<unknown>;
   command(line: string): Promise<CommandResult | unknown>;
-  answerPermission(decision: GrantDecision, feedback?: string): Promise<unknown>;
+  answerPermission(decision: GrantDecision, feedback?: string,
+                   persist?: boolean): Promise<unknown>;
   answerChoice(payload: {
     values?: string[];
     accepted?: boolean;
@@ -552,9 +553,9 @@ export function App({ client, t, colorOf, initialMessage, menuOptions, fullscree
   );
 
   const handleAnswer = useCallback(
-    (decision: GrantDecision, feedback?: string) => {
+    (decision: GrantDecision, feedback?: string, persist?: boolean) => {
       dispatch({ type: 'answered', decision });
-      client.answerPermission(decision, feedback).catch((e: unknown) => {
+      client.answerPermission(decision, feedback, persist).catch((e: unknown) => {
         const msg = e instanceof Error ? e.message : String(e);
         setErrors((prev) => [...prev, `递审批答案失败：${msg}`].slice(-5));
       });

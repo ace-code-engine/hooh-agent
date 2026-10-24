@@ -302,10 +302,18 @@ export class AceClient extends EventEmitter {
     return this.request('command.exec', { line });
   }
 
-  /** 递交审批决策。**只有在服务端正等答案时才该调** —— 否则会回 E_UNKNOWN_METHOD。 */
-  answerPermission(decision: GrantDecision, feedback?: string): Promise<unknown> {
+  /**
+   * 递交审批决策。**只有在服务端正等答案时才该调** —— 否则会回 E_UNKNOWN_METHOD。
+   *
+   * `persist: true`（只随 `session` 决策发，WP-AGENCY 刀3）= 前端显式请求
+   * 「记住并写规则」：引擎按建议模式落一条 `.ace/permissions` 规则（危险形状
+   * 会被 `suggest_rule_safe` 拒绝并用 notice 说明）。
+   */
+  answerPermission(decision: GrantDecision, feedback?: string,
+                   persist?: boolean): Promise<unknown> {
     const params: Record<string, unknown> = { decision };
     if (feedback) params.feedback = feedback;
+    if (persist) params.persist = true;
     return this.request('permission.answer', params);
   }
 
