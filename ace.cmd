@@ -114,34 +114,29 @@ if /i "%~1"=="tui" (
 )
 
 rem ---------------------------------------------------------------------------
-rem `ace ui [args]`: HooH's own UI -- the dsh-TUI interface tree migrated into
-rem this repo (frontend/dsh-ui), driven by ace's engine. Nothing external is
-rem invoked: the tree, its renderer and its components all live in-tree.
+rem DEFAULT UI (plain `ace`, also `ace ui [args]`): the dsh-TUI interface tree
+rem migrated into this repo (frontend/dsh-ui), driven by ace's engine. This is
+rem the MAIN UI as of 2026-10-24 (user decision: its rendering and tool
+rem presentation are the product look). Nothing external is invoked: the tree,
+rem its renderer and its components live in-tree. The previous Swiss-spec
+rem frontend stays reachable as `ace classic`.
+rem PARENS ARE BANNED in the echos below - see the tui block above.
+rem Batch quirks honored here: shift does NOT affect %*, and an undefined
+rem variable expands to its literal name - so _ACE_REST is always pre-set to
+rem empty and only filled by stripping the first token off %*.
 rem ---------------------------------------------------------------------------
+set "_ACE_REST="
 if /i "%~1"=="ui" (
-    shift
-    if not exist "frontend\node_modules\tsx\dist\cli.mjs" (
-        echo [HooH] frontend dependencies are not installed. Run: ace --install-ui
-        pause
-        exit /b 1
-    )
-    pushd "%~dp0frontend"
-    node "node_modules\tsx\dist\cli.mjs" "dsh-ui\hooh\entry.tsx" %*
-    rem Double-click survival: a nonzero exit here used to close the window
-    rem instantly - the user saw a flash and could never read WHY. Hold it open.
-    if errorlevel 1 pause
-    popd
-    goto :eof
+    if not "%~2"=="" for /f "tokens=1,* delims= " %%a in ("%*") do set "_ACE_REST=%%b"
+    goto :fe_shell
 )
+if /i "%~1"=="classic" (
+    if not "%~2"=="" for /f "tokens=1,* delims= " %%a in ("%*") do set "_ACE_REST=%%b"
+    goto :fe_shell
+)
+goto :fe_shell
 
-rem ---------------------------------------------------------------------------
-rem Frontend dispatch.
-rem The TypeScript/Ink frontend is the MAIN UI once both pieces are present:
-rem Node on PATH, and frontend\node_modules installed. Anything missing falls
-rem back to the Python REPL below -- and says WHICH piece was missing. A silent
-rem fallback is how you end up wondering why the new UI never shows up.
-rem Force the Python path with:  set ACE_LEGACY_UI=1
-rem ---------------------------------------------------------------------------
+:fe_shell
 if defined ACE_LEGACY_UI goto :ace_python
 where node >nul 2>nul
 if errorlevel 1 (
@@ -150,12 +145,9 @@ if errorlevel 1 (
     goto :ace_python
 )
 if not exist "frontend\node_modules\tsx\dist\cli.mjs" (
-    echo [HooH] Ink frontend dependencies are not installed yet.
-    echo       Install them once with:
-    echo           cd frontend
-    echo           npm install
-    echo       Falling back to the Python REPL for now.
-    goto :ace_python
+    echo [HooH] frontend dependencies are not installed. Run: ace --install-ui
+    pause
+    exit /b 1
 )
 rem tsx discovers tsconfig.json from the CURRENT DIRECTORY, not from the
 rem location of the file it is given. Run it from the repo root and it finds
@@ -163,7 +155,11 @@ rem no tsconfig, falls back to the classic JSX transform, and the first
 rem render() dies with "React is not defined" -- while "npm start" keeps
 rem working, because there the cwd is frontend. So run it from frontend too.
 pushd "%~dp0frontend"
-node "node_modules\tsx\dist\cli.mjs" "src\index.tsx" %*
+if /i "%~1"=="classic" (
+    node "node_modules\tsx\dist\cli.mjs" "src\index.tsx" %_ACE_REST%
+) else (
+    node "node_modules\tsx\dist\cli.mjs" "dsh-ui\hooh\entry.tsx" %_ACE_REST%
+)
 rem Double-click survival: a nonzero exit here closed the window instantly -
 rem the user saw a flash and could never read the error (the 2026-10-24
 rem "double-click flash-exit" report). Hold the window open on failure.

@@ -158,9 +158,31 @@ export function rowsFromEvents(events: readonly AceEvent[], startId = 1): UiRow[
       case 'notice':
         push({ kind: 'notice', text: String(ev.text ?? '') })
         break
-      case 'final':
-        push({ kind: 'assistant', text: String(ev.text ?? '') })
+      case 'model_delta': {
+        // 流式：增量接到**最近的流式助手行**上（没有就开一行）。重算式管线
+        // （每条事件从头投影）保证这里改的就是本轮最终行——顺序即事件序。
+        const t = String(ev.text ?? '')
+        const last = rows[rows.length - 1]
+        if (last && last.kind === 'assistant' && last.streaming === true) {
+          last.text += t
+        } else {
+          push({ kind: 'assistant', text: t, streaming: true })
+        }
         break
+      }
+      case 'final': {
+        // final = 本轮全文：若尾行还是流式行，就地定格（不另起一行）；
+        // 否则（无流式握手的老引擎）按旧行为另起。
+        const text = String(ev.text ?? '')
+        const last = rows[rows.length - 1]
+        if (last && last.kind === 'assistant' && last.streaming === true) {
+          last.text = text
+          last.streaming = false
+        } else {
+          push({ kind: 'assistant', text })
+        }
+        break
+      }
       case 'tool_call': {
         const name = String(ev.tool ?? '')
         const params = (ev.params ?? {}) as Record<string, unknown>
@@ -204,6 +226,14 @@ export function rowsFromEvents(events: readonly AceEvent[], startId = 1): UiRow[
   return rows
 }
 
+/** 审批请求（引擎在 `permission.answer` 上**阻塞等答案**——不答就挂到超时）。 */
+export interface PendingPermission {
+  tool: string
+  reason: string
+  /** 引擎说这次不适配「记住并写规则」（外发/组合命令/危险包装）→ 隐藏记住项。 */
+  persistOk: boolean
+}
+
 /** 常驻引擎会话：一个进程活到会话结束（`--serve` 的上下文在进程内）。 */
 export class AceEngine {
   private child: ReturnType<typeof spawn>
@@ -212,12 +242,13 @@ export class AceEngine {
   private id = 0
   private listeners = new Set<(ev: AceEvent) => void>()
   private waiters = new Map<string, () => void>()
+  private permissionCb: ((req: PendingPermission) => void) | null = null
 
   constructor(private opts: EngineOptions) {
     const py = process.env.ACE_PYTHON || resolvePython()
     const args = [join(REPO, 'ai_code.py'), '--serve',
                   '--project-root', opts.projectRoot,
-                  '--permission', opts.permission ?? 'readonly']
+                  '--permission', opts.permission ?? 'write']
     if (opts.mock === true) args.push('--mock')        // 默认真模型；只有测试/离线演示才 mock
     this.child = spawn(py, args, {
       cwd: opts.projectRoot,
@@ -241,7 +272,24 @@ export class AceEngine {
       if (frame.type === 'event') {
         const ev = frame.event as AceEvent | undefined
         if (ev && typeof ev.type === 'string') {
-          this.listeners.forEach((fn) => fn(ev))
+          // 审批与选择是**独立于轮次**的往返：审批挂起时模型停着等人，必须由
+          // 专门的回调接走（进了 turn 的 collected 也没人答，引擎挂到超时）。
+          if (ev.type === 'permission_request') {
+            this.permissionCb?.({
+              tool: String(ev.tool ?? ''),
+              reason: String(ev.reason ?? ''),
+              persistOk: ev.persist_ok !== false,
+            })
+          } else if (ev.type === 'choice_request') {
+            // 选择面板未接入（上游 questions/ 那排是第③步的活）：如实取消，
+            // 让引擎的轮次继续走——静默挂着比"取消"更糟。
+            this.write('choice.answer', { cancelled: true }, 'choice' + String(++this.id))
+            this.listeners.forEach((fn) => fn({
+              type: 'notice', text: '（引擎请求选择：面板未接入，已自动取消）',
+            }))
+          } else {
+            this.listeners.forEach((fn) => fn(ev))
+          }
           if (ev.type === 'final') {
             const done = [...this.waiters.values()][0]
             done?.()
@@ -252,6 +300,34 @@ export class AceEngine {
         this.waiters.get(id)?.()
       }
     }
+  }
+
+  /** 注册审批回调（返回去注册函数）。审批请求**独立于轮次**到达。 */
+  onPermission(cb: ((req: PendingPermission) => void) | null): () => void {
+    this.permissionCb = cb
+    return () => { if (this.permissionCb === cb) this.permissionCb = null }
+  }
+
+  /** 回答审批。`persist: true` = 引擎按建议模式落一条持久规则（WP-AGENCY 刀3）。 */
+  answerPermission(decision: 'once' | 'session' | 'deny', persist = false): void {
+    const params: Record<string, unknown> = { decision }
+    if (persist && decision === 'session') params.persist = true
+    this.write('permission.answer', params, 'perm' + String(++this.id))
+  }
+
+  /**
+   * 斜杠命令走 `command.exec`（**不是** user.message——那条路会把 "/model x"
+   * 当聊天文本喂给模型）。命令的可见输出以 `notice` 事件回流，走同一套行投影。
+   */
+  async command(line: string): Promise<{ keepGoing: boolean }> {
+    const id = String(++this.seq)
+    const done = new Promise<void>((resolve) => {
+      const timer = setTimeout(resolve, 60_000)
+      this.waiters.set(id, () => { clearTimeout(timer); resolve() })
+    })
+    this.write('command.exec', { line }, id)
+    await done
+    return { keepGoing: true }
   }
 
   /** 跑一轮；`onEvent` 每来一条事件回调一次（流式画界面用）。返回这一轮的**全部**事件。 */

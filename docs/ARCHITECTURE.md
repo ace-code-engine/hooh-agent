@@ -246,6 +246,7 @@ ace-agent/
 │   │   ├── DSH-TUI-PORT.md        #   dsh-TUI 配色+布局移植立项（阶段①色板唯一真相源已完成）
 │   │   ├── DSH-TUI-BRIDGE.md      #   B 方案立项：UI 用 dsh-TUI、引擎用 ace（本地 OpenAI 兼容端点桥接）
 │   │   ├── WP-AGENCY.md           #   WP-AGENCY 立项卡：把正常 Agent 的体感拿回来（默认档按通道分流 / 快照增量化 / 命令形状记忆 / 原生 tool-calling；fail-close 与不可逆×范围外确认不动）
+│   │   ├── DSH-SHELL-TRACKING.md #   WP-DSH-SHELL 立项卡：迁入壳转正为主外壳（plain ace = dsh 壳 / ace classic = 瑞士规范前端）+ 上游版本跟进流程与工具表达缺口清单
 │   │   └── DshShell-AceCapabilities.md # 整壳换 DSH TUI 后 ace 六项本体的露出设计卡（CAP-01~07：逐能力落点 / 优先级 / 最小新协议面 / 验收 / 上游冲突；§0 范围决定（ui/ 保留为降级路径）/ §3.7 引擎先行项（会话浏览器·树·设置的数据源）/ §6 前置门 G1（IME 候选框）与落点勘误（PageMargin 合并 · ui.js 唯一公开面 · 内核 vendor 落点））
 │   └── history/                #   会话纪要 / 调研 / 规范历史
 │       ├── SESSION-2026-09-06.md   #   评审会话纪要（风险清单→决策→提交→OPEN）

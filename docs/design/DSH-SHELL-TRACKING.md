@@ -1,0 +1,55 @@
+# WP-DSH-SHELL · 迁入壳转正 + 上游版本跟进 —— 立项卡
+
+> 状态:**实现中**(2026-10-24 立项)。
+> 用户裁决:迁入的 dsh-TUI 壳(`frontend/dsh-ui`)从 2026-10-24 起是**主外壳**
+> (plain `ace` = 它),渲染与工具表达以它为准;瑞士规范前端降为 `ace classic`
+> 显式备用。上游(dsh-tui npm 包)版本跟进了之后,把用户要的工具表达继续抄进来。
+
+## 〇、现状盘点(2026-10-24)
+
+- 迁入树基线 ≈ 上游 **v0.12.0** 时代(`dsh-ui-smoke` 的版本自检打出来过
+  "profile is already v0.16.1; this launcher copy is v0.12.0");npm 全局装的
+  上游是 **v0.16.1**——**树落后上游 4 个 minor**。
+- 壳的接线(本卡第一批,已落地):流式(`model_delta` 接流式助手行)、
+  命令路由(`/x` 走 `command.exec`)、审批弹窗(`permission.answer` +
+  persist 语义与 ace 前端同契约)、`choice_request` 如实自动取消。
+- **已知没喂到上游渲染管线的**(工具表达的缺口清单,按用户感知排序):
+  1. `ToolRow.resultView` / `smoothStreaming`——工具结果的富视图(diff/结构化)
+     未投影,现在只有 `resultText` 纯文本;
+  2. `SubagentRow` / `JobGroupRow`——subagent 与后台任务组的行模型未喂;
+  3. `components/questions/`(AskUserQuestionPanel / PlanReviewPanel)——
+     `choice_request` 现在是自动取消,该接真面板;
+  4. Settings / SessionTree / Pane 浮层——第③步未完成项(`MIGRATION.md`);
+  5. Launchpad 的鲸鱼/鲸鱼娘资产——ace 侧关着,决定要不要换成 HooH 资产。
+
+## 一、版本跟进流程(每季度或用户点名时)
+
+1. **对照**:`npm view @deepseek-harness-tui/dsh-tui version` vs `MIGRATION.md`
+   里记录的 vendored 基线版本;
+2. **re-vendor**:照 `frontend/dsh-ui/MIGRATION.md` 的迁入流程,把上游新版树
+   拷进 `frontend/dsh-ui/`,**hooh/ 适配层(`adapter.ts` / `engine.ts` /
+   `App.tsx` / `PermissionDialog.tsx`)不动**——接口变化在适配层消化;
+3. **词典核对**:`engine.ts` 的行投影与事件映射跑一遍 smoke
+   (`test/dsh-shell.test.ts` + `test/dsh-ui-smoke.test.ts`);
+4. **挑工具表达**:对照本卡缺口清单,把用户点名的新渲染接上(改 `rowsFromEvents`
+   的投影,不改上游组件);
+5. 冒烟:`ace ui` 首屏 → 一轮真跑 → 工具卡可见。
+
+## 二、硬边界
+
+- 上游树**零字节修改**的纪律仅在 vendoring 那一刻成立;hooh/ 适配层是**我们的**,
+  随便改;
+- ace 引擎语义(权限/快照/审计)**永远**不因 UI 迁就而上移;
+- 审批契约与 ace 前端保持同三态 + persist(`test/dsh-shell.test.ts` 钉住);
+- 经典前端(`ace classic`)只修 bug,不再加功能(它是备胎,不是第二战线)。
+
+## 三、进度日志
+
+- 2026-10-24 立项:壳转正为默认入口(ace.cmd 重写分发:plain ace = dsh 壳,
+  `ace classic` = 瑞士规范前端,均带失败留窗);补齐流式/命令/审批三根线;
+  `engine.ts` 默认权限档对齐交互产品(write)。tsc 存量 80 行报错是迁移
+  自带的"tsc 边界"(MIGRATION.md),本卡不背新债(改动后 79 行)。
+- [ ] re-vendor 到上游 0.16.1
+- [ ] 工具表达第 1 项:ToolRow resultView 投影
+- [ ] questions/ 面板接入(choice_request 不再自动取消)
+- [ ] Launchpad 资产决策(鲸鱼 → HooH 或保留关闭)

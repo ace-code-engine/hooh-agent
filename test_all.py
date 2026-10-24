@@ -2433,15 +2433,17 @@ if _want("10"):
           "four shells" not in (FOLDER / "README.md").read_text(encoding="utf-8"), "")
 
     # P-07：路由"谁是主外壳"的**权威声明**只有一处 —— `ROADMAP` §2.7 硬契约 2；
-    # `ace.cmd` 的运行时派发必须与它同口径（主外壳 = `frontend/`，缺 Node 才回落到 Python REPL）。
+    # `ace.cmd` 的运行时派发必须与它同口径（主外壳 = `frontend/dsh-ui` 迁入壳，
+    # 经典前端 = `ace classic` 显式备用，缺 Node 才回落到 Python REPL）。
     # 两条 `in` 断言故意写得**不含正则**：对着中文散文写正则，只会制造"解析错了却像代码错了"的假红。
     _r7 = (FOLDER / "docs" / "ROADMAP.md").read_text(encoding="utf-8")
-    check("WP-0 W0-C P-07 ★唯一权威处（ROADMAP §2.7）写死了'frontend/ 定为唯一正式外壳；"
-          "ui/+tui/ 降为 fallback'",
-          "唯一正式外壳" in _r7 and "frontend/" in _r7 and "fallback" in _r7, "")
-    check("WP-0 W0-C P-07 ★运行时派发（ace.cmd）与权威声明同口径：frontend/ 是 MAIN UI，"
-          "缺 Node 才回落到 Python REPL",
-          "MAIN UI" in _cmd09 and "frontend" in _cmd09 and "Python REPL" in _cmd09, "")
+    check("WP-0 W0-C P-07 ★唯一权威处（ROADMAP §2.7）写死了'dsh 壳定为唯一正式外壳；"
+          "经典前端 ace classic；ui/+tui/ 降为 fallback'",
+          "唯一正式外壳 = dsh 壳" in _r7 and "classic" in _r7 and "fallback" in _r7, "")
+    check("WP-0 W0-C P-07 ★运行时派发（ace.cmd）与权威声明同口径：dsh 壳是 MAIN UI、"
+          "classic 显式备用，缺 Node 才回落到 Python REPL",
+          "MAIN UI" in _cmd09 and "dsh-TUI" in _cmd09 and "classic" in _cmd09
+          and "Python REPL" in _cmd09, "")
 
 
     if hasattr(os, "startfile"):
