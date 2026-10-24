@@ -15,12 +15,26 @@ jobs:
   test:
     name: Test (${{ matrix.os }} · Python ${{ matrix.python-version }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 10
+    timeout-minutes: 15
+    env:
+      # 字形降级判定看**控制台代码页**（core/ace_io.display_encoding），无头 runner
+      # 的控制台不是 UTF-8 —— 不钉死的话 ❯/◉ 这类断言在 Windows 上必红（本机实测）。
+      # 这是项目文档写明的对拍机制，不是给 CI 开的特例。
+      ACE_DISPLAY_ENCODING: utf-8
+    defaults:
+      run:
+        shell: bash            # 下面的脚本用 bash 语法（set +e / PIPESTATUS）
     strategy:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-latest]
         python-version: ["3.10", "3.11", "3.12"]
+        include:
+          # Windows 是第一平台（8.3 短名 / Job Object / 受限令牌 / 路径语义都只在
+          # Windows 下成立），此前只靠开发者本机验证 —— 钉一个 3.12 条目进矩阵
+          # （3 版本 × 3 平台全乘太贵，Windows runner 计费 ×2）。
+          - os: windows-latest
+            python-version: "3.12"
     steps:
       - uses: actions/checkout@v4
 
@@ -54,9 +68,10 @@ jobs:
           exit "$code"
 
       # README 首屏那张动画是真实会话录出来的,会随 CLI 输出漂移;
-      # --check 在临时工作目录里重放一遍并比对骨架(数字已归一化)。跑一次就够。
+      # --check 在临时工作目录里重放一遍并比对骨架(数字已归一化)。跑一次就够，
+      # 且只跑 ubuntu —— 录制平台的输出形态才可比。
       - name: Demo 动画与当前 CLI 输出一致
-        if: matrix.python-version == '3.12'
+        if: matrix.os == 'ubuntu-latest' && matrix.python-version == '3.12'
         run: python demo/record_demo.py --check
 
   # Rust 元处理引擎（engine/）：CI 此前**从不编译它** —— 那句 compileall 只语法检查了
