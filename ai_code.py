@@ -3585,6 +3585,19 @@ class _SlashCommands:
                        dec=_dec or "—",
                        tin=_usage.get("in_tokens", 0),
                        tout=_usage.get("out_tokens", 0)))
+        # WP-AGENCY 指标：确认次数与等确认耗时（session/interaction 事件，
+        # 会话收尾落一条）。老日志没有这类事件 = 两项为 0，那是"没测过"不是"零次"。
+        _asks = _wait = 0
+        for _ev in self.session_log.events():
+            if str(_ev.get("kind") or "") != "session/interaction":
+                continue
+            _asks += int(_ev.get("asks") or 0)
+            _wait += float(_ev.get("gate_wait_ms") or 0.0)
+        if _asks:
+            print("  " + c("dim", t("audit_interaction_line",
+                                    asks=_asks,
+                                    wait=f"{_wait / 1000:.1f}",
+                                    avg=f"{_wait / _asks / 1000:.1f}")))
         print(c("dim", t("audit_file", path=str(p))))
 
     def _audit_boundary_data(self) -> Dict[str, object]:
@@ -4693,6 +4706,14 @@ class AgentCLI(_AtCommands, _SlashCommands, _LandingUI):
         el = getattr(self, "el", None)
         if el is not None:
             self._fire_hook("session_end")
+            # WP-AGENCY 指标：收尾把「确认次数 / 等确认耗时」落一条汇总事件。
+            # 失败不拦收尾 —— 这是测量，不是裁决。
+            _gs = getattr(self, "_gate_stats", None)
+            if _gs and _gs.get("asks") and getattr(self, "session_log", None) is not None:
+                try:
+                    self.session_log.record_interaction(_gs["asks"], _gs["wait_ms"])
+                except Exception:  # noqa: BLE001
+                    pass
             if getattr(self, "json_mode", False):
                 _c = self.cost_estimate()
                 self.events.emit(
@@ -7815,8 +7836,17 @@ class AgentCLI(_AtCommands, _SlashCommands, _LandingUI):
                 print(c("yellow", "\n" + t("perm_request_title", tool=tool_name)))
                 if result.get("reason"):
                     print(c("dim", t("perm_reason", reason=result["reason"])))
+                # WP-AGENCY 指标：确认弹窗次数 + 等人耗时。挂起时间里模型与用户都在等，
+                # 这就是「体感税」的主体 —— 先测出来（收尾落 session/interaction，
+                # /audit stats 聚合），才谈得上逐项拿回来。
+                _gate_t0 = time.monotonic()
                 decision = self._ask_permission(str(tool_name or ""),
                                                 str(result.get("reason") or ""))
+                _gs = getattr(self, "_gate_stats", None)
+                if _gs is None:
+                    _gs = self._gate_stats = {"asks": 0, "wait_ms": 0.0}
+                _gs["asks"] += 1
+                _gs["wait_ms"] += (time.monotonic() - _gate_t0) * 1000.0
                 next_user = resolve_permission(self.el, decision)
                 _fb = self._take_deny_feedback()
                 if decision == GRANT_DENY:

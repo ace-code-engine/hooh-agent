@@ -386,6 +386,7 @@
   "audit_chain_note": "⚠ 台帳署名：{detail}",
   "audit_taint_line": "出所の帰属（測定のみ・判定には未使用）：書き込み {assessed} 件を評価 · ユーザー言及なし {unattributed} 件 · 対象不明 {unknown} 件 · 判定を有効にすると確認 {would} 件",
   "audit_recovery_line": "可逆性（測定のみ・判定には未使用）：{assessed} 件を分類 · 復元可能で通過 {release} 件 · 差し止め {blocked} 件（{levels}）",
+  "audit_interaction_line": "  確認インタラクション: {asks} 回確認・合計 {wait}s 待機・平均 {avg}s/回",
   "status_measure_line": "基準の事前測定（判定には未使用）：書き込み {writes} 件を評価 · 出所未帰属 {unattributed} · 判定を有効にすると確認 {would_ask} 件 · 可逆性で差し止め {blocked} 件",
   "audit_metrics_line": "ターン {rounds} · ツール {calls}（失敗 {errors}、合計 {elapsed}s、最遅 {slow}）· 承認 {dec} · token 入力 {tin} / 出力 {tout}",
   "status_cross_session": "セッション横断（{n} 件）：{rounds} ターン · ツール {tools} 回（失敗 {errors}）· token 入力 {tin} / 出力 {tout} · 推定 {cost}",

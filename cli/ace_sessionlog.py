@@ -43,6 +43,7 @@ K_SYSTEM_SNAPSHOT = "system/snapshot"    # 每次模型请求的完整系统提�
 K_TOOL_CALL = "tool/call"                # 模型发出的工具调用（原始参数）
 K_TOOL_RESULT = "tool/result"            # 工具执行结果（状态 + 摘要）
 K_PERMISSION = "permission/decision"    # 执行层权限裁决（allow/deny/confirm/grant）
+K_INTERACTION = "session/interaction"   # 一次会话的交互度量汇总（确认次数/等确认耗时，WP-AGENCY）
 K_SECURITY = "security/denied"           # 安全拦截（路径越界/白名单/沙盒/敏感目标）—— 单独一类便于分级（SEC-017）
 K_GUARD = "guard/verdict"                # 守卫违规 / 诱饵 / AST 拦截
 K_SNAPSHOT_CREATE = "snapshot/create"    # 写入前快照
@@ -644,6 +645,19 @@ class SessionLog:
     def record_guard(self, rule: str, action: str, detail: str = "") -> int:
         return self.append(K_GUARD, {"rule": rule, "action": action,
                                      "detail": (detail or "")[:200]})
+
+    def record_interaction(self, asks: int, gate_wait_ms: float) -> int:
+        """一次会话的交互度量汇总（WP-AGENCY）：把「体感差距」变成可测数字。
+
+        `asks` = 本次会话里权限确认弹窗的次数；`gate_wait_ms` = 等人确认累计耗时
+        （含前端对话框挂起的时间——那段时间模型与用户都在等，是体感税的主体）。
+        会话收尾时记一条（ask 级的明细在 `permission/decision` 里已有，这里只补
+        "等了多久"这个只有收尾才知道的聚合）。`/audit stats` 读它做聚合展示。
+        """
+        return self.append(K_INTERACTION, {
+            "asks": int(asks),
+            "gate_wait_ms": round(float(gate_wait_ms), 1),
+        })
 
     def record_security(self, tool: str, reason: str, count: int) -> int:
         """安全拦截单列一类（SEC-017）：403 里的"执行层主动防御"与 400 参数错不是一回事，

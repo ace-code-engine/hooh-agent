@@ -388,6 +388,7 @@
   "audit_chain_note": "⚠ 台账签名：{detail}",
   "audit_taint_line": "来源归属（测量中，未参与裁决）：已评估 {assessed} 次写入 · 目标未被用户提到 {unattributed} 次 · 说不出目标 {unknown} 次 · 若开启判据会问人 {would} 次",
   "audit_recovery_line": "可逆性（测量中，未参与裁决）：已分类 {assessed} 次 · 可重建会放行 {release} 次 · 会拦下 {blocked} 次（{levels}）",
+  "audit_interaction_line": "  确认交互: {asks} 次确认 · 累计等了 {wait}s · 平均 {avg}s/次",
   "status_measure_line": "判据前置测量（未参与裁决）：已评估 {writes} 次写入 · 来源未归属 {unattributed} · 若开判据会问人 {would_ask} · 可逆性会拦下 {blocked}",
   "audit_metrics_line": "轮次 {rounds} · 工具 {calls}（失败 {errors}，合计 {elapsed}s，最慢 {slow}）· 授权 {dec} · token 入 {tin} / 出 {tout}",
   "status_cross_session": "跨会话累计（{n} 段）：{rounds} 轮 · {tools} 次工具（失败 {errors}）· token 入 {tin} / 出 {tout} · 估算 {cost}",

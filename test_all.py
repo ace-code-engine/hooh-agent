@@ -5581,6 +5581,13 @@ if _want("26"):
     check("全链路事件：tool_call + tool_result + 权限放行 + 写入前快照",
           _K_CALL in _evs and K_TOOL_RESULT in _evs and _K_PERM in _evs
           and _K_SNAP in _evs, sorted(_evs))
+    # WP-AGENCY 指标：确认次数/等确认耗时的落盘往返（/audit stats 读同一来源聚合）
+    from cli.ace_sessionlog import K_INTERACTION as _K_IA  # noqa: E402
+    _sl_seq = _el_sl.session_log.record_interaction(3, 1234.5)
+    _ia = [e for e in _el_sl.session_log.events() if e.get("kind") == _K_IA]
+    check("[WP-AGENCY] session/interaction 落盘并可读回（asks/gate_wait_ms 进审计链）",
+          len(_ia) == 1 and _ia[0]["asks"] == 3 and _ia[0]["gate_wait_ms"] == 1234.5
+          and _ia[0].get("mac"), str(_ia[:1]))
     # 越权调用 → permission/decision denied
     _el_ro = ExecutionLayer(project_root=str(mktemp()), permission_level="readonly",
                             config={"bait": {"enabled": False},

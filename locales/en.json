@@ -388,6 +388,7 @@
   "audit_chain_note": "⚠ Ledger signatures: {detail}",
   "audit_taint_line": "Source attribution (measuring only, not enforced): {assessed} writes assessed · {unattributed} with no user mention · {unknown} without an identifiable target · {would} would have prompted",
   "audit_recovery_line": "Reversibility (measuring only, not enforced): {assessed} classified · {release} would pass · {blocked} would be held back ({levels})",
+  "audit_interaction_line": "  Gate interaction: {asks} confirmations · {wait}s waited total · {avg}s avg",
   "status_measure_line": "Criterion pre-measurement (not enforced): {writes} writes assessed · {unattributed} unattributed · {would_ask} would prompt · {blocked} held back on reversibility",
   "audit_metrics_line": "rounds {rounds} · tools {calls} ({errors} failed, {elapsed}s total, slowest {slow}) · approvals {dec} · tokens in {tin} / out {tout}",
   "status_cross_session": "Across sessions ({n}): {rounds} rounds · {tools} tool calls ({errors} failed) · tokens in {tin} / out {tout} · est. {cost}",
