@@ -10,28 +10,35 @@ OpenAI 兼容模型说话，实际上每一轮都进了 ace 的完整引擎**（
 都在 ace 这边；DSH 那条工具链不会被用到，因为回过去的是**纯文本最终回复**，
 DSH 看不到任何 `tool_calls`，`finish_reason` 直接是 `stop`）。
 
-## 怎么说话
-
-用引擎自己的 `--serve`（`core/ace_serve`，双向 NDJSON）：
-
-```
-→ {"v":1,"type":"req","id":"1","method":"initialize","params":{"protocol":1,"stream":true}}
-← {"v":1,"type":"resp","id":"1","ok":true,...}
-→ {"v":1,"type":"req","id":"2","method":"user.message","params":{"text":"你好"}}
-← {"v":1,"type":"event","seq":1,"event":{"type":"model_delta","text":"你"}}
-← {"v":1,"type":"event","seq":9,"event":{"type":"final","text":"你好。"}}     ← 拿这个当回答
-← {"v":1,"type":"resp","id":"2","ok":true,...}                                ← 一轮结束
-```
-
 **审批**：`permission_request` 出来时旁边没有人在答。默认**一律拒绝**（`--allow` 才放行）——
 "没人看着就自动放行写操作"是这个端点最不该有的行为。
+
+## 鉴权（WP-AGENCY 之后的加固，别拆）
+
+本地端口 ≠ 只有你自己够得着：**本机任意进程**都能连，而浏览器里的恶意页面可以用
+`text/plain` 的「简单请求」绕过 CORS 预检直接 POST（本处理器不挑 Content-Type），
+DNS rebinding 还能伪造 Host。所以三道闸都是必须的：
+
+1. **Bearer token**（默认开）：token 持久存于锚式目录
+   （`%LOCALAPPDATA%\ace-agent\state\<sha256(项目根)[:16]>\proxy_key`，与签名密钥同一处），
+   跨启动稳定；`--api-key` 可显式指定（测试/脚本用）。请求必须带
+   `Authorization: Bearer <token>`，不匹配一律 401（`hmac.compare_digest` 恒时比较）。
+   dsh-TUI 侧用 `apiKeyEnv: ACE_PROXY_KEY` 把 token 送进来（`dsh_bridge_setup.py` 会写好）。
+2. **Host 头校验**：只认环回名（`127.0.0.1` / `localhost` / `[::1]`）加本端口——
+   rebinding 页面带来的陌生 Host 一律 403。
+3. **`--allow` × 非环回 = 拒绝启动**：「没人看着就放行写操作」 PLUS 「监听在局域网上」
+   不允许同时成立；组合直接退出而不是告警。
+
+另有会话池上限（`--max-sessions`，每个 user 一个引擎子进程——放任就是 DoS）与
+请求体上限（`--max-body`）。`/healthz` 是唯一免鉴权端点（只回 ok+模型名，无信息量）。
 
 ## 用法
 
 ```bash
-python tools/ace_openai_proxy.py --project-root G:\AI_Project\ace --permission readonly
-# 然后在 dsh-TUI 里：/provider → 添加自定义 → baseURL http://127.0.0.1:8787/v1
-#                  apiKey 随便填（ace 不校验）→ models: ace → 选 ace
+python tools/ace_openai_proxy.py --project-root <项目> --permission readonly
+#    启动即打印 token；把它设进 ACE_PROXY_KEY 后再起 dsh-tui。
+python tools/ace_openai_proxy.py --show-key          # 只打印当前 token
+# dsh-tui 侧：python tools/dsh_bridge_setup.py（写好 apiKeyEnv 路由）
 ```
 
 `--mock` 可以离线跑通（不需要密钥），用来验证链路本身。
@@ -40,9 +47,12 @@ python tools/ace_openai_proxy.py --project-root G:\AI_Project\ace --permission r
 from __future__ import annotations
 
 import argparse
+import hashlib
+import hmac
 import json
 import os
 import queue
+import secrets
 import subprocess
 import sys
 import threading
@@ -53,6 +63,44 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional
 
 HERE = Path(__file__).resolve().parent.parent          # 仓库根（tools/ 的上一层）
+
+MAX_SESSIONS_DEFAULT = 4
+MAX_BODY_DEFAULT = 1 * 1024 * 1024                     # 1 MB —— 聊天请求绰绰有余
+
+
+def proxy_key_path(project_root: str) -> Path:
+    """token 的落盘位置：锚式目录（与 core.guardian 的锚**同一口径**）。
+
+    6 行复制换来本脚本**零仓库依赖** —— 它要在任意 cwd 下被 dsh/用户直接拉起，
+    import core 会把 sys.path 变成前提条件。两处口径由 test_all 的守卫测试钉住
+    （proxy_key_path(project) == guardian.anchor_dir_for(project) 的兄弟文件）。
+    """
+    if os.name == "nt":
+        base = os.environ.get("LOCALAPPDATA") or str(Path.home() / "AppData" / "Local")
+    else:
+        base = os.environ.get("XDG_STATE_HOME") or str(Path.home() / ".local" / "state")
+    ident = os.path.normcase(str(Path(project_root).resolve()))
+    return (Path(base) / "ace-agent" / "state"
+            / hashlib.sha256(ident.encode("utf-8")).hexdigest()[:16] / "proxy_key")
+
+
+def load_or_create_key(project_root: str, explicit: str = "") -> str:
+    """取鉴权 token：显式指定 > 锚式目录里的持久 token（没有就生成，跨启动稳定）。"""
+    if explicit.strip():
+        return explicit.strip()
+    p = proxy_key_path(project_root)
+    p.parent.mkdir(parents=True, exist_ok=True)
+    if p.is_file():
+        val = p.read_text(encoding="utf-8").strip()
+        if val:
+            return val
+    val = secrets.token_hex(24)
+    p.write_text(val, encoding="utf-8")
+    try:
+        os.chmod(p, 0o600)
+    except OSError:
+        pass
+    return val
 
 
 # ── 引擎会话（一条 OpenAI 会话 = 一个 --serve 子进程）────────────────────────────
@@ -182,20 +230,41 @@ class AceSession:
 
 
 class Pool:
-    """按 `user`（OpenAI 请求里的会话标识）分进程；没有就用一个默认会话。"""
+    """按 `user`（OpenAI 请求里的会话标识）分进程；没有就用一个默认会话。
+
+    **上限**：`key` 来自请求体（攻击者可控），不放上限的话，一个循环就能把机器刷出
+    几百个引擎子进程。满了先回收已退出的死会话，再按创建时间淘汰最旧的活会话；
+    都不行才 503。淘汰用 `terminate()`（引擎自己会收尾，这里不等人）。
+    """
 
     def __init__(self, args: argparse.Namespace) -> None:
         self.args = args
         self._lock = threading.Lock()
         self._sessions: Dict[str, AceSession] = {}
+        self._born: Dict[str, float] = {}
 
     def get(self, key: str) -> AceSession:
         with self._lock:
             s = self._sessions.get(key)
             if s is None or s.proc.poll() is not None:
+                if s is not None:
+                    self._drop(key)                    # 死会话占位，先清
+                while len(self._sessions) >= max(1, int(self.args.max_sessions)):
+                    victim = min(self._sessions, key=lambda k: self._born.get(k, 0))
+                    self._drop(victim)
                 s = AceSession(self.args, key)
                 self._sessions[key] = s
+                self._born[key] = time.monotonic()
             return s
+
+    def _drop(self, key: str) -> None:
+        s = self._sessions.pop(key, None)
+        self._born.pop(key, None)
+        if s is not None:
+            try:
+                s.close()
+            except Exception:                          # noqa: BLE001 —— 淘汰失败不拦新会话
+                pass
 
 
 # ── HTTP ──────────────────────────────────────────────────────────────────────
@@ -212,12 +281,50 @@ def _completion(model: str, content: str) -> Dict[str, Any]:
     }
 
 
-def make_handler(pool: Pool, model: str) -> type:
+def make_handler(pool: Pool, model: str, api_key: str = "",
+                 max_body: int = MAX_BODY_DEFAULT) -> type:
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
 
         def log_message(self, fmt: str, *a: Any) -> None:      # noqa: A003
             sys.stderr.write("[ace-proxy] %s\n" % (fmt % a))
+
+        # ---- 鉴权与边界（顺序固定：Host → 鉴权 → 请求体大小 → 业务） ----
+
+        def _host_ok(self) -> bool:
+            """只认环回名 + 本端口（DNS rebinding 的 Host 是攻击者域名 → 403）。
+
+            `Host` 头由 HTTP 客户端按它**以为**在连的地址填：浏览器带 rebinding 的
+            页面会填攻击者域名；直连 127.0.0.1 的 curl/进程填环回名。绑非环回地址时
+            （显式 --host），那个 host:port 也放行 —— 用户自己开的口。
+            """
+            host = str(self.headers.get("Host") or "").strip().lower()
+            if not host:
+                return False
+            port = self.server.server_address[1]
+            allowed = {f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}",
+                       f"::1:{port}"}
+            bind = str(self.server.server_address[0]).lower()
+            if bind not in ("", "0.0.0.0", "::"):
+                allowed.add(f"{bind}:{port}")
+            return host in allowed
+
+        def _authed(self) -> bool:
+            auth = str(self.headers.get("Authorization") or "")
+            return bool(api_key) and hmac.compare_digest(auth, f"Bearer {api_key}")
+
+        def _gate(self) -> bool:
+            """三道闸都过了才放行业务；失败时已经回过响应，返回 False。"""
+            if not self._host_ok():
+                self._json(403, {"error": {"message": "host not allowed"}})
+                return False
+            if not self._authed():
+                self.send_response(401)
+                self.send_header("WWW-Authenticate", "Bearer")
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+                return False
+            return True
 
         def _json(self, code: int, obj: Any) -> None:
             body = json.dumps(obj, ensure_ascii=False).encode("utf-8")
@@ -228,20 +335,28 @@ def make_handler(pool: Pool, model: str) -> type:
             self.wfile.write(body)
 
         def do_GET(self) -> None:                              # noqa: N802
+            if self.path.rstrip("/") in ("/healthz", "/"):
+                # 唯一免鉴权端点：只回 ok + 模型名，没有可泄露的信息（探活用）。
+                self._json(200, {"ok": True, "model": model})
+                return
+            if not self._gate():
+                return
             if self.path.rstrip("/") in ("/v1/models", "/models"):
                 self._json(200, {"object": "list", "data": [
                     {"id": model, "object": "model", "created": 0, "owned_by": "ace"}]})
                 return
-            if self.path.rstrip("/") in ("/healthz", "/"):
-                self._json(200, {"ok": True, "model": model})
-                return
             self._json(404, {"error": {"message": "not found"}})
 
         def do_POST(self) -> None:                             # noqa: N802
+            if not self._gate():
+                return
             if self.path.rstrip("/") not in ("/v1/chat/completions", "/chat/completions"):
                 self._json(404, {"error": {"message": "not found"}})
                 return
             length = int(self.headers.get("Content-Length") or 0)
+            if length > max_body:
+                self._json(413, {"error": {"message": f"body too large (> {max_body} bytes)"}})
+                return
             try:
                 body = json.loads(self.rfile.read(length) or b"{}")
             except json.JSONDecodeError:
@@ -301,16 +416,39 @@ def main(argv: Optional[List[str]] = None) -> int:
                     help="权限档；默认 readonly（端点无人值守，只读最安全）")
     ap.add_argument("--allow", action="store_true",
                     help="审批请求一律放行（**默认拒绝**：没人看着不该自动放行写操作）")
+    ap.add_argument("--api-key", default="",
+                    help="显式指定鉴权 token（缺省：持久 token 存锚式目录，--show-key 可看）")
+    ap.add_argument("--show-key", action="store_true",
+                    help="只打印当前 token 然后退出（给 ACE_PROXY_KEY 用）")
+    ap.add_argument("--max-sessions", type=int, default=MAX_SESSIONS_DEFAULT,
+                    help="引擎子进程池上限（每个 user 一个；防请求刷子）")
+    ap.add_argument("--max-body", type=int, default=MAX_BODY_DEFAULT,
+                    help="请求体字节数上限")
     ap.add_argument("--mock", action="store_true", help="离线演示（不需要密钥）")
     ap.add_argument("--python", default="", help="用哪个解释器起引擎（默认当前解释器）")
     ap.add_argument("--model", default="ace", help="对外暴露的模型名")
     args = ap.parse_args(argv)
 
+    if args.show_key:
+        print(load_or_create_key(args.project_root, args.api_key))
+        return 0
+    if args.allow and args.host not in ("127.0.0.1", "localhost", "::1"):
+        # 「没人看着就放行」叠加「监听在局域网」——这个组合不存在合理用途，
+        # 拒绝启动而不是告警（与 never+off 启动即拒是同一条立场）。
+        print("[ace-proxy] 拒绝启动：--allow（无人值守放行审批）不能与"
+              "非环回的 --host (%s) 组合。要么去掉 --allow，要么绑回 127.0.0.1。"
+              % args.host, file=sys.stderr)
+        return 2
+
+    api_key = load_or_create_key(args.project_root, args.api_key)
     pool = Pool(args)
-    srv = ThreadingHTTPServer((args.host, args.port), make_handler(pool, args.model))
+    srv = ThreadingHTTPServer((args.host, args.port),
+                              make_handler(pool, args.model, api_key, args.max_body))
     sys.stderr.write("[ace-proxy] http://%s:%d/v1  model=%s  root=%s  permission=%s%s\n"
                      % (args.host, args.port, args.model, args.project_root,
                         args.permission, "  MOCK" if args.mock else ""))
+    sys.stderr.write("[ace-proxy] auth=Bearer（token 持久存于 %s；"
+                     "dsh 侧用 ACE_PROXY_KEY，`--show-key` 可打印）\n" % proxy_key_path(args.project_root))
     sys.stderr.flush()
     try:
         srv.serve_forever()
@@ -318,6 +456,11 @@ def main(argv: Optional[List[str]] = None) -> int:
         pass
     finally:
         srv.server_close()
+        for s in list(pool._sessions.values()):        # noqa: SLF001 —— 收尾清池
+            try:
+                s.close()
+            except Exception:                          # noqa: BLE001
+                pass
     return 0
 
 

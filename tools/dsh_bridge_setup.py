@@ -46,10 +46,13 @@ LOGO = TUI_PKG / "lib" / "types" / "components" / "LogoV2.js"
 
 PROVIDER_BLOCK = """    ace:
       displayName: HooH (ace engine)
-      # 本地端点：tools/ace_openai_proxy.py（`ace proxy`）。**不需要凭据** ——
-      # 省掉 apiKeyEnv 就不查 .credentials.yaml（代理也不校验 Authorization）。
+      # 本地端点：tools/ace_openai_proxy.py（`ace proxy`）。鉴权 token 走
+      # ACE_PROXY_KEY 环境变量（`ace proxy --show-key` 打印；值来自锚式目录，
+      # 跨启动稳定）。dsh 把它以 Authorization: Bearer 发给端点 ——
+      # 端点不认 Anonymous（WP-AGENCY 加固后本机任意进程/网页也不能白嫖引擎）。
       api: openai-completions
       baseURL: {base_url}
+      apiKeyEnv: ACE_PROXY_KEY
       models:
         - id: "{model}"
           name: "HooH"
@@ -82,6 +85,16 @@ def settings_text() -> str:
 
 def ensure_provider(text: str, base_url: str, model: str) -> tuple[str, str]:
     if "\n    ace:\n" in text:
+        # 升级路径：旧版路由块没有 apiKeyEnv（那时端点不校验鉴权）。补上它，
+        # 否则旧配置会在端点加固后开始 401，而用户看到的只是"连不上"。
+        start = text.index("\n    ace:\n")
+        nxt = text.find("\n    ", start + 1)          # 下一个同级 provider（没有就到末尾）
+        block = text[start:nxt if nxt != -1 else len(text)]
+        if "apiKeyEnv" not in block and "baseURL:" in block:
+            patched = block.replace("      baseURL:", "      apiKeyEnv: ACE_PROXY_KEY\n"
+                                                   "      baseURL:", 1)
+            text = text[:start] + patched + text[start + len(block):]
+            return text, "已存在（补上 apiKeyEnv）"
         return text, "已存在（跳过）"
     marker = "\n  providers:\n"
     if marker not in text:

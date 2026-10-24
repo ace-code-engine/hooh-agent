@@ -11368,6 +11368,52 @@ if _want("59"):
           _sess59.new_user_texts([{"role": "user", "content": "一"},
                                   {"role": "user", "content": "二"}]) == ["二"], "")
 
+    # —— WP-AGENCY 加固：鉴权 / Host 校验 / 请求体上限（真 HTTP，端口 0，不 spawn 引擎） ——
+    import threading as _th59  # noqa: E402
+    import urllib.error as _ue59  # noqa: E402
+    import urllib.request as _uq59  # noqa: E402
+    from http.server import ThreadingHTTPServer as _Th59  # noqa: E402
+
+    class _Args59:
+        max_sessions = 4
+
+    _key59 = "unit-test-key"
+    _srv59 = _Th59(("127.0.0.1", 0),
+                   _px59.make_handler(_px59.Pool(_Args59()), "ace", _key59, 64))
+    _port59 = _srv59.server_address[1]
+    _th59.Thread(target=_srv59.serve_forever, daemon=True).start()
+
+    def _http59(method: str, path: str, key=_key59, host=None,
+                body: bytes = b""):
+        req = _uq59.Request(f"http://127.0.0.1:{_port59}{path}", data=body,
+                            method=method)
+        if key is not None:
+            req.add_header("Authorization", f"Bearer {key}")
+        if host:
+            req.add_header("Host", host)
+        try:
+            with _uq59.urlopen(req, timeout=5) as r:
+                return r.status
+        except _ue59.HTTPError as e:
+            return e.code
+
+    try:
+        check("[WP-AGENCY] 端点：/healthz 免鉴权（探活，无信息量）",
+              _http59("GET", "/healthz", key=None) == 200, "")
+        check("[WP-AGENCY] 端点：无 token → 401（本机任意进程/网页不能白嫖引擎）",
+              _http59("GET", "/v1/models", key=None) == 401, "")
+        check("[WP-AGENCY] 端点：token 对 → 200；token 错 → 401",
+              _http59("GET", "/v1/models") == 200
+              and _http59("GET", "/v1/models", key="wrong") == 401, "")
+        check("[WP-AGENCY] 端点：DNS rebinding 的陌生 Host → 403（带对 token 也拦）",
+              _http59("GET", "/v1/models", host="evil.example.com") == 403, "")
+        check("[WP-AGENCY] 端点：请求体超上限 → 413（在 spawn 引擎之前就拦下）",
+              _http59("POST", "/v1/chat/completions",
+                      body=b'{"messages":[]}' + b" " * 100) == 413, "")
+    finally:
+        _srv59.shutdown()
+        _srv59.server_close()
+
     # —— 卡住程度与颜色过渡 ——
     check("卡住程度：阈值内为 0，之后递增，再过一倍时长到满",
           _sp59.stall_level(2.9, 3.0) == 0.0
