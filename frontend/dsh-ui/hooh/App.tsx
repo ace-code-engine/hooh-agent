@@ -105,6 +105,41 @@ export function App({ snapshot, engine, initialPrompt }: AppProps): React.ReactE
     [busy, engine, reproject],
   )
 
+  // 首屏动作 → ace 命令映射。上游动作表用的是 DSH 的命令词表（launchpadActions
+  // 的 command 字段），ace 侧同名命令只有一部分——按词表映射，没有对应物的
+  // 动作如实进一条 notice，绝不假装点了没反应。
+  const ACTION_CMD: Record<string, string> = {
+    continue: 'resume',
+    settings: 'config',
+    jobs: 'tasks',
+    help: 'help',
+  }
+  const runAction = useCallback(
+    (action: { id: string; labelKey: string; command: string }): void => {
+      const cmd = ACTION_CMD[action.command]
+      if (cmd !== undefined) void submit('/' + cmd)
+      else {
+        eventsRef.current = [...eventsRef.current, {
+          type: 'notice', text: `（动作「${action.command}」在 ace 侧没有对应命令）`,
+        }]
+        reproject()
+      }
+    },
+    [submit, reproject],
+  )
+
+  // 参数段铭牌（模型/强度/预设/权限）点击 → 打开对应命令（裸命令会输出当前值
+  // 与用法，作为 notice 行可见）。
+  const PARAM_CMD: Record<string, string> = {
+    model: 'model', effort: 'effort', preset: 'preset', permission: 'permission',
+  }
+  const runParam = useCallback(
+    (segment: 'model' | 'effort' | 'preset' | 'permission'): void => {
+      void submit('/' + (PARAM_CMD[segment] ?? segment))
+    },
+    [submit],
+  )
+
   useEffect(() => {
     if (started.current || !initialPrompt || !engine) return
     started.current = true
@@ -158,11 +193,20 @@ export function App({ snapshot, engine, initialPrompt }: AppProps): React.ReactE
         fontId={undefined}
         onStarClick={undefined}
         overlayPanel={undefined}
-        onParamPick={() => {}}
-        onCommandPick={() => {}}
-        onOpenWorkspace={() => {}}
+        onParamPick={(s) => runParam(s)}
+        onCommandPick={(commandLine) => {
+          const line = commandLine.startsWith('/') ? commandLine : '/' + commandLine
+          void submit(line)
+        }}
+        onOpenWorkspace={() => {
+          // 上游这个名字牌开 /workspace 工作区菜单；ace 侧最接近的是会话选择。
+          eventsRef.current = [...eventsRef.current, {
+            type: 'notice', text: '（工作区菜单未接入——切会话用 /resume）',
+          }]
+          reproject()
+        }}
         onFocusChange={setFocusIndex}
-        onAction={() => {}}
+        onAction={runAction}
         onQueryChange={setQuery}
         onSubmit={(t) => void submit(t)}
         onEscape={() => process.exit(0)}

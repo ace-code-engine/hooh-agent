@@ -49,7 +49,15 @@
   `ace classic` = 瑞士规范前端,均带失败留窗);补齐流式/命令/审批三根线;
   `engine.ts` 默认权限档对齐交互产品(write)。tsc 存量 80 行报错是迁移
   自带的"tsc 边界"(MIGRATION.md),本卡不背新债(改动后 79 行)。
+- 2026-10-24 第二批(用户实测"点不了任何东西"):首屏接线是迁移遗留的
+  **全空函数**——onAction/onCommandPick/onParamPick/onOpenWorkspace 全是
+  `() => {}`,点击被静默吞掉。本轮接活:动作表按词表映射到 ace 命令
+  (continue→/resume、settings→/config、jobs→/tasks、help→/help;没有
+  对应物的动作如实进 notice),参数段铭牌(模型/强度/预设/权限)点击打开
+  对应命令,命令候选点击直接执行,工作区名牌如实告知未接入。已知残留:
+  命令候选表还是 entry 里硬编码的六条,待接 initialize 握手的 commands。
 - [ ] re-vendor 到上游 0.16.1
 - [ ] 工具表达第 1 项:ToolRow resultView 投影
 - [ ] questions/ 面板接入(choice_request 不再自动取消)
 - [ ] Launchpad 资产决策(鲸鱼 → HooH 或保留关闭)
+- [ ] 命令候选接 initialize 的 commands(替换 entry 硬编码六条)
