@@ -269,7 +269,7 @@ export function choiceAnswerPayload(kind: string, action: ChoiceAction): Record<
 
 /** 常驻引擎会话：一个进程活到会话结束（`--serve` 的上下文在进程内）。 */
 export class AceEngine {
-  private child: ReturnType<typeof spawn>
+  private child: ChildProcessWithoutNullStreams
   private buf = ''
   private seq = 0
   private id = 0

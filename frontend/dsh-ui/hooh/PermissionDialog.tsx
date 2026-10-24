@@ -37,7 +37,7 @@ export const SHELL_PERMISSION_OPTIONS: readonly {
 /** 展开后的选项表：`persistOk=false` 时去掉「记住」（调用方据此定按键数）。 */
 export function shellPermissionOptions(
   persistOk: boolean | undefined,
-): readonly typeof SHELL_PERMISSION_OPTIONS {
+): typeof SHELL_PERMISSION_OPTIONS {
   return persistOk === false
     ? SHELL_PERMISSION_OPTIONS.filter((o) => !o.persist)
     : SHELL_PERMISSION_OPTIONS
@@ -57,7 +57,7 @@ export function PermissionDialog({
       {reason !== '' ? <Text>{reason.slice(0, 200)}</Text> : null}
       {opts.map((o, i) => (
         <Text key={o.label} inverse={i === safe} bold={i === safe}
-              color={o.decision === 'deny' ? 'red' : undefined}>
+              color={o.decision === 'deny' ? 'error' : undefined}>
           {i === safe ? '❯ ' : '  '}{i + 1}. {o.label}
         </Text>
       ))}
