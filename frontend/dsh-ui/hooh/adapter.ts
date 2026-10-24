@@ -36,8 +36,9 @@ export interface AceSnapshot {
   lastSessionTitle?: string | undefined
   /** 有没有后台任务在跑（ace 的队列/工具看板） */
   jobsRunning?: boolean
-  /** 斜杠命令候选（`/` 补全用） */
-  commands?: readonly string[]
+  /** 斜杠命令候选（`/` 补全用；形状必须是上游 LocalCommand——字符串会把
+   *  CommandSuggestions 的 stringWidth(c.name) 直接炸掉，2026-10-24 闪退的根因）。 */
+  commands?: readonly { name: string; description: string }[]
   /** 首次启动（提示换成首启那句） */
   firstRun?: boolean
   /** 星标过没有（上游的 star 提示；ace 不弹就恒 true = 不提示） */

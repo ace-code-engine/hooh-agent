@@ -234,6 +234,39 @@ export interface PendingPermission {
   persistOk: boolean
 }
 
+/** 选择/确认/文本请求（`/model`、`/config` 向导、拒绝理由…都走这一条往返）。 */
+export interface PendingChoice {
+  kind: 'choose' | 'confirm' | 'text'
+  title: string
+  /** choose 专有：候选文本列表。 */
+  options?: string[]
+  /** text 专有：默认值（空输入=用它）。 */
+  default?: string
+  /** text 专有：凭据输入（界面上不回显）。 */
+  secret?: boolean
+}
+
+export type ChoiceAction =
+  | { type: 'pick'; value: string }
+  | { type: 'accept' }
+  | { type: 'deny' }
+  | { type: 'text'; text: string | null }
+  | { type: 'cancel' }
+
+/** 投影到 `choice.answer` 的载荷（纯函数；协议口径在 core/ace_serve 的三个 _ask）。 */
+export function choiceAnswerPayload(kind: string, action: ChoiceAction): Record<string, unknown> {
+  if (kind === 'confirm') return { accepted: action.type === 'accept' }
+  if (kind === 'text') {
+    // 空串 = 取消（引擎按「没拿到答案」处理，向导落回默认值）——发 null。
+    if (action.type === 'text' && action.text !== null && action.text !== '') {
+      return { text: action.text }
+    }
+    return { text: null }
+  }
+  // choose：values 缺失/空 = 取消
+  return action.type === 'pick' ? { values: [action.value] } : {}
+}
+
 /** 常驻引擎会话：一个进程活到会话结束（`--serve` 的上下文在进程内）。 */
 export class AceEngine {
   private child: ReturnType<typeof spawn>
@@ -243,6 +276,7 @@ export class AceEngine {
   private listeners = new Set<(ev: AceEvent) => void>()
   private waiters = new Map<string, () => void>()
   private permissionCb: ((req: PendingPermission) => void) | null = null
+  private choiceCb: ((req: PendingChoice) => void) | null = null
 
   constructor(private opts: EngineOptions) {
     const py = process.env.ACE_PYTHON || resolvePython()
@@ -281,12 +315,25 @@ export class AceEngine {
               persistOk: ev.persist_ok !== false,
             })
           } else if (ev.type === 'choice_request') {
-            // 选择面板未接入（上游 questions/ 那排是第③步的活）：如实取消，
-            // 让引擎的轮次继续走——静默挂着比"取消"更糟。
-            this.write('choice.answer', { cancelled: true }, 'choice' + String(++this.id))
-            this.listeners.forEach((fn) => fn({
-              type: 'notice', text: '（引擎请求选择：面板未接入，已自动取消）',
-            }))
+            // 选择/确认/文本（/model /config 向导都走这条）。有面板回调就交面板；
+            // 没有则如实自动取消——静默挂着引擎比取消更糟。
+            const req: PendingChoice = {
+              kind: (ev.kind === 'confirm' || ev.kind === 'text' ? ev.kind : 'choose'),
+              title: String(ev.title ?? ''),
+              ...(Array.isArray(ev.options)
+                ? { options: (ev.options as unknown[]).map((o) => String(o)) }
+                : {}),
+              ...(ev.default !== undefined ? { default: String(ev.default) } : {}),
+              ...(ev.secret === true ? { secret: true } : {}),
+            }
+            if (this.choiceCb !== null) {
+              this.choiceCb(req)
+            } else {
+              this.write('choice.answer', { text: null, values: [] }, 'choice' + String(++this.id))
+              this.listeners.forEach((fn) => fn({
+                type: 'notice', text: `（引擎请求选择：面板未接入，已自动取消——${req.title}）`,
+              }))
+            }
           } else {
             this.listeners.forEach((fn) => fn(ev))
           }
@@ -313,6 +360,17 @@ export class AceEngine {
     const params: Record<string, unknown> = { decision }
     if (persist && decision === 'session') params.persist = true
     this.write('permission.answer', params, 'perm' + String(++this.id))
+  }
+
+  /** 注册选择回调（返回去注册函数）。`/model`、`/config` 向导都走这条往返。 */
+  onChoice(cb: ((req: PendingChoice) => void) | null): () => void {
+    this.choiceCb = cb
+    return () => { if (this.choiceCb === cb) this.choiceCb = null }
+  }
+
+  /** 回答选择（载荷投影见 `choiceAnswerPayload`）。 */
+  answerChoice(kind: string, action: ChoiceAction): void {
+    this.write('choice.answer', choiceAnswerPayload(kind, action), 'choice' + String(++this.id))
   }
 
   /**

@@ -56,6 +56,13 @@
   对应物的动作如实进 notice),参数段铭牌(模型/强度/预设/权限)点击打开
   对应命令,命令候选点击直接执行,工作区名牌如实告知未接入。已知残留:
   命令候选表还是 entry 里硬编码的六条,待接 initialize 握手的 commands。
+- 2026-10-24 第三批(用户实测"一按 / 就闪退"):根因是 commands 形状——
+  CommandSuggestions 对每条取 `stringWidth(c.name)`,壳喂的是字符串数组,
+  当场炸渲染树。改喂上游 LocalCommand 形状({name, description});同批把
+  `choice_request` 接上真面板(choose/confirm/text 三种 kind,App 统一按键
+  路由,空文本=取消落回默认值,secret 不回显)——/model /config 向导从此
+  能用,「设置按不了」的根因(选择请求被自动取消)一并清除。winpty 真 TTY
+  实测:按 / 进程存活、候选面板带描述正确渲染。
 - [ ] re-vendor 到上游 0.16.1
 - [ ] 工具表达第 1 项:ToolRow resultView 投影
 - [ ] questions/ 面板接入(choice_request 不再自动取消)

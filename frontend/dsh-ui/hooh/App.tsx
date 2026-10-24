@@ -25,10 +25,12 @@ import {
   rowsFromEvents,
   type AceEngine,
   type AceEvent,
+  type PendingChoice,
   type PendingPermission,
   type UiRow,
 } from './engine.js'
 import { PermissionDialog, shellPermissionOptions } from './PermissionDialog.js'
+import { ChoiceDialog } from './ChoiceDialog.js'
 
 export interface AppProps {
   snapshot: AceSnapshot
@@ -46,6 +48,10 @@ export function App({ snapshot, engine, initialPrompt }: AppProps): React.ReactE
   const [busy, setBusy] = useState(false)
   const [perm, setPerm] = useState<PendingPermission | null>(null)
   const [permCursor, setPermCursor] = useState(0)
+  // 选择/确认/文本（/model、/config 向导都走这条）：req 本体 + 每种的交互态。
+  const [choice, setChoice] = useState<PendingChoice | null>(null)
+  const [choiceCursor, setChoiceCursor] = useState(0)
+  const [choiceText, setChoiceText] = useState('')
   // 全量事件账本：每条事件到达后**从头重投影**（顺序即事件序；TUI 规模的
   // 重算成本可忽略），行状态永远与引擎一致，不需要增量修补逻辑。
   const eventsRef = useRef<AceEvent[]>([])
@@ -55,13 +61,19 @@ export function App({ snapshot, engine, initialPrompt }: AppProps): React.ReactE
     setRows(rowsFromEvents(eventsRef.current))
   }, [])
 
-  // 审批是轮次外的往返：注册在挂载期，不挂在某一次 turn 上。
+  // 审批与选择都是轮次外的往返：注册在挂载期，不挂在某一次 turn 上。
   useEffect(() => {
     if (!engine) return
-    return engine.onPermission((req) => {
+    const offPerm = engine.onPermission((req) => {
       setPerm(req)
       setPermCursor(0)
     })
+    const offChoice = engine.onChoice((req) => {
+      setChoice(req)
+      setChoiceCursor(0)
+      setChoiceText(req.default ?? '')
+    })
+    return () => { offPerm(); offChoice() }
   }, [engine])
 
   const answer = useCallback(
@@ -147,7 +159,7 @@ export function App({ snapshot, engine, initialPrompt }: AppProps): React.ReactE
   }, [initialPrompt, engine, submit])
 
   useInput((input, key) => {
-    // 审批优先：弹窗在场时所有键归它（busy 与否无关——审批正挂在轮次中间）。
+    // 审批优先，选择次之：弹窗在场时所有键归它（busy 与否无关——它们正挂在轮次中间）。
     if (perm !== null) {
       const opts = shellPermissionOptions(perm.persistOk)
       if (key.upArrow) setPermCursor((c) => (c - 1 + opts.length) % opts.length)
@@ -165,7 +177,45 @@ export function App({ snapshot, engine, initialPrompt }: AppProps): React.ReactE
       }
       return
     }
-    if (busy) return                      // 忙时不吃键（审批已在上面接管）
+    if (choice !== null) {
+      if (choice.kind === 'choose' && choice.options !== undefined) {
+        const n = choice.options.length
+        if (key.upArrow) setChoiceCursor((c) => (c - 1 + n) % n)
+        else if (key.downArrow) setChoiceCursor((c) => (c + 1) % n)
+        else if (key.escape) { engine?.answerChoice('choose', { type: 'cancel' }); setChoice(null) }
+        else if (key.return) {
+          engine?.answerChoice('choose', { type: 'pick', value: choice.options[choiceCursor] ?? '' })
+          setChoice(null)
+        } else {
+          const idx = '123456789'.indexOf(input)
+          if (idx >= 0 && idx < n) {
+            engine?.answerChoice('choose', { type: 'pick', value: choice.options[idx]! })
+            setChoice(null)
+          }
+        }
+      } else if (choice.kind === 'confirm') {
+        if (input === 'y' || input === 'Y' || key.return) {
+          engine?.answerChoice('confirm', { type: 'accept' }); setChoice(null)
+        } else if (input === 'n' || input === 'N' || key.escape) {
+          engine?.answerChoice('confirm', { type: 'deny' }); setChoice(null)
+        } else if (key.upArrow || key.downArrow) {
+          setChoiceCursor((c) => 1 - c)
+        }
+      } else if (choice.kind === 'text') {
+        if (key.escape) {
+          engine?.answerChoice('text', { type: 'text', text: null }); setChoice(null)
+        } else if (key.return) {
+          engine?.answerChoice('text', { type: 'text', text: choiceText })
+          setChoice(null)
+        } else if (key.backspace || key.delete) {
+          setChoiceText((t) => t.slice(0, -1))
+        } else if (input && input >= ' ' && input !== '\u007f') {
+          setChoiceText((t) => t + input)
+        }
+      }
+      return
+    }
+    if (busy) return                      // 忙时不吃键（审批/选择已在上面接管）
     if (key.escape) {
       if (query !== '') setQuery('')
       else process.exit(0)
@@ -234,12 +284,16 @@ export function App({ snapshot, engine, initialPrompt }: AppProps): React.ReactE
           persistOk={perm.persistOk}
           cursor={permCursor}
         />
-      ) : (
+      ) : null}
+      {choice !== null ? (
+        <ChoiceDialog req={choice} cursor={choiceCursor} value={choiceText} />
+      ) : null}
+      {perm === null && choice === null ? (
         <Box marginTop={1}>
           <Text color="accent">{busy ? '… ' : '❯ '}</Text>
           <Text>{query}</Text>
         </Box>
-      )}
+      ) : null}
     </Box>
   )
 }

@@ -30,7 +30,19 @@ function snapshot(): AceSnapshot {
     effort: env.ACE_EFFORT ?? 'max',
     preset: env.ACE_PRESET ?? 'code',
     ...(env.ACE_LAST_SESSION ? { lastSessionTitle: env.ACE_LAST_SESSION } : {}),
-    commands: ['/help', '/model', '/permission', '/resume', '/status', '/tools'],
+    // 形状必须是上游 LocalCommand（{name, description}，name 不带斜杠）：
+    // CommandSuggestions 对每条取 stringWidth(c.name)，喂字符串当场炸渲染
+    // （2026-10-24 一按 / 就闪退的根因）。
+    commands: [
+      { name: 'help', description: 'Show available commands' },
+      { name: 'model', description: 'Show or switch the model' },
+      { name: 'permission', description: 'Show or change the permission level' },
+      { name: 'resume', description: 'Continue a saved session' },
+      { name: 'status', description: 'Show session status' },
+      { name: 'tools', description: 'List available tools' },
+      { name: 'effort', description: 'Show or change reasoning effort' },
+      { name: 'exit', description: 'Quit HooH' },
+    ],
   }
 }
 
