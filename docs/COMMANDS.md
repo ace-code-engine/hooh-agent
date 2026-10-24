@@ -214,6 +214,11 @@
 完整清单以 `python ai_code.py --help` 为准；常用：
 
 - `--preview [--preview-width N]` — 只画一遍首屏（面板 + 分组菜单 + 状态栏示例）然后退出。不开交互终端也能看界面长什么样，`demo/record_demo.py --session landing` 就是用它出的图
+- `--color <值>` — **配色**。两种写法：
+  - 选色板：`--color auto`（跟随终端背景）/ `dark` / `light` / `mist-dark` / `mist-light` / `mist-ansi`（后三个是移植自 [dsh-TUI](https://github.com/ccch1mneyyy/dsh-TUI) 的「雾蓝 Gentle Mist Blue」家族），或 `~/.ace/themes/<name>.json` 里的自定义主题名
+  - 覆盖 token：`--color accent=#FF9EC7,warn=#E0C08A`（在当前色板上只改这几个）
+  
+  不带本参数时按 `ACE_THEME` → `COLORFGBG` → `dark` 检测（**默认外观不变**，换色必须显式要求）。这个值会同时转交前端与 Python 引擎，保证一屏之内只有一套色。见 [`docs/design/DSH-TUI-PORT.md`](design/DSH-TUI-PORT.md)
 - `--json` — **机器可读事件流**：stdout 一行一个 JSON 对象（`session_start` / `user_message` / `model_request` / `tool_call` / `tool_result` / `permission_request` / `notice` / `final` / `session_end`），无 ANSI、无进度条；人看的输出会变成 `notice` 事件。契约见 [INTERFACES.md](INTERFACES.md#91-headless-事件流契约ace---json)。例：`ace --json --input "现在几点" | jq -c 'select(.type=="final")'`
 
 - `--tools` — 原生工具调用（OpenAI 兼容 function calling，不支持时自动降级到文本协议）

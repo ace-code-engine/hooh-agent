@@ -57,6 +57,75 @@ if /i "%~1"=="--install-ui" (
 )
 
 rem ---------------------------------------------------------------------------
+rem `ace proxy [args]`: start the OpenAI-compatible endpoint that lets dsh-TUI
+rem (its UI, its keybindings) drive ace's engine. Socket stays on 127.0.0.1.
+rem MUST be handled before the frontend dispatch below -- otherwise "proxy"
+rem is just an unknown argv token that gets passed to the Ink frontend, which
+rem ignores it and starts the normal UI instead.
+rem See docs/design/DSH-TUI-BRIDGE.md.
+rem ---------------------------------------------------------------------------
+if /i "%~1"=="proxy" (
+    shift
+    "%_ACE_PY%" tools\ace_openai_proxy.py %*
+    goto :eof
+)
+
+rem ---------------------------------------------------------------------------
+rem `ace tui [args]`: dsh-TUI's UI driving ace's engine.
+rem
+rem This is the B bridge (docs/design/DSH-TUI-BRIDGE.md). It starts the local
+rem OpenAI-compatible endpoint, then hands over to dsh-tui -- the UI is theirs,
+rem the agent loop/tools/permissions are ours. ace's own Ink frontend is NOT
+rem what you get here; use plain `ace` for that.
+rem
+rem ONE-TIME setup, inside dsh-tui:  /provider -> add custom
+rem   baseURL   http://127.0.0.1:8787/v1
+rem   protocol  openai-completions
+rem   apiKey    anything (ace does not check it)
+rem   models    pick the discovered entry "ace", then /model ace
+rem ---------------------------------------------------------------------------
+if /i "%~1"=="tui" (
+    shift
+    where dsh-tui >nul 2>nul
+    if errorlevel 1 (
+        echo [HooH] dsh-tui was not found on PATH. Install it first:
+        echo           npm i -g @deepseek-harness-tui/dsh-tui
+        pause
+        exit /b 1
+    )
+    echo [HooH] ace engine endpoint: http://127.0.0.1:8787/v1  (model: ace)
+    echo        First run only, inside dsh-tui: /provider  then add a custom one
+    echo          baseURL   http://127.0.0.1:8787/v1
+    echo          protocol  openai-completions
+    echo          apiKey    anything (not checked)
+    echo        then pick the discovered model "ace" and run /model ace
+    rem Branding + provider route (idempotent): dsh-tui's splash says HooH, the
+    rem whale is off, and the "ace" route points at the endpoint below.
+    "%_ACE_PY%" "%~dp0tools\dsh_bridge_setup.py"
+    start "ace-proxy" /min "%_ACE_PY%" "%~dp0tools\ace_openai_proxy.py" --project-root "%~dp0" --permission readonly
+    dsh-tui %*
+    goto :eof
+)
+
+rem ---------------------------------------------------------------------------
+rem `ace ui [args]`: HooH's own UI -- the dsh-TUI interface tree migrated into
+rem this repo (frontend/dsh-ui), driven by ace's engine. Nothing external is
+rem invoked: the tree, its renderer and its components all live in-tree.
+rem ---------------------------------------------------------------------------
+if /i "%~1"=="ui" (
+    shift
+    if not exist "frontend\node_modules\tsx\dist\cli.mjs" (
+        echo [HooH] frontend dependencies are not installed. Run: ace --install-ui
+        pause
+        exit /b 1
+    )
+    pushd "%~dp0frontend"
+    node "node_modules\tsx\dist\cli.mjs" "dsh-ui\hooh\entry.tsx" %*
+    popd
+    goto :eof
+)
+
+rem ---------------------------------------------------------------------------
 rem Frontend dispatch.
 rem The TypeScript/Ink frontend is the MAIN UI once both pieces are present:
 rem Node on PATH, and frontend\node_modules installed. Anything missing falls

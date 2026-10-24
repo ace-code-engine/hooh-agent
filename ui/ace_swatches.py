@@ -214,10 +214,12 @@ def _selfcheck() -> int:
     ok(profile_from_caps({"truecolor": "yes"}) == "truecolor", "真彩档判定错")
     ok(profile_from_caps({"color": "unknown"}) == "16", "unknown 应走保守档")
 
-    # 9. 两个主题：色号来自同一张表，且渲染后宽度一致
+    # 9. 主题：色号来自同一张表，且渲染后宽度一致
+    #    （这里原来断言"恰好两个主题"—— 加了雾蓝家族与自定义主题之后，判据改成
+    #     "至少要有 dark/light 两个能整屏渲染"，而不是把色板数量钉死。）
     from ui import ace_theme
-    ok(set(ace_theme.CELL_THEMES) == {"dark", "light"}, "主题应恰好两个")
-    for t in ("dark", "light"):
+    ok({"dark", "light"} <= set(ace_theme.CELL_THEMES), "内置 dark/light 主题缺了")
+    for t in ("dark", "light", "mist-dark", "mist-light", "mist-ansi"):
         for role in ace_theme.SWISS_ROLES:
             ok(bool(ace_theme.cell(role, t)), "{}/{} 取不到色".format(t, role))
         ok(ace_theme.cell("accent", t) != ace_theme.cell("text_2", t),

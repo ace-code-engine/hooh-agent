@@ -88,6 +88,14 @@ export function Tabs({
 /**
  * 列表项（照 CC `ListItem`）：聚焦 `❯`、选中 `✓`、可选描述行。
  * 三种标记**位置固定**（都占同样宽的标记列），所以有没有标记都不会让文字左右跳。
+ *
+ * **可点**（`onClick` / `onHover`）：内核早就把鼠标能力给全了
+ * （`BoxProps.onClick`/`onMouseEnter`，命中测试 `hit-test.js` 的 `hitTestWithOverlays`），
+ * `Root` 也挂了 `MouseTracking`（主屏也上报鼠标事件）—— 此前只是**没有任何组件消费**，
+ * 所以点了等于没点。事件挂在**最外层盒**上：带描述项是两行，两行都该算这一项。
+ *
+ * 为什么不做成"默认就带点击"：动作是调用方的事（点一项是确认、选中、还是切页签？），
+ * 这里只负责把事件转出来。
  */
 export function ListItem({
   label,
@@ -96,6 +104,9 @@ export function ListItem({
   isSelected = false,
   color,
   hint,
+  right,
+  onClick,
+  onHover,
 }: {
   label: React.ReactNode;
   description?: string;
@@ -103,18 +114,34 @@ export function ListItem({
   isSelected?: boolean;
   color?: ColorFn;
   hint?: string;
+  /** 右对齐的一列（计数/耗时）—— 右对齐才便于竖着比较，见 `ace_panel.list_row`。 */
+  right?: string;
+  /** 鼠标点中这一项（整项两行都算）。 */
+  onClick?: () => void;
+  /** 鼠标移到这一项上（用于"悬停跟随光标"）。 */
+  onHover?: () => void;
 }): React.ReactElement {
   // 标记字形过降级层：`❯`/`✓` 在 cp936 控制台上印不出来（替身 `>`/`v`，同宽 1 列，
   // 所以定宽标记列不会被撑开）。
   const marker = g(isFocused ? '❯' : isSelected ? '✓' : ' ');
   return (
-    <Box flexDirection="column">
+    <Box
+      flexDirection="column"
+      {...(onClick ? { onClick } : {})}
+      {...(onHover ? { onMouseEnter: onHover } : {})}
+    >
       <Box flexDirection="row">
         <Box width={2}>
           <Text color={isFocused ? color?.('accent') : color?.('success')}>{marker}</Text>
         </Box>
         <Text color={color?.('text')}>{label}</Text>
         {hint ? <Text color={color?.('dim')}>{`  ${hint}`}</Text> : null}
+        {right ? (
+          <>
+            <Box flexGrow={1} />
+            <Text color={color?.('dim')}>{right}</Text>
+          </>
+        ) : null}
       </Box>
       {description ? (
         <Box flexDirection="row">

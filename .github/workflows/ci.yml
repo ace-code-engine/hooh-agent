@@ -272,5 +272,19 @@ jobs:
       - name: Typecheck (tsc --noEmit)
         run: npm run build
 
+      # 失败时把失败项打成 GitHub **注解** —— 与 test / engine job 同一取态：REST 的 job log
+      # 要 admin 权限，注解不需要登录就能读。这个 job 此前缺这一步：一红就只剩
+      # "exit code 1"，谁也不知道是哪条用例，等于没有可诊断信息（2026-10-06 CI #273 卡在这）。
       - name: Tests (vitest：单元 + 假引擎界面 + 真引擎集成)
-        run: npm test
+        run: |
+          set +e
+          npm test 2>&1 | tee "$RUNNER_TEMP/vitest.log"
+          code=${PIPESTATUS[0]}
+          if [ "$code" -ne 0 ]; then
+            echo "::error title=ace-frontend-tests-failed::vitest 退出码 $code（最多列 12 条）"
+            grep -aE 'FAIL|AssertionError|Test Files|^ *Tests ' "$RUNNER_TEMP/vitest.log" \
+              | head -12 | while IFS= read -r line; do
+              echo "::error title=ace-frontend-failure::${line}"
+            done
+          fi
+          exit "$code"

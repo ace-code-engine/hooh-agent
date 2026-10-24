@@ -100,7 +100,14 @@ _SGR_RE = re.compile(r"\033\[([0-9;]*)m")
 # 清屏 / 移光标之类的控制序列（注意排除 m，那是配色，要留给 split_ansi 解析）
 _ANSI_OTHER_RE = re.compile(r"\033\[[0-9;]*(?!m)[A-Za-z]")
 _SPINNER_GLYPHS = "·˙•◈◐◑◒◓◇◆▁▃▅▇▖▘▝▗"   # ace_spinner 五个阶段的首字形（含工具两阶段）
-_SPINNER_RE = re.compile(r"^[%s]\s" % _SPINNER_GLYPHS)
+# 推理阶段换成了**噪声填充**（多格帧，照 `circle-noise-fill.html` 缩到 5 格）。
+# 它不能塞进上面那串"单字形"里：`^[字形]\s` 这种匹配是按"一个字形 + 空格"写的，
+# 5 格宽的一帧会让第二条字符是 `·`/`█` 而不是空格 ⇒ 永远匹配不上 ⇒ 演示图里
+# 会留下**取决于采集时机**的帧（正是这套归一化要消灭的东西）。
+_NOISE_FRAMES = ("·····", "···██", "··███", "█████")
+_NOISE_CANON = "█████"              # 多格帧一律收敛到"填满"那一帧
+_SPINNER_RE = re.compile(r"^(?:[%s]|%s)\s"
+                         % (_SPINNER_GLYPHS, "|".join(re.escape(f) for f in _NOISE_FRAMES)))
 # 归一表：同一阶段的字形收敛到一个代表字形。**不含 waiting 那三个点** ——
 # `·` 也是正文里常见的项目符号，按转轮处理会把正常行的颜色剥掉。
 _SPINNER_CLASS = {"◐": "◐", "◑": "◐", "◒": "◐", "◓": "◐",
@@ -118,7 +125,12 @@ def _canon_spinner(line: str) -> str:
     这条是 2026-09-19 那次 CI 红换来的：录制时是主题色，CI 上是渐变到一半的告警色。
     """
     plain = _SGR_RE.sub("", line)
-    if not plain or plain[0] not in _SPINNER_CLASS:
+    if not plain:
+        return line
+    for f in _NOISE_FRAMES:                 # 多格帧：整段替换，不能只看首字符
+        if plain.startswith(f + " "):
+            return _NOISE_CANON + plain[len(f):]
+    if plain[0] not in _SPINNER_CLASS:
         return line
     return _SPINNER_CLASS[plain[0]] + plain[1:]
 
@@ -219,6 +231,10 @@ def capture_session(name: str = "happy") -> str:
         env = dict(os.environ)
         env["FORCE_COLOR"] = "1"          # 管道下强制上色，见 ai_code.py 的 USE_COLOR
         env.pop("NO_COLOR", None)
+        # 钉死"终端是 UTF-8"：否则 `ui/ace_home` 的选中标记 `▶` 会在 cp936 控制台上降级
+        # 成 `>`（core/ace_io.ASCII_FALLBACK），同一份演示在 Windows 与 CI 上录出两张图，
+        # `--check` 跨平台必然对不上（2026-10-06 CI #273 就是这么红的）。
+        env["ACE_DISPLAY_ENCODING"] = "utf-8"
         env["PYTHONIOENCODING"] = "utf-8"
         env["HOME"] = env["USERPROFILE"] = str(home)   # 不读录制者的 ~/.ai_code.json
         env.pop("HOMEDRIVE", None)

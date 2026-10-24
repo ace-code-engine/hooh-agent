@@ -1,0 +1,4548 @@
+import React from 'react'
+// 粘贴/清洗语义已抽到 utils/inputPaste.ts（方案 B：PromptInput 与 Launchpad 共享；
+// 行为逐字节不变，只是搬了家）。
+import { sanitizeEditableText, sanitizePastedText } from '../utils/inputPaste.js'
+import { constants as fsConstants } from 'node:fs'
+import { open, unlink } from 'node:fs/promises'
+import { basename, resolve } from 'node:path'
+import { t } from '../i18n.js'
+import { Box, Text, useInput, useTerminalSize, useTheme, type ScrollBoxHandle } from '../ui.js'
+import { EffortChargeGlyph } from './EffortChargeGlyph.js'
+import { EffortInputBorder, type InputBorderLabel } from './EffortInputBorder.js'
+import { EffortTierBadge } from './EffortTierBadge.js'
+import { isLightThemeActive } from '../theme.js'
+import { sessionColorHex } from '../terminal-utils/sessionColors.js'
+import { useDeclaredCursor } from '../ink/hooks/use-declared-cursor.js'
+import type { ClickEvent } from '../ink/events/click-event.js'
+import type { DragEvent } from '../ink/events/drag-event.js'
+import { TerminalWriteContext } from '../ink/useTerminalNotification.js'
+import { setClipboard } from '../ink/termio/osc.js'
+import { noteAuxNumber } from '../ink/geometry-trace.js'
+import instances from '../ink/instances.js'
+import { stringWidth } from '../ink/stringWidth.js'
+import { truncateToWidth } from '../ink/truncateToWidth.js'
+import { getGraphemeSegmenter } from '../utils/intl.js'
+import { draftWordRangeAt, isDraftWordBoundary } from '../utils/draftWordBoundary.js'
+import { formatClipboardInsert, readClipboard } from '../utils/clipboard.js'
+import { imagePathMediaType, parsePastedImagePath, stageClipboardFilePaths } from '../utils/pastedImagePath.js'
+import { editInExternalEditor } from '../utils/externalEditor.js'
+import { setPromptEditorNode, EditorButton } from './PromptEditor.js'
+import type { ChannelUi as Channel } from '../adapter/channel/ui-policy.js'
+import type {
+  ComposerImageRef,
+  ComposerSubmission,
+  StagedImageHandle,
+} from '../dsh-adapter/channel.js'
+import type { TranscriptImage } from '../dsh-adapter/transcript-images.js'
+import { isHiddenCommandName, parseCommandName } from '../commands.js'
+import { appendHistory, HISTORY_LIMIT, historyProjectKey, loadHistoryOldestFirst } from '../history.js'
+import { mentionAtCaret } from '../utils/mentions.js'
+import { preserveSelection, type FileCandidate } from '../utils/fileSuggestions.js'
+import { isMod } from '../utils/modifiers.js'
+import { actionMatches } from '../utils/keymap.js'
+import { CommandSuggestions } from './CommandSuggestions.js'
+import { FileSuggestions } from './FileSuggestions.js'
+import { HelpMenu } from './HelpMenu.js'
+import { OverlayAbove } from './OverlayAbove.js'
+import { SuggestionCard, cardContentWidth } from './SuggestionCard.js'
+import {
+  filterLiveImageBindings,
+  isUsableDraftSnapshot,
+  resolveBindingGeneration,
+  type PromptDraftCache,
+  type PromptDraftImage,
+} from './promptDraftCache.js'
+export { sanitizeEditableText, sanitizePastedText } from '../utils/inputPaste.js'
+
+/**
+ * Visible text of the session-entry control at the head of the input row:
+ * U+2338 APL FUNCTIONAL SYMBOL QUAD COLON plus a separator space.
+ *
+ * The glyph is chosen for ONE property above all others: the layout model and
+ * the terminal cell table must agree on how many columns it occupies. `\u2338`
+ * is a plain single-cell symbol with no emoji presentation, so
+ * `stringWidth` and the terminal both say 1 + 1 = 2 and
+ * {@link HOME_BUTTON_COLS} can be derived rather than guessed.
+ *
+ * The emoji house (`U+1F3E0`) was tried and rejected on this exact ground: it
+ * costs the terminal ONE cell while `stringWidth` charges the row TWO, and
+ * appending VARIATION SELECTOR-15 (text presentation) does not change either
+ * number. That standing one-column disagreement put every caret-relative
+ * column in the composer off by one, so no offset compensation made it work.
+ */
+const HOME_BUTTON_TEXT = '⌸ '
+
+const HOME_BUTTON_COLS = stringWidth(HOME_BUTTON_TEXT)
+
+interface PromptHistoryEntry {
+  readonly text: string
+  readonly images: readonly ComposerImageRef[]
+}
+
+/**
+ * One prompt-draft undo step: the state BEFORE a discrete edit (or edit run),
+ * plus the tracking the grouping rule needs. `Ctrl+Z` pops it back, and it is
+ * one of the places a staged image capability is held between edits, so it
+ * must stay in {@link PromptInput}'s `stageIdIsRetained` scan.
+ */
+interface DraftUndoEntry extends PromptHistoryEntry {
+  readonly cursor: number
+  /** Fold block as it was before the step; restored (or cleared) with it. */
+  readonly block: { readonly start: number; readonly end: number } | null
+  /** Timestamp of the run's last edit (layer-3 idle coalescing). */
+  atMs: number
+  /** Caret the run's last edit ended at; `null` seals the step (discrete). */
+  caretAfter: number | null
+  /**
+   * Edit direction, so a delete run never folds into an insert run and the two
+   * deletion directions (whose anchors differ) never merge. `clear` marks the
+   * sealed snapshot an Esc/clear takes, which never groups.
+   */
+  kind: 'insert' | 'deleteBackward' | 'deleteForward' | 'clear'
+  /** Deletion runs only: see {@link DraftDeleteRun}. */
+  deleteRun: DraftDeleteRun | null
+}
+
+/**
+ * The word a deletion run may keep consuming: the interval that held the first
+ * character it removed, plus the range the run has consumed so far. Both are in
+ * the step's own `text` coordinates, so the shrinking draft is never
+ * re-segmented (a truncated copy can split a repeated-Han run differently).
+ */
+interface DraftDeleteRun {
+  readonly wordStart: number
+  readonly wordEnd: number
+  /** Consumed range `[lo, hi)`. */
+  lo: number
+  hi: number
+}
+
+/**
+ * One vim NORMAL-mode undo step: the state before a vim command. Kept apart
+ * from the draft stack so `u` and `Ctrl+Z` never undo each other's edits.
+ */
+interface VimUndoEntry extends PromptHistoryEntry {
+  readonly cursor: number
+}
+
+/** Undo depth for both stacks (draft `Ctrl+Z` and vim `u`). */
+const UNDO_LIMIT = 100
+/** Total characters kept across all snapshots; the oldest are dropped first. */
+const UNDO_MAX_CHARS = 1_000_000
+/** Layer-3 idle window: a pause longer than this starts a new step. */
+const UNDO_IDLE_MS = 700
+
+/** How a `setInput` call relates to the draft undo stack. */
+type UndoMode =
+  /** Fold into the current step when the word/idle rules allow (typing). */
+  | 'group'
+  /** One discrete edit: its own step, sealed against continuation (paste). */
+  | 'step'
+  /** End of the draft's life: clear the stack, then apply the text. */
+  | 'reset'
+  /** Apply the text without touching the stack (undo itself, recalls). */
+  | 'silent'
+
+/**
+ * Common prefix/suffix of `prev` and `next` — the single edited span. Undo
+ * grouping works on this span rather than on a stdin chunk: one chunk may
+ * carry several characters (or several keys), so the unit is one real text
+ * mutation however it arrived. The common prefix must not pass either caret:
+ * repeated characters otherwise make an edit at the head look like a tail edit.
+ */
+function diffSpan(
+  prev: string,
+  next: string,
+  cursorBefore: number,
+  cursorAfter: number,
+): { start: number; inserted: string } {
+  let start = 0
+  const common = Math.min(prev.length, next.length, cursorBefore, cursorAfter)
+  while (start < common && prev.charCodeAt(start) === next.charCodeAt(start)) start++
+  let prevEnd = prev.length
+  let nextEnd = next.length
+  while (
+    prevEnd > start &&
+    nextEnd > start &&
+    prev.charCodeAt(prevEnd - 1) === next.charCodeAt(nextEnd - 1)
+  ) {
+    prevEnd--
+    nextEnd--
+  }
+  return { start, inserted: next.slice(start, nextEnd) }
+}
+
+/**
+ * Open a deletion run at the first character it removed: remember the word that
+ * character belongs to, and how much has been consumed so far.
+ */
+function startDeleteRun(text: string, start: number, removed: number): DraftDeleteRun {
+  const word = draftWordRangeAt(text, start)
+  return { wordStart: word.start, wordEnd: word.end, lo: start, hi: start + removed }
+}
+
+/**
+ * Whether a same-direction deletion extends the run recorded on `last`. The
+ * run's word interval and consumed range live in `last.text` coordinates, so
+ * the comparison survives the draft shrinking under it; extending past the word
+ * (or off the text) starts a new step. Only called once the direction, caret
+ * continuity and idle window have already agreed, so the new text is always
+ * adjacent to the consumed range.
+ */
+function extendDeleteRun(last: DraftUndoEntry, backward: boolean, removed: number): boolean {
+  const run = last.deleteRun
+  if (run === null || removed <= 0) return false
+  if (backward) {
+    const lo = run.lo - removed
+    if (lo < 0 || lo < run.wordStart) return false
+    run.lo = lo
+    return true
+  }
+  const hi = run.hi + removed
+  if (hi > last.text.length || hi > run.wordEnd) return false
+  run.hi = hi
+  return true
+}
+
+interface DraftImageLease {
+  readonly generation: number
+  readonly revision: number
+}
+
+/**
+ * Paste fold with a visible preview and no black box:
+ * a paste that leaves the input this big folds into a one-line chip
+ * showing the line/char count PLUS the first line of content. Hover peeks
+ * at the full text (window pinned to the head); clicking the chip — or
+ * the `▾` prefix on the first row while expanded — toggles the fold; Esc
+ * or any editing key unfolds first. Enter still submits the FULL text:
+ * folding never drops data.
+ */
+const FOLD_MIN_LINES = 6
+const FOLD_MIN_CHARS = 600
+const isBigInput = (text: string): boolean =>
+  text.split('\n').length >= FOLD_MIN_LINES || text.length >= FOLD_MIN_CHARS
+
+
+const COMPOSER_IMAGE_TOKEN = /\[Image #\d+\]/gu
+
+/** Format label for one image media type, matching the image preview card's
+ *  title (`JPEG`, `PNG`, `WEBP`, `GIF`). */
+const mediaTypeLabel = (mediaType: string): string =>
+  mediaType.replace(/^image\//u, '').replace(/\+xml$/u, '').toUpperCase()
+
+/** One `[Image #N]` occurrence: [start, end) offsets into the draft. */
+interface ImageTokenSpan {
+  readonly start: number
+  readonly end: number
+  readonly token: string
+}
+
+/** Every `[Image #N]` in `text`, in order. */
+function imageTokenSpans(text: string): ImageTokenSpan[] {
+  const spans: ImageTokenSpan[] = []
+  for (const match of text.matchAll(COMPOSER_IMAGE_TOKEN)) {
+    const start = match.index ?? 0
+    spans.push({ start, end: start + match[0].length, token: match[0] })
+  }
+  return spans
+}
+
+/** The span whose interior (exclusive of both edges) contains `offset`. */
+function imageTokenAround(spans: readonly ImageTokenSpan[], offset: number): ImageTokenSpan | undefined {
+  return spans.find(span => span.start < offset && offset < span.end)
+}
+
+/**
+ * A caret never rests inside a staged token: an offset in a span's interior
+ * moves to the edge `prefer` names — `'start'` (the token becomes the caret
+ * cluster), `'end'`, or whichever is nearer.
+ */
+function snapOffImageToken(
+  spans: readonly ImageTokenSpan[],
+  offset: number,
+  prefer: 'start' | 'end' | 'nearest',
+): number {
+  const span = imageTokenAround(spans, offset)
+  if (span === undefined) return offset
+  if (prefer === 'start') return span.start
+  if (prefer === 'end') return span.end
+  return offset - span.start < span.end - offset ? span.start : span.end
+}
+
+/** Expand a deletion or selection to include every staged token it touches. */
+function expandImageTokenRange(spans: readonly ImageTokenSpan[], start: number, end: number) {
+  return {
+    start: snapOffImageToken(spans, start, 'start'),
+    end: snapOffImageToken(spans, end, 'end'),
+  }
+}
+
+/** Capabilities referenced by `text`, in first occurrence order. A raw token
+ * restored from disk/history has no sidecar entry and therefore stays inert. */
+export function composerImageRefsForText(
+  text: string,
+  stagedByToken: ReadonlyMap<string, string>,
+): ComposerImageRef[] {
+  const refs: ComposerImageRef[] = []
+  const seen = new Set<string>()
+  for (const match of text.matchAll(COMPOSER_IMAGE_TOKEN)) {
+    const token = match[0]
+    if (seen.has(token)) continue
+    seen.add(token)
+    const stageId = stagedByToken.get(token)
+    if (stageId !== undefined) refs.push({ token, stageId })
+  }
+  return refs
+}
+
+/** Read one regular file through one descriptor, bounded to `maxBytes + 1`.
+ * The extra byte detects a file that grows after fstat; a short read detects
+ * shrinkage. This avoids stat(path) → readFile(path)'s path-swap TOCTOU and
+ * never allocates from an untrusted size before the profile limit is checked. */
+async function readBoundedRegularFile(path: string, maxBytes: number): Promise<Uint8Array> {
+  // O_NONBLOCK keeps a pasted FIFO/device path from parking the UI before
+  // fstat can reject it; regular-file reads are unchanged.
+  const file = await open(path, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK)
+  try {
+    const info = await file.stat()
+    if (!info.isFile()) throw new Error(`${basename(path)} is not a regular file`)
+    if (info.size > maxBytes) throw new Error(`image exceeds this profile's per-image size limit`)
+    const data = Buffer.allocUnsafe(info.size + 1)
+    let offset = 0
+    while (offset < data.byteLength) {
+      const { bytesRead } = await file.read(data, offset, data.byteLength - offset, offset)
+      if (bytesRead === 0) break
+      offset += bytesRead
+    }
+    if (offset !== info.size) throw new Error(`${basename(path)} changed while it was being read`)
+    return data.subarray(0, offset)
+  } finally {
+    await file.close()
+  }
+}
+
+/** Index of the word boundary at or before `cursor` (readline alt+b). */
+function wordBoundaryLeft(text: string, cursor: number): number {
+  let index = cursor
+  while (index > 0 && /\s/.test(text[index - 1]!)) index--
+  while (index > 0 && !/\s/.test(text[index - 1]!)) index--
+  return index
+}
+
+/** Index of the word boundary after `cursor` (readline alt+f). */
+function wordBoundaryRight(text: string, cursor: number): number {
+  const length = text.length
+  let index = cursor
+  while (index < length && !/\s/.test(text[index]!)) index++
+  while (index < length && /\s/.test(text[index]!)) index++
+  return index
+}
+
+// --- vim normal-mode helpers -----------------------------------------------
+// `/vim` 编辑模式的 normal 键位几何：行/词移动与删除目标。空白分词
+// （不区分 vim 的 word/WORD），对输入框场景足够且行为直观。
+
+/** Offset of the current line's first character. */
+function vimLineStart(text: string, cursor: number): number {
+  return text.lastIndexOf('\n', cursor - 1) + 1
+}
+
+/** Offset of the current line's last character (exclusive, no '\n'). */
+function vimLineEnd(text: string, cursor: number): number {
+  const next = text.indexOf('\n', cursor)
+  return next === -1 ? text.length : next
+}
+
+/** Offset of the line's first non-whitespace character (`^`). */
+function vimLineFirstNonBlank(text: string, cursor: number): number {
+  const start = vimLineStart(text, cursor)
+  const end = vimLineEnd(text, cursor)
+  let i = start
+  while (i < end && /\s/.test(text[i]!)) i++
+  return i
+}
+
+/** Next word start (`w`): skip the rest of the current word, then leading
+ *  whitespace. Whitespace-delimited, vim-style. */
+function vimWordForward(text: string, cursor: number): number {
+  const len = text.length
+  let i = cursor
+  if (i < len && !/\s/.test(text[i]!)) {
+    while (i < len && !/\s/.test(text[i]!)) i++
+  }
+  while (i < len && /\s/.test(text[i]!)) i++
+  return i
+}
+
+/** Previous word start (`b`): from inside a word, its own start; from
+ *  whitespace, the preceding word's start. */
+function vimWordBackward(text: string, cursor: number): number {
+  let i = cursor
+  while (i > 0 && /\s/.test(text[i - 1]!)) i--
+  while (i > 0 && !/\s/.test(text[i - 1]!)) i--
+  return i
+}
+
+/** End of the current word (`dw`): the whitespace boundary after `cursor`. */
+function vimWordEnd(text: string, cursor: number): number {
+  const len = text.length
+  let i = cursor
+  while (i < len && !/\s/.test(text[i]!)) i++
+  return i
+}
+
+// --- grapheme-cluster geometry ---------------------------------------------
+// The caret, editing keys, and wrapping MUST agree on one text unit. Mixing
+// UTF-16 code units (arrows/backspace), code points (wrap), and display
+// cells (stringWidth) lets the caret land inside a surrogate pair or a ZWJ
+// emoji — the inverted caret then shows half a glyph, Backspace deletes
+// half a character, and `line.slice()` splits clusters. All offsets below
+// are UTF-16 indices snapped to grapheme boundaries via the shared
+// Intl.Segmenter (utils/intl.ts).
+
+/** Ascending grapheme boundary offsets of `text` (starts at 0, ends at
+ *  `text.length`). Empty text yields `[0]`. */
+function graphemeBoundaries(text: string): number[] {
+  const bounds = [0]
+  for (const { index, segment } of getGraphemeSegmenter().segment(text)) {
+    const end = index + segment.length
+    if (end > bounds[bounds.length - 1]!) bounds.push(end)
+  }
+  return bounds
+}
+
+/** Largest grapheme boundary `<= offset` (clamped into the text). Snaps a
+ *  cursor that landed mid-cluster back onto a boundary. */
+function boundaryAtOrBefore(bounds: number[], offset: number): number {
+  let lo = 0
+  let hi = bounds.length - 1
+  let ans = bounds[0]!
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1
+    if (bounds[mid]! <= offset) {
+      ans = bounds[mid]!
+      lo = mid + 1
+    } else {
+      hi = mid - 1
+    }
+  }
+  return ans
+}
+
+/** Largest grapheme boundary strictly before `offset` (0 when none). */
+function previousGraphemeBoundary(bounds: number[], offset: number): number {
+  let lo = 0
+  let hi = bounds.length - 1
+  let ans = 0
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1
+    if (bounds[mid]! < offset) {
+      ans = bounds[mid]!
+      lo = mid + 1
+    } else {
+      hi = mid - 1
+    }
+  }
+  return ans
+}
+
+/** Smallest grapheme boundary strictly after `offset` (text.length when
+ *  none). Returns `offset` unchanged when it already is the last boundary. */
+function nextGraphemeBoundary(bounds: number[], offset: number): number {
+  let lo = 0
+  let hi = bounds.length - 1
+  let ans = bounds[hi] ?? 0
+  while (lo <= hi) {
+    const mid = (lo + hi) >> 1
+    if (bounds[mid]! > offset) {
+      ans = bounds[mid]!
+      hi = mid - 1
+    } else {
+      lo = mid + 1
+    }
+  }
+  return ans
+}
+
+/** Snap an arbitrary UTF-16 offset onto a grapheme boundary of `text`,
+ *  clamping into range. The safety net under every cursor write. */
+function normalizeCursorOffset(text: string, offset: number): number {
+  const clamped = Math.max(0, Math.min(offset, text.length))
+  return boundaryAtOrBefore(graphemeBoundaries(text), clamped)
+}
+
+/**
+ * The empty input deliberately shows NO placeholder text: terminal emulators
+ * paint the IME preedit (pinyin) at the physical cursor, which the app parks
+ * on the caret's cell, and the app receives no input events while a
+ * composition is active (Windows Terminal suppresses key events during TSF
+ * composition) — so it can never hide a placeholder in time. Keeping the row
+ * blank while empty is what guarantees the preedit has nothing to overlay.
+ */
+
+/** Max input rows before the visible viewport starts scrolling; the box keeps
+ *  a stable height. */
+const MAX_VISIBLE_LINES = 5
+
+/**
+ * Fixed chrome rows around the expanded editor's text area: round border
+ * (top+bottom), the title row, the status row, and the button row. The
+ * editor viewport gets `terminalRows - this` rows.
+ */
+const EDITOR_CHROME_ROWS = 5
+
+/**
+ * Double-click self-detection window: two clicks within this many ms and
+ * one cell (in either axis) of each other count as a double-click and
+ * select the word under the pointer. The drag protocol resets the ink
+ * multi-click chain on every press inside a drag target (the value box
+ * carries onDragStart), so the prompt detects the double-click itself.
+ */
+const DOUBLE_CLICK_MS = 500
+
+/**
+ * Live composer handle for Chat's global key rules and external draft actions.
+ * Chat listens first, so delegated editing actions stay with their state owner.
+ * Populated after each commit; null while unmounted or suspended.
+ */
+export interface PromptController {
+  hasText(): boolean
+  /** The draft text, for a caller that must not lose it (see {@link PromptDraftCache}). */
+  text(): string
+  /** Current capability-backed draft images in token order, without reads. */
+  previewImages?(): readonly { image: TranscriptImage; title: string }[]
+  clear(): void
+  /**
+   * Append `text` at the end of the input (external injection channel; see
+   * dsh-adapter/inject-channel.ts). Unlike `fillText`, which replaces the
+   * whole value, this accumulates — matching OpenCode's `tui.prompt.append`
+   * so repeated editor sends build one prompt. Returns the resulting value.
+   */
+  append(text: string): string
+  /**
+   * Copy the active mouse selection to the system clipboard (OSC 52 + the
+   * native fallback) and KEEP the selection for further editing. Returns
+   * true when a selection existed and consumed the key; Chat's Ctrl+C
+   * branch calls this first, before its clear/exit semantics.
+   */
+  consumeSelectionCopy(): boolean
+  /** Consume selection/editor Esc before Chat's working-turn interrupt. */
+  consumeEscape(): boolean
+  /** Toggle vim editing mode (`/vim`); returns the new state (true = on). */
+  toggleVim(): boolean
+  /** True while vim mode is on (either submode). Esc belongs to vim then —
+   *  Chat's working-turn Esc interrupt must yield in BOTH submodes. */
+  vimActive(): boolean}
+
+/**
+ * Owner-held slot for the composer draft, so a screen that unmounts the
+ * prompt (every early return in Chat) does not discard what the user typed.
+ *
+ * The composer writes ONE complete snapshot as it unmounts and consumes it on
+ * the way back; the shape and the reasoning live in `promptDraftCache.ts`.
+ */
+export interface PromptInputProps {
+  channel: Channel
+  /** Keep the draft mounted while another prompt-slot panel owns the UI. */
+  suspended?: boolean
+  /**
+   * Host judgement "this notice needs no toast" — the pet panel says it with
+   * its speech bubble instead while it is the active panel. Evaluated during
+   * render (not via an effect-written ledger) so toast and bubble swap in
+   * the same commit without a one-frame flash. Errors are never suppressed.
+   */
+  toastSuppressed?: (item: Channel['notifications'][number]) => boolean
+  /**
+   * Owner-held slot for the unsent draft.
+   *
+   * The prompt owns its text in local state, and several screens REPLACE the
+   * conversation (the session screen, the session tree, settings, the jobs and
+   * subagent panels, the trajectory scene) — early returns that unmount this
+   * component and would take a half-written prompt down with it. Chat owns the
+   * slot, so the text, its caret AND its image bindings survive that unmount
+   * and come back when the composer does. The owner also drops it on a session
+   * change, so a draft can never leak into a different conversation.
+   *
+   * Nothing is written from render: a commit-time assignment would run before
+   * the restore effect has read the slot and overwrite the draft with the
+   * empty first value.
+   */
+  draftCache?: PromptDraftCache
+  /** Whether the `?` help menu is open (state lives in the Chat screen). */
+  helpOpen: boolean
+  onToggleHelp(): void
+  /**
+   * Execute a slash command (built-in or plugin-registered) with its raw
+   * argument text; returns false when the input should be sent to the model.
+   */
+  onRunCommand(
+    name: string,
+    rawInput: string,
+    images: readonly ComposerImageRef[],
+  ): boolean | Promise<boolean>
+  /** Message-selection mode (Shift+↑): the input ignores keys while active. */
+  selectionActive: boolean
+  /**
+   * External fill from the ctrl+r history dialog: when this prop changes to
+   * a non-null string, the input replaces its value and moves the caret to
+   * the end. The caller clears it via onFillConsumed once consumed.
+   */
+  fillText?: string | null
+  onFillConsumed?(): void
+  /** Double-tap Esc with an empty input: open the rewind picker. */
+  onRewindRequest?(): void
+  /**
+   * ← on an EMPTY prompt backgrounds this session and
+   * opens the agent view (with text, ← moves the caret as usual).
+   */
+  onBackgroundRequest?(): void
+  /**
+   * Open the session screen (the one `/resume`, `/agentview` and `/home`
+   * share) from the `⌂` entry at the head of the input row.
+   *
+   * Optional on purpose: the entry is rendered ONLY when this is provided, so
+   * hosts that mount the prompt without a session screen — and the layout
+   * regressions that pin this row's column budget — keep exactly the row they
+   * had before.
+   */
+  onOpenSessions?(): void
+  /**
+   * Background sessions waiting on the user (agent view "needs input" rows
+   * excluding this session); the prompt footer shows the
+   * "← N agents" hint when provided (hidden when undefined).
+   */
+  backgroundAgentsNeedingInput?: number
+  /** Filled with the live controller each render (see PromptController). */
+  controllerRef?: React.RefObject<PromptController | null>
+  /**
+   * The staged image the caret is on — at a token's start, where the whole
+   * token inverts — or undefined once it leaves; reported whenever that changes (`'caret'`),
+   * and again on every click on a token (`'click'`, even when unchanged) so
+   * the caller can re-show a preview the user dismissed. `title` is the
+   * token without brackets (`Image #2`). Reported as undefined while the
+   * prompt is suspended and on unmount.
+   */
+  onCaretImage?(image: TranscriptImage | undefined, title: string | undefined, reason: 'caret' | 'click'): void
+  /**
+   * True while the caller shows the caret-driven preview. Esc then goes to
+   * `onDismissCaretPreview` ahead of every other Esc meaning (the ladder's
+   * "close the image preview" rung): this input's listener runs before
+   * Chat's, and the prompt is NOT inert under a caret preview.
+   */
+  caretPreviewOpen?: boolean
+  onDismissCaretPreview?(): void
+  /**
+   * Clock seam for the draft undo's 700ms idle coalescing. Defaults to
+   * `Date.now`; the regression harness passes a hand-advanced clock so the idle
+   * rule is exercised without a wall-clock sleep (which would be flaky).
+   */
+  now?: () => number
+}
+
+/**
+ * dsh-TUI prompt input: rounded border box (top+bottom borders
+ * only), `❯ ` prompt char (dimmed while a turn is working), the text with a
+ * block cursor at the cursor position, and above it the slash-command /
+ * file-completion suggestion card (SuggestionCard: rounded panel with the
+ * selected row behind a `❯` pointer in the theme's `suggestion` color).
+ *
+ * Empty input: a solid block caret on a blank cell and nothing else — no
+ * placeholder text, so the terminal-painted IME preedit (pinyin) at the
+ * parked cursor can never be overlaid on anything.
+ *
+ * Multi-line: Shift+Enter inserts a newline; ↑/↓ move between lines while
+ * the input spans multiple lines (history/command selection otherwise); the
+ * visible window scrolls to keep the caret row on screen past
+ * MAX_VISIBLE_LINES. Enter submits, backspace/delete edit, ←/→ move the
+ * cursor, Tab completes the selected command, Ctrl+G opens the draft in the
+ * external editor ($VISUAL/$EDITOR), Escape clears (or closes the help
+ * menu), `?` toggles the help menu. Windows ConPTY pipelines deliver
+ * whole lines with the Enter key lost: a trailing CR/LF in the input marks
+ * a complete line to submit.
+ *
+ * Enter submits immediately even while the model is streaming — as a STEER
+ * (Codex/pi semantics): the message is injected at the next step boundary
+ * of the running turn and the agent continues without aborting; Tab instead
+ * queues the message for after the turn (followup). Both appear in a
+ * pending preview above the input until delivered. Alt+Up pulls the last
+ * pending message back for editing; Esc (with pending messages while
+ * working) interrupts the turn and delivers them right away; Ctrl+Enter
+ * aborts the turn and sends the current input immediately.
+ */
+export function PromptInput({
+  channel,
+  toastSuppressed,
+  suspended = false,
+  draftCache,
+  helpOpen,
+  onToggleHelp,
+  onRunCommand,
+  selectionActive,
+  fillText,
+  onFillConsumed,
+  onRewindRequest,
+  onBackgroundRequest,
+  onOpenSessions,
+  backgroundAgentsNeedingInput,
+  controllerRef,
+  onCaretImage,
+  caretPreviewOpen = false,
+  onDismissCaretPreview,
+  now = Date.now,
+}: PromptInputProps) {
+  const [themeName] = useTheme()
+  // Raw stdout writer for OSC 52 clipboard writes (selection copy) — must
+  // bypass the frame pipeline; null outside a mounted Ink App.
+  const writeRaw = React.useContext(TerminalWriteContext)
+  // The composer owns its text in local state, so it starts EMPTY and adopts
+  // whatever draft the owner stored in a MOUNT-TIME effect below. Reading the
+  // store in this initializer instead looks equivalent and is not: a non-empty
+  // first frame leaves `repro-resume-position` red — resuming a session parks
+  // the transcript mid-history instead of pinning it to the newest message.
+  // Adopting after mount keeps the first frame identical to a fresh composer
+  // while still handing the draft back.
+  const [value, setValue] = React.useState('')
+  const [cursor, setCursor] = React.useState(0)
+  /**
+   * Adopt the owner's draft ONCE, after mount.
+   *
+   * This is where a screen swap gives the draft back: the slot outlives this
+   * component, so a remount picks up what the user had written — text, caret,
+   * the image bindings behind the visible `[Image #N]` tokens, and the edit
+   * state around them (fold chip, fullscreen editor, vim mode).
+   *
+   * It runs as an effect rather than as the `useState` initial value on
+   * purpose. A composer whose FIRST frame is already non-empty moves the
+   * transcript's restored scroll position (`repro-resume-position`); adopting
+   * after the first commit keeps that frame identical to a fresh composer. The
+   * slot is consumed here, and the composer never writes to it while mounted,
+   * so the empty first value cannot overwrite the draft before this reads it.
+   */
+  const adoptDraft = React.useRef(true)
+  React.useEffect(() => {
+    if (draftCache === undefined || !adoptDraft.current) return
+    adoptDraft.current = false
+    const snapshot = draftCache.current
+    draftCache.current = null
+    if (!isUsableDraftSnapshot(snapshot, String(channel.agentId), resolveBindingGeneration(channel))) return
+    const text = snapshot.value
+    // Carried edit state, restored ahead of the text: the chip, the
+    // fullscreen editor and the vim mode/submode come back with the draft —
+    // and they come back even with NO text, because they are modes rather
+    // than content. Fold ranges are safe by the CAPTURE invariant, not by
+    // restore order: a snapshot's block, when set, always sits inside the
+    // snapshot's own text (setInput keeps or drops it atomically), and at
+    // mount the caret is 0 so updateFoldBlock's caret-drag clamp cannot fire
+    // here. The transient state around them — editor scroll, vim undo stack,
+    // selection — does not come back.
+    updateFoldBlock(snapshot.foldBlock)
+    expandedRef.current = snapshot.expanded
+    setExpanded(snapshot.expanded)
+    vimEnabledRef.current = snapshot.vimEnabled
+    setVimEnabled(snapshot.vimEnabled)
+    vimInsertRef.current = snapshot.vimInsert
+    setVimInsert(snapshot.vimInsert)
+    if (text === '') return
+    const restoredCursor = normalizeCursorOffset(text, snapshot.cursor)
+    replaceDraftImages(filterLiveImageBindings(
+      snapshot.images,
+      stageId => channel.hasStagedImage?.(stageId) === true,
+    ).map(([token, stageId]) => ({ token, stageId })))
+    valueRef.current = text
+    cursorRef.current = restoredCursor
+    setValue(text)
+    setCursor(restoredCursor)
+  }, [draftCache])
+  /**
+   * Mouse text selection: UTF-16 offsets [start, end) in `value`, snapped
+   * to grapheme boundaries, start ≤ end. Null = no selection. Created by
+   * drag, Shift+click extension and double-click word select; consumed by
+   * Backspace/Delete/typing; Esc clears it without touching the text.
+   * With a fold block the range always stays inside the head or the tail
+   * (it never crosses the chip row — clamped on every write).
+   */
+  const [selection, setSelection] = React.useState<{ start: number; end: number } | null>(null)
+  const selectionRef = React.useRef<{ start: number; end: number } | null>(null)
+  /** Anchor offset of the in-flight drag gesture (set by dragstart). */
+  const dragAnchorRef = React.useRef<number | null>(null)
+  /** Double-click self-detection: last click's timestamp/screen cell. */
+  const lastClickAtRef = React.useRef(0)
+  const lastClickColRef = React.useRef(-1)
+  const lastClickRowRef = React.useRef(-1)
+  /**
+   * vim editing mode (`/vim` toggle): when on, Esc switches the prompt to
+   * its NORMAL submode where bare keys are vim keys instead of text, and
+   * i/a/o (…) return to INSERT. Enabled in insert mode so the transition
+   * is seamless; the mode is session-scoped (not persisted).
+   */
+  const [vimEnabled, setVimEnabled] = React.useState(false)
+  /** Insert submode (false = vim NORMAL). */
+  const [vimInsert, setVimInsert] = React.useState(true)
+  const vimEnabledRef = React.useRef(false)
+  const vimInsertRef = React.useRef(true)
+  vimEnabledRef.current = vimEnabled
+  vimInsertRef.current = vimInsert
+  /**
+   * Draft-scoped undo stack (word-level `Ctrl+Z`). This is the DRAFT's own
+   * history: a submit, a recall or a session switch ends it. Entries hold image
+   * bindings exactly like the draft does, so dropping one must release the
+   * capabilities only it kept alive.
+   */
+  const draftUndoRef = React.useRef<DraftUndoEntry[]>([])
+  /**
+   * Vim NORMAL-mode undo stack (vim `u`), deliberately separate from
+   * `draftUndoRef`: unifying the two transaction models is a user-visible vim
+   * behavior change and is out of this change's scope. `/vim` toggling clears
+   * THIS stack — a later re-enable must never `u` back past edits made while
+   * vim was off.
+   */
+  const vimUndoRef = React.useRef<VimUndoEntry[]>([])
+  /** Pending vim operator: `d` pressed, awaiting its second key. */
+  const vimPendingRef = React.useRef<'' | 'd'>('')
+  /**
+   * Fold block: the [start, end) span of `value` that renders as
+   * a one-line chip while the text around it stays fully editable. Created
+   * by a big paste; only an EXPLICIT expand (chip/card click, Esc) or
+   * delete removes it — typing NEVER unfolds the block.
+   */
+  const [foldBlock, setFoldBlock] = React.useState<{ start: number; end: number } | null>(null)
+  /** Synchronous mirror used by batched keys, controller clear, and mouse drag. */
+  const foldBlockRef = React.useRef<{ start: number; end: number } | null>(null)
+  /**
+   * Fullscreen draft editor (`expandEditor`, default Ctrl+Shift+E, or the
+   * ✎ affordance at the end of the input row). While expanded the SAME
+   * editing state renders into the PromptEditorLayer cover (published via
+   * setPromptEditorNode each render): Enter inserts a newline, Ctrl+Enter
+   * submits, Esc collapses. The fold chip is bypassed (full text shown).
+   */
+  const [expanded, setExpanded] = React.useState(false)
+  const expandedRef = React.useRef(false)
+  /** First visible row of the expanded viewport (merged with caret-follow
+   *  during render; wheel events advance it and tick a re-render). */
+  const expandedScrollRef = React.useRef(0)
+  /**
+   * Free-scroll latch: wheel browsing parks the viewport anywhere; the
+   * caret-follow merge skips while it is set, and the next real caret move
+   * (typing, arrows, click) re-engages following (GUI-editor semantics).
+   */
+  const editorFreeScrollRef = React.useRef(false)
+  const prevCaretLineRef = React.useRef(-1)
+  const [, setExpandedTick] = React.useState(0)
+  const prevExpandedRef = React.useRef(false)
+  /**
+   * Feature gate (settings `dsh-tui.expandEditor`, on by default; a mock
+   * channel without the field also reads as on). Off hides the ✎
+   * affordance and refuses the shortcut — the editor cannot open.
+   */
+  const expandEnabled = channel.expandEditor !== false
+  /** Latest expanded viewport metrics for the useInput wheel branch. */
+  const editorViewportRef = React.useRef<{ maxRows: number; total: number } | null>(null)
+  /** Hover state of the ⤢/✎ expand affordance in the input row. */
+  const [expandHovered, setExpandHovered] = React.useState(false)
+  /** Hover state of the ⌂ session-list affordance at the head of the row. */
+  const [homeHovered, setHomeHovered] = React.useState(false)
+  /** Pointer over the input box (drives the hover peek card). */
+  const [hovered, setHovered] = React.useState(false)
+  /** 120ms grace so the pointer crossing the input border row from the
+   *  chip up onto the peek card never flickers the card. */
+  const hoverLeaveTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
+  const hoverEnter = React.useCallback(() => {
+    if (hoverLeaveTimerRef.current) {
+      clearTimeout(hoverLeaveTimerRef.current)
+      hoverLeaveTimerRef.current = null
+    }
+    setHovered(true)
+  }, [])
+  const hoverLeave = React.useCallback(() => {
+    if (hoverLeaveTimerRef.current) clearTimeout(hoverLeaveTimerRef.current)
+    hoverLeaveTimerRef.current = setTimeout(() => setHovered(false), 120)
+  }, [])
+  const valueRef = React.useRef(value)
+  const cursorRef = React.useRef(cursor)
+  const history = React.useRef<PromptHistoryEntry[]>([])
+  const historyIndex = React.useRef(-1)
+  const historyDraft = React.useRef<PromptHistoryEntry>({ text: '', images: [] })
+  /** The persisted history is read lazily, once per mount and project: the
+   * normalized project key it was seeded for, so a workspace switch re-seeds
+   * (see seedHistory) while a respelled path to the same directory does not.
+   * `null` = never seeded; `''` = seeded without a workspace. */
+  const historySeededProject = React.useRef<string | null>(null)
+  /** Visible `[Image #N]` labels are presentation only; this sidecar carries
+   * the non-reusable capability for the current draft. History/rewind text
+   * restored without this map can never bind to a later image by accident. */
+  const draftImagesRef = React.useRef(new Map<string, string>())
+  const draftImagesGenerationRef = React.useRef(channel.stagedImageGeneration?.() ?? 0)
+  /** Session generation fences one agent transcript; revision fences one
+   * logical composer draft inside that session. Ordinary typing deliberately
+   * keeps the revision so an async paste lands at the live caret, while any
+   * whole-draft replacement revokes the old continuation. */
+  const draftRevisionRef = React.useRef(0)
+  /** Unlike draftRevision (whole-draft replacement only), this advances on
+   * every text mutation so an async command can never clear a draft that was
+   * edited away and later changed back to the same bytes. */
+  const inputEditSequenceRef = React.useRef(0)
+  /** One registry command may own a draft at a time. Keeping the draft
+   * visible during admission must not make a second Enter dispatch it twice. */
+  const pendingCommandRef = React.useRef<{
+    readonly token: symbol
+    readonly generation: number
+    readonly revision: number
+    readonly editSequence: number
+  } | null>(null)
+  const nextImageNumberRef = React.useRef(1)
+  /** Serialize image staging started in one draft so consecutive terminal
+   * drops keep input order even when storage settles out of order. A new
+   * logical draft receives a fresh chain and never waits on old-session I/O. */
+  const imageStageChainRef = React.useRef<Promise<void>>(Promise.resolve())
+  const advanceDraftRevision = (): void => {
+    draftRevisionRef.current += 1
+    imageStageChainRef.current = Promise.resolve()
+  }
+  const detachDraftImages = (): void => {
+    advanceDraftRevision()
+    draftImagesRef.current.clear()
+    clearDraftUndo()
+    clearVimUndo()
+  }
+  const stageIdIsRetained = (stageId: string): boolean => {
+    for (const current of draftImagesRef.current.values()) {
+      if (current === stageId) return true
+    }
+    return draftUndoRef.current.some(entry => entry.images.some(image => image.stageId === stageId))
+      || vimUndoRef.current.some(entry => entry.images.some(image => image.stageId === stageId))
+      || history.current.some(entry => entry.images.some(image => image.stageId === stageId))
+      || historyDraft.current.images.some(image => image.stageId === stageId)
+      || channel.pending.some(item => item.images?.some(image => image.stageId === stageId) === true)
+  }
+  const discardUnretainedImages = (stageIds: Iterable<string>): void => {
+    for (const stageId of new Set(stageIds)) {
+      if (!stageIdIsRetained(stageId)) channel.discardStagedImage(stageId)
+    }
+  }
+  const clearDraftUndo = (): void => {
+    const previous = draftUndoRef.current
+    draftUndoRef.current = []
+    discardUnretainedImages(previous.flatMap(entry => entry.images.map(image => image.stageId)))
+  }
+  const clearVimUndo = (): void => {
+    const previous = vimUndoRef.current
+    vimUndoRef.current = []
+    discardUnretainedImages(previous.flatMap(entry => entry.images.map(image => image.stageId)))
+  }
+  /** Push one step and enforce the depth/character guards. */
+  const pushDraftUndo = (
+    snapshot: Omit<DraftUndoEntry, 'atMs' | 'caretAfter' | 'kind' | 'deleteRun'>,
+    kind: DraftUndoEntry['kind'],
+    caretAfter: number | null,
+    deleteRun: DraftUndoEntry['deleteRun'] = null,
+  ): void => {
+    draftUndoRef.current.push({ ...snapshot, atMs: now(), caretAfter, kind, deleteRun })
+    const dropped: DraftUndoEntry[] = []
+    while (draftUndoRef.current.length > UNDO_LIMIT) dropped.push(draftUndoRef.current.shift()!)
+    let chars = draftUndoRef.current.reduce((total, entry) => total + entry.text.length, 0)
+    while (chars > UNDO_MAX_CHARS && draftUndoRef.current.length > 1) {
+      const oldest = draftUndoRef.current.shift()!
+      chars -= oldest.text.length
+      dropped.push(oldest)
+    }
+    if (dropped.length > 0) {
+      discardUnretainedImages(dropped.flatMap(entry => entry.images.map(image => image.stageId)))
+    }
+  }
+  /**
+   * Record one real text mutation. `group` folds it into the current step when
+   * the direction, caret continuity, idle window and word rule all agree;
+   * `step` always starts a sealed step. A chunk carrying several characters is
+   * judged per mutation, never per stdin read.
+   */
+  const recordDraftEdit = (
+    prev: string,
+    prevCursor: number,
+    block: DraftUndoEntry['block'],
+    next: string,
+    nextCursor: number,
+    mode: 'group' | 'step',
+  ): void => {
+    const span = diffSpan(prev, next, prevCursor, nextCursor)
+    // Backspace consumes the character BEFORE the caret; Delete consumes the
+    // one AT it. The two directions anchor differently, so their runs must
+    // never fold into one another.
+    const backward = span.start < prevCursor
+    const kind: DraftUndoEntry['kind'] =
+      span.inserted.length > 0 ? 'insert' : backward ? 'deleteBackward' : 'deleteForward'
+    const removed = prev.length - next.length
+    const caretAfter = nextCursor
+    if (mode === 'group') {
+      const last = draftUndoRef.current[draftUndoRef.current.length - 1]
+      // Continuity: this edit must begin where the last one ended. An insertion
+      // begins at the caret; a Backspace consumes the character BEFORE it, so
+      // the pre-edit caret is its start — comparing `span.start` there would
+      // make every repeated Backspace a step of its own.
+      const editStart = kind === 'insert' ? span.start : prevCursor
+      if (
+        last !== undefined &&
+        last.caretAfter !== null &&
+        last.kind === kind &&
+        last.caretAfter === editStart &&
+        now() - last.atMs <= UNDO_IDLE_MS &&
+        // An insertion extends a word when its seam is not a boundary; a
+        // deletion continues while it stays inside the word its run began in.
+        // The boundary question is deliberately NOT asked of a deletion: at the
+        // seam, `isDraftWordBoundary(prev, span.start)` reads the removed
+        // character's LEFT neighbour, which stops the run one keystroke early
+        // at a word's left edge and at the text head (and mis-splits a
+        // re-segmented CJK suffix).
+        (kind === 'insert'
+          ? !isDraftWordBoundary(next, span.start)
+          : extendDeleteRun(last, backward, removed))
+      ) {
+        last.atMs = now()
+        last.caretAfter = caretAfter
+        return
+      }
+    }
+    pushDraftUndo(
+      { text: prev, cursor: prevCursor, images: imageRefsFor(prev), block },
+      kind,
+      mode === 'group' ? caretAfter : null,
+      // A sealed step never groups, so only a groupable deletion needs (and
+      // pays for) the word interval.
+      mode === 'group' && kind !== 'insert' ? startDeleteRun(prev, span.start, removed) : null,
+    )
+  }
+  /**
+   * Clear the draft while keeping ONE undo step, so `Ctrl+Z` can bring the
+   * whole draft back (text, caret, images and fold block). The snapshot is
+   * taken before the images are released: afterwards the capabilities would
+   * already be gone and the restored `[Image #N]` tokens would be inert.
+   */
+  const clearDraftUndoably = (): void => {
+    syncImageGeneration()
+    // Nothing to come back to on an already-empty draft: pushing a snapshot
+    // there would waste the next Ctrl+Z (and hide an older real step).
+    if (valueRef.current !== '') {
+      pushDraftUndo(
+        {
+          text: valueRef.current,
+          cursor: cursorRef.current,
+          images: imageRefsFor(valueRef.current),
+          block: foldBlockRef.current,
+        },
+        'clear',
+        null,
+      )
+    }
+    discardDraftImages({ keepUndo: true })
+    setInput('', 0, 'silent')
+    setSelectedCommand(0)
+    setFileSelected(0)
+  }
+  const discardDraftImages = (options?: { keepUndo?: boolean }): void => {
+    advanceDraftRevision()
+    const stageIds = [...draftImagesRef.current.values()]
+    // The draft stack may be kept so Ctrl+Z can undo the clear; the vim stack
+    // is never restored by `u` across a whole-draft replacement.
+    if (options?.keepUndo !== true) clearDraftUndo()
+    clearVimUndo()
+    draftImagesRef.current.clear()
+    discardUnretainedImages(stageIds)
+  }
+  const replaceDraftImages = (images: readonly ComposerImageRef[]): void => {
+    const previous = [...draftImagesRef.current.values()]
+    draftImagesRef.current.clear()
+    for (const ref of images) {
+      if (channel.hasStagedImage?.(ref.stageId) === true) {
+        draftImagesRef.current.set(ref.token, ref.stageId)
+      }
+    }
+    discardUnretainedImages(previous)
+  }
+  const syncImageGeneration = (): number => {
+    const generation = channel.stagedImageGeneration?.() ?? 0
+    if (draftImagesGenerationRef.current !== generation) {
+      // The channel has already cleared every old-generation capability.
+      // Only detach the UI sidecar; calling discard would be redundant.
+      draftUndoRef.current = []
+      vimUndoRef.current = []
+      detachDraftImages()
+      draftImagesGenerationRef.current = generation
+      // Presentation numbering is session-local like the old channel-owned
+      // sequence. Any stale token still visible in the retained draft is
+      // skipped by bindStagedImage, so resetting cannot recreate an alias.
+      nextImageNumberRef.current = 1
+    }
+    return generation
+  }
+  const captureDraftImageLease = (): DraftImageLease => ({
+    generation: syncImageGeneration(),
+    revision: draftRevisionRef.current,
+  })
+  const draftImageLeaseIsCurrent = (lease: DraftImageLease): boolean =>
+    syncImageGeneration() === lease.generation
+    && draftRevisionRef.current === lease.revision
+  // Channel emits on every session replacement. Clear the sidecar during
+  // that render while leaving the user's visible draft untouched; any raw
+  // tokens become explicit stale placeholders instead of aliases.
+  syncImageGeneration()
+  valueRef.current = value
+  cursorRef.current = cursor
+  // Nothing is written to the owner's draft slot here — see the unmount
+  // hand-off below. A commit-time write would run BEFORE the restore effect
+  // has consumed the slot, so the composer's own first (empty) value would
+  // erase the draft it just came back for.
+  // Publish the live controller (fresh closure over `value` every render).
+  // A prompt-slot panel withdraws the handle in the same commit: external
+  // injection must not append/submit a hidden command draft while it waits
+  // for a decision. clear() mirrors the double-tap-Esc clear.
+  React.useLayoutEffect(() => {
+    if (!controllerRef) return
+    if (suspended) {
+      controllerRef.current = null
+      return
+    }
+    controllerRef.current = {
+      hasText: () => value.length > 0,
+      text: () => valueRef.current,
+      previewImages: () => composerImageRefsForText(valueRef.current, draftImagesRef.current).flatMap(ref => {
+        const image = channel.stagedImage(ref.stageId)
+        return image === undefined ? [] : [{ image, title: ref.token.slice(1, -1) }]
+      }),
+      clear: () => {
+        if (valueRef.current !== '') inputEditSequenceRef.current += 1
+        valueRef.current = ''
+        cursorRef.current = 0
+        selectionRef.current = null
+        discardDraftImages()
+        foldBlockRef.current = null
+        dragAnchorRef.current = null
+        lastClickAtRef.current = 0
+        lastClickColRef.current = -1
+        lastClickRowRef.current = -1
+        // Chat's idle Ctrl+C clear also withdraws the fullscreen editor —
+        // the draft it was editing is gone, the cover must not linger.
+        expandedRef.current = false
+        setSelection(null)
+        setFoldBlock(null)
+        setExpanded(false)
+        setValue('')
+        setCursor(0)
+      },
+      append: (text: string) => {
+        const previous = valueRef.current
+        const next = sanitizeEditableText(previous + text)
+        if (next !== previous) inputEditSequenceRef.current += 1
+        // An external injection is a NEW draft baseline. It bypasses setInput,
+        // so the stack would still describe the pre-injection text: one Ctrl+Z
+        // would then erase the injected text together with the typing it
+        // joined (the injection is not an edit of the draft the user made).
+        if (next !== previous) clearDraftUndo()
+        valueRef.current = next
+        cursorRef.current = next.length
+        setValue(next)
+        setCursor(next.length)
+        return next
+      },
+      consumeSelectionCopy: () => {
+        const sel = selectionRef.current
+        if (!sel) return false
+        const text = valueRef.current.slice(sel.start, sel.end)
+        void setClipboard(text).then(raw => {
+          if (raw) writeRaw?.(raw)
+        })
+        // The selection stays: copy never clears it (Esc/typing/delete do).
+        return true
+      },
+      consumeEscape: consumeEditingEscape,
+      toggleVim: () => {
+        const next = !vimEnabledRef.current
+        vimEnabledRef.current = next
+        setVimEnabled(next)
+        // Every toggle lands in INSERT: a fresh vim user keeps typing
+        // normally until they press Esc for the first time. Turning the
+        // mode off also clears the VIM undo stack — a later re-enable must
+        // never `u` its way back past edits made while vim was off. The
+        // draft stack (Ctrl+Z) is a different history and is left alone.
+        vimInsertRef.current = true
+        setVimInsert(true)
+        vimPendingRef.current = ''
+        clearVimUndo()
+        return next
+      },
+      vimActive: () => vimEnabledRef.current,    }
+    return () => {
+      controllerRef.current = null
+    }
+  })
+  const [selectedCommand, setSelectedCommand] = React.useState(0)
+  // ctrl+r history fill: replace the input when a new fill arrives, then
+  // tell the caller to clear it.
+  const lastFill = React.useRef<string | null>(null)
+  React.useLayoutEffect(() => {
+    if (fillText && fillText !== lastFill.current) {
+      lastFill.current = fillText
+      syncImageGeneration()
+      discardDraftImages()
+      updateFoldBlock(null)
+      // A recall is not undoable (D4): the stack was just cleared above, so
+      // the fill must not push a snapshot of the draft it replaced.
+      setInput(fillText, fillText.length, 'silent')
+      onFillConsumed?.()
+    }
+  }, [fillText, onFillConsumed])
+  // Double-tap Esc to clear.
+  const escPendingRef = React.useRef(false)
+  const escTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
+  /** True while a clipboard paste read is in flight (ignore repeat keys). */
+  const clipboardBusyRef = React.useRef(false)
+  /** True while the external editor owns the terminal (editor-key round-trip). */
+  const editorBusyRef = React.useRef(false)
+  /** Enter dedupe window: cmd pipelines can deliver one Enter as `\r`+`\n`. */
+  const lastEnterAtRef = React.useRef(0)
+  React.useEffect(() => {
+    return () => {
+      if (escTimerRef.current) clearTimeout(escTimerRef.current)
+      if (hoverLeaveTimerRef.current) clearTimeout(hoverLeaveTimerRef.current)
+      /**
+       * Hand the draft to the owner's slot as this component goes away.
+       *
+       * This is the ONLY write to that slot, and it belongs here: it happens at
+       * the instant a screen replaces the composer, so it can neither race the
+       * restore effect nor change the transcript's first frame.
+       *
+       * `advanceDraftRevision` invalidates any image read/stage still in
+       * flight, so a late continuation cannot bind a capability into a composer
+       * that no longer exists. `clearDraftUndo`/`clearVimUndo` release the
+       * capabilities that only an undo stack was holding: they are not part of
+       * the draft, and nothing will ever restore them once this composer is
+       * gone.
+       *
+       * The stageIds the DRAFT holds are deliberately NOT revoked — they are
+       * part of the snapshot the slot now keeps, and the restore filters out
+       * whatever the channel revoked in the meantime. Revoking them here is why
+       * an image draft used to come back as inert text.
+       */
+      advanceDraftRevision()
+      clearDraftUndo()
+      clearVimUndo()
+      const images: PromptDraftImage[] = [...draftImagesRef.current.entries()]
+        .map(([token, stageId]) => [token, stageId] as const)
+      draftImagesRef.current.clear()
+      if (draftCache === undefined) {
+        discardUnretainedImages(images.map(image => image[1]))
+        return
+      }
+      const text = valueRef.current
+      // The edit state rides along even with nothing typed: vim mode and the
+      // fullscreen editor are MODES the user turned on, not content, and an
+      // empty composer must not drop them (`text === ''` alone used to skip
+      // the snapshot entirely, losing the vim badge on a round trip with an
+      // empty composer).
+      const editState = foldBlockRef.current !== null || expandedRef.current
+        || vimEnabledRef.current
+      if (text === '' && images.length === 0 && !editState) {
+        draftCache.current = null
+        return
+      }
+      draftCache.current = {
+        ownerAgentId: String(channel.agentId),
+        bindingGeneration: resolveBindingGeneration(channel),
+        value: text,
+        cursor: cursorRef.current,
+        foldBlock: foldBlockRef.current,
+        expanded: expandedRef.current,
+        vimEnabled: vimEnabledRef.current,
+        vimInsert: vimInsertRef.current,
+        images,
+      }
+    }
+  }, [])
+  const { columns, rows: terminalRows } = useTerminalSize()
+  React.useEffect(() => {
+    // PromptInput self-detects double-clicks because its drag target resets
+    // App's global chain. Geometry changed across resize, so the same screen
+    // cell no longer identifies the same grapheme.
+    lastClickAtRef.current = 0
+    lastClickColRef.current = -1
+    lastClickRowRef.current = -1
+  }, [columns, terminalRows])
+  const helpScrollRef = React.useRef<ScrollBoxHandle | null>(null)
+  // Help viewport budget: the overlay anchors at the composer's top edge
+  // (OverlayAbove bottom:'100%') and grows UP, so its budget is the space
+  // ABOVE that anchor — smallest on an empty session, where the whale
+  // splash (~15 rows) sits between the screen top and the composer
+  // (terminalRows minus chrome only applies once the transcript fills the
+  // viewport). Take the conservative intersection: 15 rows of viewport (16
+  // with the hint + margin) fits the empty-session anchor on the default
+  // layout at any terminal size, and the renderer's bottom-anchored
+  // clipping for absolute overlays (no negative-y clamp) then never has
+  // to eat the overlay's FIRST rows — the shortcut-column headers. The
+  // command registry scrolls inside the viewport, so a taller terminal
+  // loses nothing functional. (PR #446; restored after the picker
+  // snapshot's cherry-pick resurrected the old formula.)
+  const helpViewportHeight = Math.max(3, Math.min(terminalRows - 7, 15))
+
+  const suggestions = value.startsWith('/') ? channel.commandCompletions(value) : []
+  const overlayOpen =
+    suggestions.length > 0 &&
+    !expanded &&
+    !helpOpen &&
+    !selectionActive &&
+    !value.includes('\n')
+
+  // `@` file completion (issue #15): the trigger is the mention token at the
+  // CARET, so `@` works mid-message (`看看 @src/a.ts 这个`), not only when it
+  // is the input's first character. The cwd listing loads when the trigger
+  // appears.
+  const [fileMatches, setFileMatches] = React.useState<readonly FileCandidate[]>([])
+  const [fileSelected, setFileSelected] = React.useState(0)
+  const mention = mentionAtCaret(value, cursor)
+  const atTrigger = mention !== undefined
+  const fileRequestId = React.useRef(0)
+  const selectedFile = fileMatches[fileSelected]
+  React.useEffect(() => {
+    const requestId = ++fileRequestId.current
+    if (!mention) {
+      setFileMatches([])
+      setFileSelected(0)
+      return
+    }
+    const previous = selectedFile
+    // Deps key on `mention.query` (and trigger on/off) only: cursor movement
+    // within the same token must NOT refetch, and `selectedFile`/`fileSelected`
+    // are read as their render-time values only to seed selection preservation.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    void channel.listFileCandidates(mention.query, { topK: 50 }).then(next => {
+      if (requestId !== fileRequestId.current) return
+      setFileMatches(next)
+      setFileSelected(preserveSelection(previous, next, fileSelected))
+    })
+  }, [channel, mention?.query, atTrigger])
+  // Esc dismisses the overlay for the token being edited (it reopens once the
+  // text changes); it must NOT clear a mid-message input.
+  const fileEscRef = React.useRef(-1)
+  React.useEffect(() => {
+    fileEscRef.current = -1
+  }, [value])
+  const fileOverlayOpen =
+    fileMatches.length > 0 &&
+    !expanded &&
+    !helpOpen &&
+    !selectionActive &&
+    fileEscRef.current !== mention?.start
+
+  /**
+   * The `[Image #N]` tokens of `text` that carry a live draft capability.
+   * These are atomic: the caret never rests inside one, ←/→ step over the
+   * whole token, Backspace at its end / Delete at its start remove it whole,
+   * a selection never cuts it, and it renders as a chip (the whole token is
+   * the caret cluster when the caret sits at its start). A raw token typed
+   * or restored without a capability is ordinary text.
+   */
+  const boundImageSpans = (text: string): ImageTokenSpan[] =>
+    imageTokenSpans(text).filter(span => draftImagesRef.current.has(span.token))
+
+  /** Move the caret to `offset`, snapped off any token interior. */
+  const placeCaret = (offset: number, prefer: 'start' | 'end' | 'nearest'): void => {
+    const snapped = snapOffImageToken(boundImageSpans(valueRef.current), offset, prefer)
+    cursorRef.current = snapped
+    setCursor(snapped)
+  }
+
+  /**
+   * The staged image the caret is on: the token whose start is the caret —
+   * exactly when the whole token is the caret cluster and inverts. The
+   * caret sitting just after a token is not "on" it (the token is plain
+   * there), so no preview. Undefined for a raw or stale token.
+   */
+  const caretImageAt = (
+    text: string,
+    offset: number,
+  ): { image: TranscriptImage; title: string } | undefined => {
+    const span = boundImageSpans(text).find(s => s.start === offset)
+    if (span === undefined) return undefined
+    const stageId = draftImagesRef.current.get(span.token)
+    const image = stageId === undefined ? undefined : channel.stagedImage(stageId)
+    return image === undefined ? undefined : { image, title: span.token.slice(1, -1) }
+  }
+  const onCaretImageRef = React.useRef(onCaretImage)
+  onCaretImageRef.current = onCaretImage
+  const lastCaretImageRef = React.useRef<{ image: TranscriptImage | undefined; title: string | undefined }>(
+    { image: undefined, title: undefined },
+  )
+  /** Tell the caller which staged image the caret is on. `'caret'` reports
+   *  only changes; `'click'` always reports (see onCaretImage). "Same image"
+   *  is the attachment id plus the token, not facade identity: this runs
+   *  after every commit and the caller stores what it reports, so an
+   *  identity-only difference would re-render the caller forever (#885). */
+  const reportCaretImage = (reason: 'caret' | 'click'): void => {
+    const report = onCaretImageRef.current
+    if (report === undefined) return
+    const found = suspended ? undefined : caretImageAt(valueRef.current, cursorRef.current)
+    const last = lastCaretImageRef.current
+    if (reason === 'caret' && last.image?.id === found?.image.id && last.title === found?.title) return
+    lastCaretImageRef.current = { image: found?.image, title: found?.title }
+    report(found?.image, found?.title, reason)
+  }
+  // After every commit: the caret, the text and the staged map are all
+  // settled by then, and a no-change report is skipped.
+  React.useEffect(() => { reportCaretImage('caret') })
+  React.useEffect(() => () => {
+    if (lastCaretImageRef.current.image !== undefined) {
+      onCaretImageRef.current?.(undefined, undefined, 'caret')
+    }
+  }, [])
+
+  /** Fold-block state + a synchronous mirror (setInput reads the ref).
+   *  Creating a block also drags a caret that sits inside it out to the
+   *  block's end (the block is atomic; typing continues after it). */
+  const updateFoldBlock = (block: { start: number; end: number } | null) => {
+    foldBlockRef.current = block
+    setFoldBlock(block)
+    if (block) {
+      const c = cursorRef.current
+      if (c > block.start && c < block.end) {
+        cursorRef.current = block.end
+        setCursor(block.end)
+      }
+    }
+  }
+
+  /**
+   * Apply `next` at `cursorOffset` and record the edit on the undo stack.
+   * `snapshotBlock` overrides the block the step snapshots: a caller that must
+   * clear the fold block BEFORE writing (the external-editor refill) still
+   * wants the block that was live at edit time.
+   */
+  const setInput = (
+    next: string,
+    cursorOffset = next.length,
+    undo: UndoMode = 'group',
+    snapshotBlock?: DraftUndoEntry['block'],
+  ) => {
+    // Apply the same ingress normalization to fills/history/editor results as
+    // to paste. Map the requested caret through the sanitized prefix so an
+    // ANSI sequence removed before it cannot leave the caret past the text.
+    const sanitizedCursor = sanitizeEditableText(next.slice(0, cursorOffset)).length
+    next = sanitizeEditableText(next)
+    cursorOffset = sanitizedCursor
+    const prev = valueRef.current
+    const prevCursor = cursorRef.current
+    const block = foldBlockRef.current
+    // Normalize onto a grapheme boundary (also clamps into range): every
+    // caller passes a caret they believe is on a character edge — paste
+    // merges, history fills, and IME composition can still hand back an
+    // offset inside a surrogate pair or combining cluster.
+    let offset = normalizeCursorOffset(next, cursorOffset)
+    if (block) {
+      // Fold block is atomic: the caret never lands INSIDE [start, end).
+      if (offset > block.start && offset < block.end) {
+        offset = offset - block.start < block.end - offset ? block.start : block.end
+      }
+      // Every real edit happens AT the caret, so a block that starts at or
+      // after the caret shifts with the value delta; one fully past the
+      // caret is untouched. Whole-value replacements (fill/history/editor)
+      // clear the block explicitly at their call sites.
+      const delta = next.length - prev.length
+      let start = block.start
+      let end = block.end
+      if (prevCursor <= block.start) {
+        start += delta
+        end += delta
+      }
+      start = Math.max(0, Math.min(start, next.length))
+      end = Math.max(start, Math.min(end, next.length))
+      if (start >= end) updateFoldBlock(null)
+      else if (start !== block.start || end !== block.end) updateFoldBlock({ start, end })
+    }
+    // Staged `[Image #N]` tokens are atomic: a caret that would land inside
+    // one continues in its direction of travel (←/word-left/↑ → the token's
+    // start, →/word-right/↓ → its end); with no travel, the nearer edge.
+    offset = snapOffImageToken(
+      boundImageSpans(next),
+      offset,
+      offset < prevCursor ? 'start' : offset > prevCursor ? 'end' : 'nearest',
+    )
+    // Undo bookkeeping runs before the mirrors move: it snapshots the state
+    // this edit replaces, and `diffSpan` needs both texts. `reset` ends the
+    // draft's history, `silent` (undo itself, a recall) leaves it untouched.
+    if (next !== prev) {
+      if (undo === 'reset') clearDraftUndo()
+      else if (undo !== 'silent') {
+        recordDraftEdit(prev, prevCursor, snapshotBlock === undefined ? block : snapshotBlock, next, offset, undo)
+      }
+    }
+    // The synchronous mirrors are what batch-dispatched events (one stdin
+    // read → several keys, no render in between) read on their next turn.
+    if (next !== prev) inputEditSequenceRef.current += 1
+    valueRef.current = next
+    cursorRef.current = offset
+    // Deleting a visible token revokes its capability. Re-typing the same
+    // label later must stay inert; only a fresh paste may mint a new binding.
+    for (const [token, stageId] of draftImagesRef.current) {
+      if (next.includes(token)) continue
+      draftImagesRef.current.delete(token)
+      if (!stageIdIsRetained(stageId)) channel.discardStagedImage(stageId)
+    }
+    // Every real edit drops the selection: its offsets describe the OLD
+    // text. Selection-consuming callers (delete/replace) read it first.
+    selectionRef.current = null
+    setSelection(null)
+    setValue(next)
+    setCursor(offset)
+  }
+
+  const deleteInputRange = (start: number, end: number, undo: UndoMode = 'group'): void => {
+    if (start >= end) return
+    const text = valueRef.current
+    const range = expandImageTokenRange(boundImageSpans(text), start, end)
+    setInput(text.slice(0, range.start) + text.slice(range.end), range.start, undo)
+  }
+
+  /**
+   * Write the selection [start, end) (snapped to grapheme boundaries,
+   * start ≤ end); a degenerate range clears it. With a fold block the
+   * range is clamped into the side that holds `start` — the block is
+   * atomic and a selection may never cross the chip row.
+   */
+  const updateSelection = (start: number, end: number) => {
+    const text = valueRef.current
+    const anchor = normalizeCursorOffset(text, start)
+    let lo = normalizeCursorOffset(text, Math.min(start, end))
+    let hi = normalizeCursorOffset(text, Math.max(start, end))
+    const block = foldBlockRef.current
+    if (block) {
+      // Clamp by the ORIGINAL anchor side, not sorted `lo`: for a reverse
+      // tail→head drag, `lo` is in the head even though the gesture belongs
+      // to the tail. Both selection and caret must stay on the anchor side.
+      if (anchor <= block.start) {
+        hi = Math.min(hi, block.start)
+      } else {
+        lo = Math.max(lo, block.end)
+        hi = Math.max(hi, block.end)
+      }
+    }
+    // A selection never cuts a staged token: an edge inside one grows
+    // outward to cover the whole token.
+    const range = expandImageTokenRange(boundImageSpans(text), lo, hi)
+    lo = range.start
+    hi = range.end
+    if (lo >= hi) {
+      selectionRef.current = null
+      setSelection(null)
+    } else {
+      selectionRef.current = { start: lo, end: hi }
+      setSelection({ start: lo, end: hi })
+    }
+  }
+
+  /** Drop the selection without touching text or caret. */
+  const clearSelection = () => {
+    selectionRef.current = null
+    setSelection(null)
+  }
+
+  /**
+   * Accept the selected file suggestion: replace ONLY the mention token at
+   * the caret (prefix/suffix text survives), quoting whitespace paths. A
+   * directory inserts `@dir/` without a trailing space so completion
+   * continues into it; a file completes the token with a space. A typed
+   * `#L12-14` suffix is NOT part of the replacement — completion ends at
+   * `pathEnd` so the line range survives acceptance (issue #359).
+   */
+  const acceptFile = (candidate: FileCandidate) => {
+    if (!mention) return
+    const file = candidate.path
+    const body = /\s/.test(file) ? `@"${file}"` : `@${file}`
+    // A typed `#L12-14` suffix rides along AFTER the completed body (before
+    // the trailing space) — quoting a whitespace path must not detach it.
+    const suffix = mention.pathEnd === undefined ? '' : value.slice(mention.pathEnd, mention.end)
+    const insert = candidate.kind === 'directory' ? `${body}${suffix}` : `${body}${suffix} `
+    const next = value.slice(0, mention.start) + insert + value.slice(mention.end)
+    setInput(next, mention.start + insert.length, 'step')
+    setFileSelected(0)
+  }
+
+  const imageRefsFor = (text: string): ComposerImageRef[] => {
+    syncImageGeneration()
+    return composerImageRefsForText(text, draftImagesRef.current)
+  }
+
+  /**
+   * Warn once when the text carries an `[Image #N]` placeholder that will
+   * not attach an image: unbound in this draft (history, rewind, typed) or
+   * bound to a staging the channel has since dropped. Channel routes
+   * (submit, steer, registry commands) warn on their own; this covers the
+   * lines the screen consumes locally, where the text is otherwise dropped
+   * without a word.
+   */
+  const warnStaleImageTokens = (text: string, images: readonly ComposerImageRef[]): void => {
+    const live = new Set(
+      images
+        .filter(image => channel.stagedImage(image.stageId) !== undefined)
+        .map(image => image.token),
+    )
+    for (const match of text.matchAll(COMPOSER_IMAGE_TOKEN)) {
+      if (live.has(match[0])) continue
+      channel.notify(t('input-image-token-stale', { token: match[0] }), { color: 'warning', timeoutMs: 5000 })
+      return
+    }
+  }
+
+  /**
+   * Seed the walk with the persisted history (issue #986). `↑`/`↓` used to
+   * see only what this process submitted, so a restart lost every earlier
+   * entry. Seeding before the first push keeps ONE chronological list —
+   * persisted entries first, this run's submits behind them — instead of two
+   * lists to merge at recall time. Restored text carries no image capability
+   * (the file stores text only), which is also what keeps a recalled entry
+   * from binding to a later staged image by accident. The walk is scoped to
+   * the channel's workspace, keyed the same way the store keys it
+   * (historyProjectKey), so a workspace switch re-seeds it with that
+   * project's history instead of carrying the previous one over — and a
+   * respelled path to the same directory is not a switch.
+   * @returns Whether the re-seed cut short a walk in progress: the composer
+   * then shows a recalled entry of the previous project while the draft that
+   * walk started from is still held in `historyDraft`.
+   */
+  const seedHistory = (): boolean => {
+    // The store's own key, not the raw cwd: `/repo` and `/repo/` are one
+    // project, so respelling the path must not look like a workspace switch.
+    const project = historyProjectKey(channel.cwd) ?? ''
+    if (historySeededProject.current === project) return false
+    const interrupted = historyIndex.current >= 0
+    historySeededProject.current = project
+    history.current = loadHistoryOldestFirst(channel.cwd).map(entry => ({ text: entry.text, images: [] }))
+    historyIndex.current = -1
+    return interrupted
+  }
+
+  /** End the walk and put back the draft it started from. */
+  const restoreHistoryDraft = (): void => {
+    historyIndex.current = -1
+    updateFoldBlock(null)
+    restoreDraftImages(historyDraft.current)
+    // A recall is not undoable (D4): `restoreDraftImages` just ended the
+    // history, so the restore must not push a step of its own.
+    setInput(historyDraft.current.text, historyDraft.current.text.length, 'silent')
+  }
+
+  const rememberHistory = (text: string, images: readonly ComposerImageRef[]): void => {
+    // Both entries into the walk (a submit and ↑) must see the persisted
+    // prefix, so seed here rather than merging two lists later.
+    seedHistory()
+    history.current.push({
+      text,
+      images: images.map(image => ({ ...image })),
+    })
+    if (history.current.length > HISTORY_LIMIT) history.current.shift()
+    historyIndex.current = -1
+    void appendHistory(text, channel.cwd)
+  }
+
+  const clearDeliveredDraft = (): void => {
+    syncImageGeneration()
+    // Delivery captured the opaque refs and history retains them; only the
+    // editable-draft binding is ending here. `reset` ends the draft's undo
+    // history: a submitted message must not come back with Ctrl+Z.
+    detachDraftImages()
+    setInput('', 0, 'reset')
+    setSelectedCommand(0)
+    setFileSelected(0)
+  }
+
+  const sameImageRefs = (
+    left: readonly ComposerImageRef[],
+    right: readonly ComposerImageRef[],
+  ): boolean => left.length === right.length && left.every((image, index) =>
+    image.token === right[index]?.token && image.stageId === right[index]?.stageId)
+
+  /** `!`/`!!` are host shell routes, not model messages. They have no image
+   * grammar, so reject before history/clear just like a non-image command. */
+  const shellImagesUnsupported = (
+    text: string,
+    images: readonly ComposerImageRef[],
+  ): boolean => {
+    if (images.length === 0 || !text.startsWith('!')) return false
+    channel.notify(t('shell-images-unsupported'), { color: 'warning', timeoutMs: 4000 })
+    return true
+  }
+
+  const restoreDraftImages = (entry: PromptHistoryEntry): void => {
+    syncImageGeneration()
+    advanceDraftRevision()
+    replaceDraftImages(entry.images)
+    // A recall is not undoable (D4): both stacks end with the draft it replaced.
+    clearDraftUndo()
+    clearVimUndo()
+  }
+
+  /**
+   * `Ctrl+Z`: pop back to the state before the current undo step — text,
+   * caret, images and fold block together. An empty stack is a no-op (never
+   * the rewind picker, never a clear). The restore is `silent`, so repeated
+   * Ctrl+Z walks further back instead of pushing what it just left. Vim `u`
+   * uses its own stack (see {@link vimUndoRef}).
+   */
+  const undoDraft = (): void => {
+    // A session replacement invalidates the whole stack. Check that BEFORE
+    // popping: restoring first and discarding afterwards would put the old
+    // session's text (and its image tokens) back into the new composer.
+    syncImageGeneration()
+    const entry = draftUndoRef.current.pop()
+    if (entry === undefined) return
+    advanceDraftRevision()
+    replaceDraftImages(entry.images)
+    // Drop the live block first: setInput's atomicity rules describe the block
+    // that was live at edit time, and re-shifting it here would corrupt the
+    // snapshot's. The snapshot's own block goes back afterwards, and only if
+    // its range still fits the text it was captured from.
+    updateFoldBlock(null)
+    setInput(entry.text, entry.cursor, 'silent')
+    const block =
+      entry.block !== null && entry.block.start < entry.block.end && entry.block.end <= entry.text.length
+        ? entry.block
+        : null
+    updateFoldBlock(block)
+    setSelectedCommand(0)
+    setFileSelected(0)
+  }
+
+  const submitText = (text: string, notice?: string) => {
+    const trimmed = text.trim()
+    if (!trimmed) return
+    const images = imageRefsFor(trimmed)
+    if (shellImagesUnsupported(trimmed, images)) return
+    rememberHistory(trimmed, images)
+    clearDeliveredDraft()
+    channel.submit(trimmed, images)
+    if (notice) {
+      channel.notify(notice, { timeoutMs: 2500 })
+    } else if (channel.working) {
+      // While the model is streaming, the message joins the DSH inbox and is
+      // processed after the current turn — say so, or it looks "lost".
+      channel.notify(t('input-sent-after-turn'), { timeoutMs: 2500 })
+    }
+  }
+
+  /**
+   * Enter while the model is working = STEER (Codex/pi semantics): the
+   * message is injected at the next step boundary of the RUNNING turn and
+   * the agent continues without aborting — the "immediate" send.
+   */
+  const steerSend = (text: string) => {
+    const trimmed = text.trim()
+    if (!trimmed) return
+    const images = imageRefsFor(trimmed)
+    rememberHistory(trimmed, images)
+    clearDeliveredDraft()
+    channel.steer(trimmed, images)
+    channel.notify(t('input-interrupted-next'), { timeoutMs: 2500 })
+  }
+
+  /**
+   * Tab while the model is working = plain queue (followup): the message
+   * waits for the running turn to end, then is processed in order.
+   */
+  const queueSend = (text: string) => {
+    const trimmed = text.trim()
+    if (!trimmed) return
+    const images = imageRefsFor(trimmed)
+    if (shellImagesUnsupported(trimmed, images)) return
+    rememberHistory(trimmed, images)
+    clearDeliveredDraft()
+    channel.submit(trimmed, images)
+    channel.notify(t('input-queued-after-turn'), { timeoutMs: 2500 })
+  }
+
+  /**
+   * Alt+Up: pull the last pending message back into the input for editing
+   * (never interrupts the running turn). Refused when the running dsh-agent
+   * cannot withdraw inbox messages (released package without the inbox API).
+   */
+  const pullBackLast = () => {
+    const item = channel.pending[channel.pending.length - 1]
+    if (!item) return
+    if (!channel.removePending(item.id)) {
+      channel.notify(t('input-cannot-retract'), { color: 'warning', timeoutMs: 2500 })
+      return
+    }
+    restoreDraftImages({
+      text: item.text,
+      images: item.images ?? [],
+    })
+    setInput(item.text, item.text.length, 'silent')
+    updateFoldBlock(null)
+    setSelectedCommand(0)
+    setFileSelected(0)
+    channel.notify(t('input-retracted'), { timeoutMs: 2000 })
+  }
+
+  /**
+   * Withdraw the queued copy of the text `↑` just recalled (issue #986): the
+   * message is still parked in the inbox, so editing it and sending again
+   * would run the same text twice. Alt+Up withdraws explicitly; walking the
+   * history to the same text has to land in the same place. The newest match
+   * wins — `↑` walks newest-first and the queue is FIFO. A message the
+   * running turn already claimed cannot be withdrawn, and saying so beats
+   * pretending it was.
+   */
+  const retractRecalledCopy = (text: string): void => {
+    let target: (typeof channel.pending)[number] | undefined
+    for (const item of channel.pending) {
+      if (item.text === text) target = item
+    }
+    if (target === undefined) return
+    if (channel.removePending(target.id)) {
+      channel.notify(t('input-retracted'), { timeoutMs: 2000 })
+    } else {
+      channel.notify(t('input-cannot-retract'), { color: 'warning', timeoutMs: 2500 })
+    }
+  }
+
+  /**
+   * Ctrl+Enter: abort the running turn and send the input immediately — the
+   * model stops what it is doing and starts on this message right away.
+   */
+  const interruptSend = () => {
+    const trimmed = value.trim()
+    if (!trimmed) {
+      channel.notify(t('input-empty'), { color: 'warning' })
+      return
+    }
+    // Abort the running turn and deliver: previously queued pending
+    // messages first (FIFO), then the current input — all processed
+    // immediately once the abort settles.
+    const images = imageRefsFor(trimmed)
+    const queued: ComposerSubmission[] = [
+      ...channel.pending.map(item => ({ text: item.text, images: item.images ?? [] })),
+      { text: value, images },
+    ]
+    const count = channel.interruptAndDeliver(queued)
+    if (count === 0) return
+    rememberHistory(trimmed, images)
+    clearDeliveredDraft()
+    channel.notify(t('input-interrupt-immediate'), { timeoutMs: 2500 })
+  }
+
+  /**
+   * Execute a slash command (built-in, plugin-registered, or hidden) when
+   * the input resolves to one: the name parses as the first token so
+   * `/plan off` dispatches `plan` with its argument text, and the merged
+   * command list (locals + registry) decides whether the line is a command
+   * at all. Hidden commands are recognized even though they are intentionally
+   * absent from the suggestion/help catalogs.
+   */
+  const tryRunCommand = (text: string): boolean => {
+    if (!text.startsWith('/')) return false
+    const parsed = parseCommandName(text)
+    if (parsed === undefined) return false
+    const command = channel.commandList.find(entry => entry.name === parsed.name)
+    const known = command !== undefined || isHiddenCommandName(parsed.name)
+    if (!known) return false
+    const generation = syncImageGeneration()
+    const revision = draftRevisionRef.current
+    const editSequence = inputEditSequenceRef.current
+    if (
+      pendingCommandRef.current?.generation === generation
+      && pendingCommandRef.current.revision === revision
+      && pendingCommandRef.current.editSequence === editSequence
+    ) {
+      channel.notify(t('command-running'), { color: 'warning', timeoutMs: 2500 })
+      return true
+    }
+    if (pendingCommandRef.current !== null) pendingCommandRef.current = null
+    const images = imageRefsFor(text)
+    // Commands are an explicit non-model route. Unless their registry
+    // descriptor opted into composer images, refuse before dispatch and keep
+    // the exact draft/capabilities so the user can edit or send them normally.
+    // Completion-only filesystem skills still fall through to the model.
+    const modelRoutedSkill = command?.skill === true && command.external !== true
+    if (images.length > 0 && !modelRoutedSkill && command?.acceptsImages !== true) {
+      channel.notify(t('command-images-unsupported', { name: parsed.name }), {
+        color: 'warning',
+        timeoutMs: 4000,
+      })
+      return true
+    }
+    const lease = captureDraftImageLease()
+    const draftText = valueRef.current
+    const draftImages = imageRefsFor(draftText)
+    const handled = onRunCommand(parsed.name, parsed.rawInput, images)
+    if (handled === true) {
+      // A local command consumed the line inside the screen.
+      warnStaleImageTokens(text, images)
+      rememberHistory(text.trim(), images)
+      clearDeliveredDraft()
+    } else if (handled !== false) {
+      // Registry commands settle asynchronously. Keep the exact draft and
+      // capabilities in place until admission succeeds; a handler/admission
+      // error deliberately leaves them editable. A late success may clear
+      // only the snapshot it actually submitted, never text/images typed
+      // while the command was running or a replacement session's draft.
+      const attempt = { token: Symbol('command-attempt'), generation, revision, editSequence }
+      pendingCommandRef.current = attempt
+      void handled.then((consume) => {
+        if (
+          !consume
+          || !draftImageLeaseIsCurrent(lease)
+          || inputEditSequenceRef.current !== editSequence
+        ) return
+        rememberHistory(text.trim(), images)
+        const currentText = valueRef.current
+        const currentImages = imageRefsFor(currentText)
+        if (currentText === draftText && sameImageRefs(currentImages, draftImages)) {
+          clearDeliveredDraft()
+        }
+      }).catch((error: unknown) => {
+        if (!draftImageLeaseIsCurrent(lease)) return
+        channel.notify(error instanceof Error ? error.message : String(error), {
+          color: 'error',
+          timeoutMs: 5000,
+        })
+      }).finally(() => {
+        if (pendingCommandRef.current?.token === attempt.token) pendingCommandRef.current = null
+      })
+    }
+    return handled !== false
+  }
+
+  /**
+   * The Enter main path, shared by the inline prompt, the expanded
+   * editor's Ctrl+Enter, and its Send button:
+   * - command menu open → run the SELECTED command (never send `/mo`);
+   * - model working → STEER into the running turn (next step boundary,
+   *   agent continues — the "immediate" send; Codex/pi semantics);
+   * - otherwise → submit directly (or run a unique command).
+   * Reads valueRef so a key batch (typing + Enter in one stdin read)
+   * operates on the text the preceding keys produced.
+   */
+  const handleEnter = () => {
+    // A single Enter can arrive as two events in cmd pipelines (`\r`
+    // parsed as return + a raw `\n` line): collapse them so one keypress
+    // never sends the message twice.
+    const now = Date.now()
+    if (now - lastEnterAtRef.current < 80) return
+    lastEnterAtRef.current = now
+    const value = valueRef.current
+    if (overlayOpen) {
+      const command = suggestions[selectedCommand]
+      if (command) {
+        tryRunCommand(command.commandLine)
+        return
+      }
+    }
+    // File-completion overlay open → Enter accepts the selection (same
+    // contract as the command menu: the overlay owns Enter while open).
+    if (fileOverlayOpen) {
+      const file = fileMatches[fileSelected]
+      if (file) {
+        acceptFile(file)
+        return
+      }
+    }
+    if (channel.working && value.trim() !== '') {
+      // Immediate-command semantics: /btw and /skills are exempt from
+      // steering — neither command interrupts the running turn. Hidden
+      // UI-only easter eggs (e.g. /deepseek) are also safe to run while
+      // streaming. Every other input keeps the steer behavior so /new
+      // /model etc. stay idle-only.
+      const parsed = value.startsWith('/') ? parseCommandName(value) : undefined
+      if (parsed !== undefined && (
+        ((parsed.name === 'btw' || parsed.name === 'skills')
+          && channel.commandList.some(c => c.name === parsed.name))
+        || isHiddenCommandName(parsed.name)
+      )) {
+        if (tryRunCommand(value)) return
+      }
+      steerSend(value)
+      return
+    }
+    if (!tryRunCommand(value)) submitText(value)
+  }
+
+  /** Expand/collapse the fullscreen editor (shortcut + ✎ affordance).
+   *  Expanding also DROPS any fold block: the fullscreen view shows and
+   *  edits the full text, and the block's atomic-clamp semantics (caret
+   *  pushed to its edges, selection clamped to one side) would contradict
+   *  that — the chip's own click-to-expand already means "unfold". */
+  const toggleExpand = () => {
+    const next = !expandedRef.current
+    expandedRef.current = next
+    setExpanded(next)
+    if (next) {
+      expandedScrollRef.current = 0
+      if (foldBlockRef.current) updateFoldBlock(null)
+    }
+    // Geometry changed wholesale (a fullscreen cover): the double-click
+    // self-detection's screen-cell memory is void, same as on resize.
+    lastClickAtRef.current = 0
+    lastClickColRef.current = -1
+    lastClickRowRef.current = -1
+  }
+
+  /** Withdraw the fullscreen editor, keeping text/caret/selection intact. */
+  const collapseEditor = () => {
+    expandedRef.current = false
+    setExpanded(false)
+    lastClickAtRef.current = 0
+    lastClickColRef.current = -1
+    lastClickRowRef.current = -1
+  }
+
+  /** Local Esc layers, shared by the prompt listener and Chat's delegation.
+   * Refs preserve this order even when expansion and Esc share a stdin batch. */
+  const consumeEditingEscape = (): boolean => {
+    if (selectionRef.current && !helpOpen && !overlayOpen && !fileOverlayOpen) {
+      clearSelection()
+      return true
+    }
+    if (expandedRef.current) {
+      collapseEditor()
+      return true
+    }
+    return false
+  }
+
+  /** The editor's explicit send (Ctrl+Enter / Send button): the Enter main
+   *  path, then collapse — an empty draft just collapses. */
+  const submitFromEditor = () => {
+    handleEnter()
+    collapseEditor()
+  }
+
+  /** Clipboard reads are asynchronous; insert against the latest render so
+   * typing while PowerShell owns the clipboard never gets overwritten.
+   * An active selection is replaced by the insert. Returns the resulting
+   * value and the insertion offset so callers can apply the paste fold. */
+  const insertClipboardAtCaret = (text: string): { next: string; at: number } => {
+    text = sanitizeEditableText(text)
+    const current = valueRef.current
+    const sel = selectionRef.current
+    const position = sel ? sel.start : cursorRef.current
+    const next = sel
+      ? current.slice(0, sel.start) + text + current.slice(sel.end)
+      : current.slice(0, position) + text + current.slice(position)
+    // A paste is ONE undo step however many characters it carries.
+    setInput(next, position + text.length, 'step')
+    setSelectedCommand(0)
+    setFileSelected(0)
+    return { next, at: position }
+  }
+
+  /** Read one local image file and stage it through the channel, returning
+   *  an opaque capability. Shared by every image paste path:
+   *  clipboard bitmap export, Finder-copied files, and pasted drop paths.
+   *  A Finder/drop path is untrusted input: one bounded descriptor read
+   *  applies the profile limit before bytes enter the composer. */
+  const stageImagePath = async (path: string, lease: DraftImageLease): Promise<StagedImageHandle> => {
+    if (!draftImageLeaseIsCurrent(lease)) {
+      throw new Error('the draft changed while the image was being staged')
+    }
+    const limits = channel.stagedImageLimits?.()
+    if (limits === undefined) throw new Error('image attachments are unavailable in this profile')
+    // One-image paste operations are serialized, so this is the cumulative
+    // draft count (not merely the current Finder batch). Refuse before the
+    // descriptor read/save and never let the channel's 128-capability cache
+    // become an accidental per-command batch size.
+    if (draftImagesRef.current.size >= limits.maxImagesPerMessage) {
+      throw new Error('image count exceeds this profile\'s per-message limit')
+    }
+    const data = await readBoundedRegularFile(path, limits.maxImageBytes)
+    if (!draftImageLeaseIsCurrent(lease)) {
+      throw new Error('the draft changed while the image was being staged')
+    }
+    return channel.stageComposerImage({
+      data,
+      // Callers gate on imagePathMediaType; the assertion is unreachable.
+      mediaType: imagePathMediaType(path) ?? 'image/png',
+      name: basename(path),
+      // The preview card's path row: the file that was read, as an
+      // absolute path (a clipboard bitmap shows its temp export).
+      path: resolve(path),
+    }, lease.generation)
+  }
+
+  /** Queue one complete image operation (save plus synchronous bind/insert).
+   * Keeping the visible mutation inside the chain makes terminal drop order
+   * independent of attachment-store latency. Rejections settle the chain so
+   * one bad file cannot wedge later drops. */
+  const enqueueImageWork = <T,>(work: () => Promise<T>): Promise<T> => {
+    const queued = imageStageChainRef.current.then(work, work)
+    imageStageChainRef.current = queued.then(() => undefined, () => undefined)
+    return queued
+  }
+
+  /** Success notice for one staged image. An adapted paste says what the user
+   *  actually got (stored dimensions, stored format, filled alpha) — naming it
+   *  is the difference between a reported adaptation and a silently rewritten
+   *  image. */
+  const stagedImageNotice = (token: string, handle: StagedImageHandle): string => {
+    const adjustment = handle.adjustment
+    if (adjustment === undefined) return t('input-image-pasted', { token })
+    const details: string[] = []
+    if (adjustment.resized) {
+      details.push(t('input-image-detail-resized', {
+        width: adjustment.width,
+        height: adjustment.height,
+      }))
+    }
+    if (adjustment.mediaType !== adjustment.sourceMediaType) {
+      const from = mediaTypeLabel(adjustment.sourceMediaType)
+      const to = mediaTypeLabel(adjustment.mediaType)
+      details.push(adjustment.flattened
+        ? t('input-image-detail-converted-flattened', { from, to })
+        : t('input-image-detail-converted', { from, to }))
+    }
+    // An adjustment always describes a resize or a conversion; anything else
+    // keeps the plain notice rather than an empty parenthetical. ' · ' joins
+    // the clauses in both shipped languages.
+    if (details.length === 0) return t('input-image-pasted', { token })
+    return t('input-image-pasted-adjusted', { token, detail: details.join(' · ') })
+  }
+
+  const discardStagedHandles = (handles: readonly StagedImageHandle[]): void => {
+    for (const stageId of new Set(handles.map(handle => handle.stageId))) {
+      channel.discardStagedImage(stageId)
+    }
+  }
+
+  /** Assign presentation numbering only after staging succeeds. Existing raw
+   * tokens (including stale history) reserve their number, so a fresh image
+   * can never visually alias one. The counter never goes backwards within
+   * one session generation, which also keeps delete/undo safe. */
+  const bindStagedImage = (handle: StagedImageHandle, lease: DraftImageLease): string => {
+    if (!draftImageLeaseIsCurrent(lease)) {
+      // The save completed, but its initiating draft was already submitted,
+      // replaced, or unmounted. Reclaim this otherwise-unreachable channel
+      // capability instead of waiting for the session FIFO to evict it.
+      channel.discardStagedImage(handle.stageId)
+      throw new Error('the draft changed while the image was being staged')
+    }
+    if (channel.hasStagedImage?.(handle.stageId) !== true) {
+      throw new Error('the draft changed while the image was being staged')
+    }
+    let token = `[Image #${nextImageNumberRef.current}]`
+    while (valueRef.current.includes(token) || draftImagesRef.current.has(token)) {
+      nextImageNumberRef.current += 1
+      token = `[Image #${nextImageNumberRef.current}]`
+    }
+    nextImageNumberRef.current += 1
+    draftImagesRef.current.set(token, handle.stageId)
+    return token
+  }
+
+  /** Line index of the cursor; -1 when the cursor is at the very end. */
+  const cursorLine = (text: string, cursorOffset: number) => {
+    const before = text.slice(0, cursorOffset)
+    return before.split('\n').length - 1
+  }
+  /** Column of the cursor within its line. */
+  const cursorColumn = (text: string, cursorOffset: number) => {
+    const before = text.slice(0, cursorOffset)
+    const line = before.split('\n').pop() ?? ''
+    return line.length
+  }
+
+  useInput((input, key, event) => {
+    if (selectionActive) return
+    // The editor round-trip ends by resuming stdin one microtask before the
+    // outcome lands — drop any key squeezed into that gap so the prompt's
+    // setValue can never overwrite fresh typing (and vice versa).
+    if (editorBusyRef.current) return
+
+    // Ctrl+Shift+E (remappable via /settings): toggle the fullscreen draft
+    // editor. Matched before anything else so it works both while editing
+    // and from an idle prompt; selectionActive has already returned above.
+    // Refused while the feature is turned off in /settings.
+    if (expandEnabled && actionMatches('expandEditor', input, key)) {
+      event?.stopImmediatePropagation()
+      toggleExpand()
+      return
+    }
+
+    // App deliberately dispatches every parsed key from one stdin read in a
+    // single React update. Read the synchronous mirrors so each event sees
+    // the text/caret produced by the preceding event in that batch.
+    const value = valueRef.current
+    const cursor = cursorRef.current
+    const selection = selectionRef.current
+
+    // ── caret-driven image preview ──────────────────────────────────────
+    // Esc dismisses the preview the caret opened, before any other Esc
+    // meaning (help stays above it: the help menu is modal over the prompt).
+    if (key.escape && caretPreviewOpen && !helpOpen) {
+      event?.stopImmediatePropagation()
+      onDismissCaretPreview?.()
+      return
+    }
+
+    // ── mouse selection (drag / Shift+click / double-click) ─────────────
+    // Layered ahead of the fold-block rules: with an active selection, Esc
+    // ONLY drops the highlight (text untouched), and Backspace/Delete
+    // delete the selected span. Arrows/typing handle the selection at their
+    // own arms below.
+    if (key.escape && consumeEditingEscape()) {
+      event.stopImmediatePropagation()
+      return
+    }
+    if ((key.backspace || key.delete) && selection) {
+      // Removing a selection is atomic: it must undo in one step, not fold
+      // into whatever the caret-continuity rule would otherwise see.
+      deleteInputRange(selection.start, selection.end, 'step')
+      setSelectedCommand(0)
+      setFileSelected(0)
+      return
+    }
+
+    // Fold block: Esc expands it — it must NEVER clear text
+    // that LOOKS like one line; Backspace at the block's tail / Delete at
+    // its head deletes the WHOLE block in one key; ←/→ jump over the
+    // atomic block. Typing NEVER expands it — the caret lives outside the
+    // block and edits land in the visible text around it.
+    const block = foldBlockRef.current
+    // Line-level moves/edits (↑/↓/Home/End/Ctrl+A/E/U/K/W) treat the
+    // block as an atomic row: boundaries that would land inside it are
+    // clamped to its edges.
+    const clampRowStart = (pos: number) =>
+      block && cursor >= block.end ? Math.max(pos, block.end) : pos
+    const clampRowEnd = (pos: number) =>
+      block && cursor <= block.start ? Math.min(pos, block.start) : pos
+    if (block) {
+      if (key.escape) {
+        updateFoldBlock(null)
+        return
+      }
+      if ((key.backspace && cursor === block.end) || (key.delete && cursor === block.start)) {
+        const next = value.slice(0, block.start) + value.slice(block.end)
+        updateFoldBlock(null)
+        setInput(next, block.start, 'step', block)
+        setSelectedCommand(0)
+        setFileSelected(0)
+        return
+      }
+      if (key.leftArrow && cursor === block.end) {
+        setInput(value, block.start)
+        return
+      }
+      if (key.rightArrow && cursor === block.start) {
+        setInput(value, block.end)
+        return
+      }
+    }
+
+    // Grapheme boundaries of the current text: every caret move / delete
+    // below snaps onto one of these offsets (never mid-cluster).
+    const bounds = graphemeBoundaries(value)
+
+    /** Insert text at the caret (typing, paste) and dismiss overlays. An
+     *  active selection is REPLACED by the insert (standard editor
+     *  semantics). Returns the insertion offset so callers can derive the
+     *  inserted span (paste fold). */
+    const insertAtCaret = (text: string, undo: UndoMode = 'group'): number => {
+      if (helpOpen) onToggleHelp()
+      const sel = selectionRef.current
+      const at = sel ? sel.start : cursor
+      const next = sel
+        ? value.slice(0, sel.start) + text + value.slice(sel.end)
+        : value.slice(0, cursor) + text + value.slice(cursor)
+      // Replacing a selection is atomic (like deleting one): the replaced span
+      // must not fold into the surrounding typed run.
+      setInput(next, at + text.length, sel ? 'step' : undo)
+      setSelectedCommand(0)
+      setFileSelected(0)
+      return at
+    }
+
+    // Bracketed paste (terminal paste — Ctrl+Shift+V / right-click): insert
+    // at the caret after removing terminal controls and expanding tabs.
+    // Newlines remain data — they are NOT Enter — so this branch runs before
+    // the whole-line submit rule.
+    if (event?.isPasted && input.length > 0) {
+      const text = sanitizePastedText(input.replace(/\r\n/g, '\n').replace(/\r/g, '\n'))
+      // Desktop drops reach the TUI as pasted text (Ghostty forwards
+      // Shell.escape(path) through the PTY with no drop boundary). Only a
+      // paste that IS one unambiguous existing local image path stages as
+      // an image; any parse/stat/staging failure inserts the text verbatim.
+      const droppedPath = parsePastedImagePath(text)
+      if (droppedPath !== null) {
+        const lease = captureDraftImageLease()
+        if (helpOpen) onToggleHelp()
+        setSelectedCommand(0)
+        setFileSelected(0)
+        void enqueueImageWork(async () => {
+          const handle = await stageImagePath(droppedPath, lease)
+          const token = bindStagedImage(handle, lease)
+          // Bind and insert share this synchronous continuation: setInput's
+          // sidecar pruning can never observe a bound-but-not-visible token.
+          insertClipboardAtCaret(`${token} `)
+          channel.notify(stagedImageNotice(token, handle), { timeoutMs: 2500 })
+        })
+          .catch(() => {
+            if (!draftImageLeaseIsCurrent(lease)) return
+            // A real path/read/stage failure keeps the terminal paste as text.
+            // A revoked lease is handled above and must not edit a newer draft.
+            insertClipboardAtCaret(text)
+          })
+        return
+      }
+      // One paste is ONE undo step however many characters it carries.
+      const at = insertAtCaret(text, 'step')
+      // A big paste becomes a fold block right away (hover peeks
+      // at it); an existing block is replaced by the new paste's span.
+      // The EXPANDED editor never folds — pasting there is plain text
+      // (fold semantics would clamp the caret out of the pasted span).
+      if (!expandedRef.current && isBigInput(text)) updateFoldBlock({ start: at, end: at + text.length })
+      return
+    }
+
+    // Clipboard paste (default Ctrl+V / Cmd+V, plus the Alt+V alias for
+    // terminals that intercept Ctrl+V — combos are user-remappable via
+    // /settings): raw mode hands the key to the app, so the clipboard is
+    // read here — text, file paths when the file manager copied files, or
+    // an exported temp-file path when the clipboard holds a raw image.
+    if (actionMatches('paste', input, key)) {
+      if (clipboardBusyRef.current) return
+      const lease = captureDraftImageLease()
+      // Match insertAtCaret's overlay/selection dismissal up front: the
+      // async continuation below only sets value/cursor, so a paste landing
+      // while the help overlay is open would otherwise insert behind it.
+      if (helpOpen) onToggleHelp()
+      setSelectedCommand(0)
+      setFileSelected(0)
+      clipboardBusyRef.current = true
+      void readClipboard()
+        .then(async content => {
+          // Every `kind: image` path is a private temp export owned by this
+          // paste, including TIFF/BMP/SVG formats the attachment profile
+          // cannot stage. Ownership must not depend on format support.
+          const temporaryImagePath = content?.kind === 'image' ? content.path : undefined
+          try {
+            if (!draftImageLeaseIsCurrent(lease)) return
+            if (content === null) {
+              channel.notify(t('input-clipboard-empty'), { color: 'warning' })
+              return
+            }
+            if (content.kind === 'unavailable') {
+              channel.notify(t(content.wsl === true ? 'input-clipboard-unavailable-wsl' : 'input-clipboard-unavailable'), { color: 'warning' })
+              return
+            }
+            if (content.kind === 'image') {
+              if (imagePathMediaType(content.path) === undefined) {
+                channel.notify(t('input-image-format-unsupported'), { color: 'warning', timeoutMs: 5000 })
+                return
+              }
+              try {
+                await enqueueImageWork(async () => {
+                  const handle = await stageImagePath(content.path, lease)
+                  const token = bindStagedImage(handle, lease)
+                  insertClipboardAtCaret(`${token} `)
+                  channel.notify(stagedImageNotice(token, handle), { timeoutMs: 2500 })
+                })
+              } catch (error: unknown) {
+                if (!draftImageLeaseIsCurrent(lease)) return
+                const message = error instanceof Error ? error.message : String(error)
+                channel.notify(t('input-image-paste-failed', { err: message }), { color: 'warning', timeoutMs: 5000 })
+              }
+              return
+            }
+            if (content.kind === 'files') {
+              // Finder/Explorer-copied image FILES stage like clipboard
+              // bitmaps (macOS furl offers exactly one). Other files keep the
+              // quoted/@ path insert, and an image that fails to stage falls
+              // back to its `@` reference — the mention pipeline still
+              // attaches it at submit.
+              let insertedStaged = false
+              try {
+                insertedStaged = await enqueueImageWork(async () => {
+                  const maxImages = channel.stagedImageLimits?.()?.maxImagesPerMessage ?? 0
+                  const { parts, staged, failure, failureCode } = await stageClipboardFilePaths(
+                    content.paths,
+                    path => stageImagePath(path, lease),
+                    filePath => formatClipboardInsert({ kind: 'files', paths: [filePath] }),
+                    Math.max(0, maxImages - draftImagesRef.current.size),
+                  )
+                  if (!draftImageLeaseIsCurrent(lease)) {
+                    discardStagedHandles(staged)
+                    return true
+                  }
+                  const boundTokens: string[] = []
+                  try {
+                    const rendered = parts.map(part => {
+                      if (part.kind === 'text') return part.value
+                      const token = bindStagedImage(part.value, lease)
+                      boundTokens.push(token)
+                      return token
+                    })
+                    if (failure !== '') {
+                      const message = failureCode === 'image-limit' ? t('input-image-paste-limit') : failure
+                      channel.notify(t('input-image-paste-failed', { err: message }), { color: 'warning', timeoutMs: 5000 })
+                    }
+                    if (boundTokens.length === 0) return false
+                    // All bindings and their visible labels enter together;
+                    // typing while an earlier file saves cannot prune one.
+                    insertClipboardAtCaret(`${rendered.join(' ')} `)
+                    // A batch cannot itemise every image in one line, but it must
+                    // still say that some of them were not stored as pasted.
+                    const adapted = staged.filter(handle => handle.adjustment !== undefined).length
+                    channel.notify(
+                      boundTokens.length === 1
+                        ? stagedImageNotice(boundTokens[0]!, staged[0]!)
+                        : adapted > 0
+                          ? t('input-images-staged-adapted', { count: boundTokens.length, adapted })
+                          : t('input-images-staged', { count: boundTokens.length }),
+                      { timeoutMs: 2500 },
+                    )
+                    return true
+                  } catch (error) {
+                    for (const token of boundTokens) draftImagesRef.current.delete(token)
+                    discardStagedHandles(staged)
+                    throw error
+                  }
+                })
+              } catch (error: unknown) {
+                if (!draftImageLeaseIsCurrent(lease)) return
+                const message = error instanceof Error ? error.message : String(error)
+                channel.notify(t('input-image-paste-failed', { err: message }), { color: 'warning', timeoutMs: 5000 })
+              }
+              if (insertedStaged) return
+              // Nothing staged: fall through to the verbatim files insert.
+            }
+            if (!draftImageLeaseIsCurrent(lease)) return
+            // Insert against the LIVE input state: the read above resolved
+            // asynchronously and the user may have typed while waiting.
+            const text = sanitizePastedText(formatClipboardInsert(content))
+            const { at } = insertClipboardAtCaret(text)
+            // Same fold as bracketed paste — but never inside the expanded
+            // editor (plain text there, see the isPasted branch).
+            if (!expandedRef.current && isBigInput(text)) updateFoldBlock({ start: at, end: at + text.length })
+          } finally {
+            // Clipboard bitmaps are private temp exports owned by this paste,
+            // never durable attachment storage. Clean them on success,
+            // rejection, draft invalidation, and session replacement alike.
+            if (temporaryImagePath !== undefined) {
+              await unlink(temporaryImagePath).catch(() => undefined)
+            }
+          }
+        })
+        .catch(() => {
+          if (!draftImageLeaseIsCurrent(lease)) return
+          channel.notify(t('input-clipboard-read-failed'), { color: 'warning' })
+        })
+        .finally(() => {
+          // A rejected read must never wedge Ctrl+V for the rest of the
+          // session.
+          clipboardBusyRef.current = false
+        })
+      return
+    }
+
+    // Help is modal for modified keys and every Enter variant. The paste
+    // branch above is the intentional exception: paste closes Help and
+    // inserts visibly.
+    // Swallow here before editor/submit/interrupt branches can mutate hidden
+    // composer or working-turn state; plain typing still dismisses Help below.
+    if (helpOpen && !key.escape && (key.ctrl || key.meta || key.super || key.return || input.includes('\n') || input.includes('\r'))) {
+      event.stopImmediatePropagation()
+      return
+    }
+
+    // Ctrl+G (remappable via /settings): edit the current draft in
+    // $VISUAL/$EDITOR (issue #123, readline's edit-and-execute-command). The
+    // draft is written to a temp file, the terminal is handed to the editor
+    // (Ink's alt-screen handoff), and the saved text replaces the input when
+    // it differs. The util maps every failure to an outcome, but the
+    // catch/finally here is the hard guarantee: a rejected promise must
+    // never kill the process, and the busy flag must always clear or the
+    // editor key stays locked forever.
+    if (actionMatches('editor', input, key)) {
+      // Opening the editor starts a new async draft lifecycle immediately:
+      // fence an older paste before the terminal handoff, but retain already
+      // bound image capabilities. setInput below prunes only tokens the user
+      // actually removed in the editor.
+      syncImageGeneration()
+      advanceDraftRevision()
+      const editorLease = captureDraftImageLease()
+      editorBusyRef.current = true
+      void (async () => {
+        try {
+          const outcome = await editInExternalEditor(value)
+          // Session switches, clears, history restores, and unmount all
+          // revoke this editor round-trip. Never write its old draft into a
+          // newer composer after the terminal handoff returns.
+          if (!draftImageLeaseIsCurrent(editorLease)) return
+          if (outcome.kind === 'edited') {
+            // Snapshot the block BEFORE clearing it: the refill is one undo
+            // step (D4), and Ctrl+Z must bring back the fold chip the draft
+            // had, not the already-cleared null.
+            const beforeBlock = foldBlockRef.current
+            updateFoldBlock(null)
+            setInput(outcome.text, outcome.text.length, 'step', beforeBlock)
+            setSelectedCommand(0)
+            setFileSelected(0)
+          } else if (outcome.kind === 'unavailable') {
+            channel.notify(t('input-editor-unavailable'), { color: 'warning' })
+          } else if (outcome.kind === 'failed') {
+            channel.notify(t('input-editor-failed', { name: outcome.message }), {
+              color: 'warning',
+            })
+          }
+        } catch {
+          if (!draftImageLeaseIsCurrent(editorLease)) return
+          channel.notify(t('input-editor-failed', { name: 'unknown' }), {
+            color: 'warning',
+          })
+        } finally {
+          editorBusyRef.current = false
+        }
+      })()
+      return
+    }
+
+    // Ctrl+J is the portable multiline fallback when a terminal cannot
+    // report modifiers on Enter. Legacy terminals deliver bare LF (`enter`),
+    // while kitty/modifyOtherKeys encode it as an exact Ctrl+J key.
+    const isCtrlJ = input === 'j' && key.ctrl && !key.shift && !key.meta && !key.super
+    if ((input === '\n' && event?.keypress.name === 'enter') || isCtrlJ) {
+      insertAtCaret('\n')
+      return
+    }
+
+    // Whole-line input from Windows ConPTY pipelines (cmd batch -> node):
+    // the trailing CR/LF marks a complete line to submit. A bare CR/CRLF is
+    // Enter, while real multi-char piped lines keep the legacy direct-submit
+    // path. The expanded editor treats piped lines as DATA — CR/LF
+    // normalizes to '\n' and inserts (sending needs Ctrl+Enter there), so a
+    // fast batch never dumps raw '\r' into the draft.
+    if (input.includes('\n') || input.includes('\r')) {
+      if (expandedRef.current) {
+        insertAtCaret(
+          sanitizeEditableText(input.replace(/\r\n/g, '\n').replace(/\r/g, '\n')),
+        )
+        return
+      }
+      if (/^[\r\n]+$/.test(input)) {
+        handleEnter()
+        return
+      }
+      const line = (value + input).trim()
+      if (line.startsWith('/')) {
+        const matches = channel.commandCompletions(line)
+        if (matches.length === 1) {
+          tryRunCommand(matches[0]!.commandLine)
+          return
+        }
+      }
+      if (!tryRunCommand(line)) submitText(line)
+      return
+    }
+    if (key.return && isMod(key)) {
+      // Ctrl+Enter / Cmd+Enter: in the EXPANDED editor this is the explicit
+      // send (Enter inserts newlines there, so sending needs its own key);
+      // inline it interrupts the running turn and processes this message
+      // immediately (Windows Terminal sends CSI 13;5u / 13;1;5u).
+      if (expandedRef.current) {
+        submitFromEditor()
+      } else {
+        interruptSend()
+      }
+      return
+    }
+    if (key.return && (key.shift || key.meta)) {
+      // Shift+Enter / Option+Enter: insert a newline at the caret
+      // (multi-line input). Shift+Enter only arrives when the terminal
+      // supports extended key reporting (kitty/modifyOtherKeys allowlist in
+      // ink/terminal.ts); Option+Enter (ESC CR) is the fallback on terminals
+      // that can't report shift — e.g. macOS Terminal.app (issue #110).
+      insertAtCaret('\n')
+      return
+    }
+    if (key.return && expandedRef.current) {
+      // Expanded editor: plain Enter inserts a newline (text-editor
+      // semantics — long-draft editing must never misfire a send). The
+      // shift/meta variants above already newline; Ctrl+Enter sends.
+      insertAtCaret('\n')
+      return
+    }
+    if (key.return) {
+      handleEnter()
+      return
+    }
+    // Help is modal over the composer. Backtab must not cycle the session
+    // mode invisibly behind it, and plain Tab has no Help action.
+    if (helpOpen && key.tab) {
+      event.stopImmediatePropagation()
+      return
+    }
+    // Completion menus own Backtab just like plain Tab; do not mutate the
+    // background session mode while the user is choosing a candidate.
+    if (key.tab && key.shift && (fileOverlayOpen || overlayOpen)) {
+      event.stopImmediatePropagation()
+      return
+    }
+    // Shift+Tab cycles the configured session modes (default: 默认 →
+    // 计划模式 → 完全访问; each mode bundles plan/sandbox/approval atoms —
+    // see the `modes` config). Must precede the fullscreen editor's Tab
+    // indentation arm so the expanded editor participates in the cycle too —
+    // the parser reports backtab as key.tab + key.shift.
+    if (key.tab && key.shift) {
+      // The key is consumed either way. `cycleMode` is best-effort inside the
+      // channel, but a dropped rejection here would be an unhandledRejection
+      // (the process guard rethrows everything that is not React #185), and
+      // an unhandled rejection kills the TUI with the session still open —
+      // so the caller keeps a catch of its own rather than `void`ing the
+      // promise (the sibling `/permission` entry point does the same).
+      void channel.cycleMode().catch((error: unknown) => {
+        channel.notify(t('mode-switch-failed', { err: error instanceof Error ? error.message : String(error) }), {
+          color: 'error',
+          timeoutMs: 8000,
+        })
+      })
+      return
+    }
+    // Expanded editor: plain Tab inserts indentation; Shift+Tab was handled
+    // above and therefore never disappears behind the fullscreen cover.
+    if (expandedRef.current && key.tab) {
+      if (!key.shift) insertAtCaret('    ')
+      return
+    }
+    if (key.tab && fileOverlayOpen) {
+      const file = fileMatches[fileSelected]
+      if (file) acceptFile(file)
+      return
+    }
+    if (key.tab && overlayOpen) {
+      const command = suggestions[selectedCommand]
+      if (command) {
+        updateFoldBlock(null)
+        setInput(command.replacement, command.replacement.length, 'step')
+      }
+      return
+    }
+    // Tab while the model is working = queue for AFTER the turn (followup),
+    // distinct from Enter's steer (Codex's "tab to queue message").
+    if (key.tab && channel.working && value.trim() !== '') {
+      queueSend(value)
+      return
+    }
+    // Help is a viewport, not prompt history. It deliberately owns every
+    // vertical navigation event while visible; otherwise Up/Down silently
+    // walk the input history and the clipped command rows remain unreachable.
+    if (helpOpen) {
+      const page = Math.max(1, helpViewportHeight - 2)
+      if (key.upArrow || key.wheelUp) {
+        helpScrollRef.current?.scrollBy(key.wheelUp ? -3 : -1)
+        event.stopImmediatePropagation()
+        return
+      }
+      if (key.downArrow || key.wheelDown) {
+        helpScrollRef.current?.scrollBy(key.wheelDown ? 3 : 1)
+        event.stopImmediatePropagation()
+        return
+      }
+      if (key.pageUp || key.pageDown) {
+        helpScrollRef.current?.scrollBy(key.pageUp ? -page : page)
+        event.stopImmediatePropagation()
+        return
+      }
+      if (key.home) {
+        helpScrollRef.current?.scrollTo(0)
+        event.stopImmediatePropagation()
+        return
+      }
+      if (key.end) {
+        // Use a deliberately oversized absolute target rather than the
+        // sticky-bottom path: compact Help may still be measuring nested
+        // sections in this commit, while ScrollBox's render clamp resolves
+        // the target to the exact current maximum without a follow-up frame.
+        helpScrollRef.current?.scrollTo(Number.MAX_SAFE_INTEGER)
+        event.stopImmediatePropagation()
+        return
+      }
+    }
+    if (key.meta && key.upArrow) {
+      // Alt+Up: pull the last pending message back for editing (pi/Codex).
+      pullBackLast()
+      return
+    }
+    if (key.upArrow) {
+      // A history walk owns the arrows until it returns to the draft: a
+      // recalled entry can itself open the @ menu or the slash menu (e.g.
+      // `/model`), and letting the overlay navigate here strands the stashed
+      // draft — Down would cycle menu rows instead of walking back.
+      if (fileOverlayOpen && historyIndex.current < 0) {
+        setFileSelected(index =>
+          index <= 0 ? fileMatches.length - 1 : index - 1,
+        )
+        return
+      }
+      // With a fold block the caret in the tail walks the TAIL's lines
+      // (the block is one atomic row); the first tail line steps over the
+      // block to its head.
+      if (block && cursor >= block.end) {
+        const tailCursor = cursor - block.end
+        const line = cursorLine(tail, tailCursor)
+        if (line > 0) {
+          const upToLineStart = tail.lastIndexOf('\n', tailCursor - 1)
+          const prevLineStart =
+            upToLineStart === -1 ? 0 : tail.lastIndexOf('\n', upToLineStart - 1) + 1
+          const prevLine = tail.slice(prevLineStart, upToLineStart)
+          setInput(
+            value,
+            block.end + prevLineStart + Math.min(cursorColumn(tail, tailCursor), prevLine.length),
+          )
+          return
+        }
+        setInput(value, block.start)
+        return
+      }
+      const line = cursorLine(value, cursor)
+      if (line > 0) {
+        // Move to the previous line, clamping to its length.
+        const upToLineStart = value.lastIndexOf('\n', cursor - 1)
+        const prevLineStart =
+          upToLineStart === -1 ? 0 : value.lastIndexOf('\n', upToLineStart - 1) + 1
+        const prevLine = value.slice(prevLineStart, upToLineStart)
+        setInput(value, prevLineStart + Math.min(cursorColumn(value, cursor), prevLine.length))
+        return
+      }
+      if (overlayOpen && historyIndex.current < 0) {
+        setSelectedCommand(index =>
+          index <= 0 ? suggestions.length - 1 : index - 1,
+        )
+        return
+      }
+      // A workspace switch mid-walk keeps the draft that walk started from:
+      // the composer shows the previous project's entry, not a new draft.
+      const interrupted = seedHistory()
+      if (history.current.length === 0) {
+        if (interrupted) restoreHistoryDraft()
+        return
+      }
+      if (interrupted) {
+        historyIndex.current = history.current.length - 1
+      } else if (historyIndex.current < 0) {
+        historyDraft.current = {
+          text: value,
+          images: imageRefsFor(value),
+        }
+        historyIndex.current = history.current.length - 1
+      } else {
+        historyIndex.current = Math.max(0, historyIndex.current - 1)
+      }
+      const entry = history.current[historyIndex.current]
+      if (entry === undefined) return
+      retractRecalledCopy(entry.text)
+      updateFoldBlock(null)
+      restoreDraftImages(entry)
+      setInput(entry.text, entry.text.length, 'silent')
+      return
+    }
+    if (key.downArrow) {
+      // Same history-walk ownership as ↑ above.
+      if (fileOverlayOpen && historyIndex.current < 0) {
+        setFileSelected(index =>
+          index >= fileMatches.length - 1 ? 0 : index + 1,
+        )
+        return
+      }
+      // Mirror of the tail-side ↑ walk: with a fold block the caret walks
+      // the TAIL's lines; past its last line it falls through to the
+      // overlay/history handling below.
+      if (block && cursor >= block.end) {
+        const tailCursor = cursor - block.end
+        const line = cursorLine(tail, tailCursor)
+        const lines = tail.split('\n')
+        if (line < lines.length - 1) {
+          const nextLineStart = tail.indexOf('\n', tailCursor) + 1
+          const nextLineEnd = tail.indexOf('\n', nextLineStart)
+          const nextLine = tail.slice(
+            nextLineStart,
+            nextLineEnd === -1 ? tail.length : nextLineEnd,
+          )
+          setInput(
+            value,
+            block.end + nextLineStart + Math.min(cursorColumn(tail, tailCursor), nextLine.length),
+          )
+          return
+        }
+      } else if (block && cursor <= block.start) {
+        // Head side: walk the HEAD's lines; its last line steps over the
+        // block to the tail (never into history for a multi-row input).
+        const line = cursorLine(head, cursor)
+        const lines = head.split('\n')
+        if (line < lines.length - 1) {
+          const nextLineStart = head.indexOf('\n', cursor) + 1
+          const nextLineEnd = head.indexOf('\n', nextLineStart)
+          const nextLine = head.slice(
+            nextLineStart,
+            nextLineEnd === -1 ? head.length : nextLineEnd,
+          )
+          setInput(
+            value,
+            nextLineStart + Math.min(cursorColumn(head, cursor), nextLine.length),
+          )
+          return
+        }
+        setInput(value, block.end)
+        return
+      }
+      const line = cursorLine(value, cursor)
+      const lines = value.split('\n')
+      if (line < lines.length - 1) {
+        const nextLineStart = value.indexOf('\n', cursor) + 1
+        const nextLineEnd = value.indexOf('\n', nextLineStart)
+        const nextLine = value.slice(
+          nextLineStart,
+          nextLineEnd === -1 ? value.length : nextLineEnd,
+        )
+        setInput(value, nextLineStart + Math.min(cursorColumn(value, cursor), nextLine.length))
+        return
+      }
+      if (overlayOpen && historyIndex.current < 0) {
+        setSelectedCommand(index =>
+          index >= suggestions.length - 1 ? 0 : index + 1,
+        )
+        return
+      }
+      // A walk cut short by a workspace switch has no position in the new
+      // project's list; ↓ just ends it and returns the draft.
+      if (seedHistory()) {
+        restoreHistoryDraft()
+        return
+      }
+      if (historyIndex.current < 0) return
+      if (historyIndex.current >= history.current.length - 1) {
+        restoreHistoryDraft()
+      } else {
+        historyIndex.current += 1
+        const entry = history.current[historyIndex.current]
+        if (entry !== undefined) {
+          restoreDraftImages(entry)
+          setInput(entry.text, entry.text.length, 'silent')
+        }
+      }
+      return
+    }
+    if (isMod(key) && key.leftArrow) {
+      // Jump to the previous word boundary (readline alt+b). Must precede the
+      // bare-arrow arms: Ctrl+Left arrives as leftArrow + ctrl. An active
+      // selection collapses to its START edge first (editor semantics).
+      const sel = selectionRef.current
+      setInput(value, sel ? sel.start : wordBoundaryLeft(value, cursor))
+      return
+    }
+    if (isMod(key) && key.rightArrow) {
+      // Jump to the next word boundary (readline alt+f).
+      const sel = selectionRef.current
+      setInput(value, sel ? sel.end : wordBoundaryRight(value, cursor))
+      return
+    }
+    if (key.leftArrow) {
+      // ← on an EMPTY prompt backgrounds this session
+      // and opens the agent view; with text it moves the caret as usual.
+      // (The command/file overlays both imply non-empty text, so no extra
+      // gate beyond the help menu is needed.)
+      if (value.length === 0 && !helpOpen) {
+        onBackgroundRequest?.()
+        return
+      }
+      // Grapheme-step: skip the whole cluster (surrogate pair, ZWJ emoji,
+      // combining mark) so the caret never sits inside one. With a
+      // selection, collapse to its start edge instead.
+      const sel = selectionRef.current
+      setInput(value, sel ? sel.start : previousGraphemeBoundary(bounds, cursor))
+      return
+    }
+    if (key.rightArrow) {
+      const sel = selectionRef.current
+      setInput(value, sel ? sel.end : nextGraphemeBoundary(bounds, cursor))
+      return
+    }
+    if (key.backspace) {
+      if (cursor === 0) return
+      const start = previousGraphemeBoundary(bounds, cursor)
+      deleteInputRange(start, cursor)
+      return
+    }
+    if (key.delete) {
+      const end = nextGraphemeBoundary(bounds, cursor)
+      if (end === cursor) return
+      deleteInputRange(cursor, end)
+      return
+    }
+    if (key.home) {
+      // Start of the current line (the block is one atomic row).
+      const lineStart = clampRowStart(value.lastIndexOf('\n', cursor - 1) + 1)
+      setInput(value, lineStart)
+      return
+    }
+    if (key.end) {
+      // End of the current line.
+      const nextLine = value.indexOf('\n', cursor)
+      setInput(value, nextLine === -1 ? value.length : clampRowEnd(nextLine))
+      return
+    }
+    if (isMod(key) && input === 'a') {
+      const lineStart = clampRowStart(value.lastIndexOf('\n', cursor - 1) + 1)
+      setInput(value, lineStart)
+      return
+    }
+    if (isMod(key) && input === 'e') {
+      const nextLine = value.indexOf('\n', cursor)
+      setInput(value, nextLine === -1 ? value.length : clampRowEnd(nextLine))
+      return
+    }
+    if (isMod(key) && input === 'u') {
+      // Delete to start of line (never into the block).
+      const lineStart = clampRowStart(value.lastIndexOf('\n', cursor - 1) + 1)
+      deleteInputRange(lineStart, cursor)
+      return
+    }
+    if (isMod(key) && input === 'k') {
+      // Delete to end of line (never into the block).
+      const nextLine = value.indexOf('\n', cursor)
+      const end = nextLine === -1 ? value.length : clampRowEnd(nextLine)
+      deleteInputRange(cursor, end)
+      return
+    }
+    if (actionMatches('undo', input, key)) {
+      // Word-level draft undo (remappable via /settings). Only the prompt
+      // draft has an undo space: with the keyboard owned by a panel or a
+      // dialog this handler is inactive (useInput isActive), and an empty
+      // stack is a no-op rather than the rewind picker.
+      undoDraft()
+      return
+    }
+    if (isMod(key) && input === 'w') {
+      // Delete the word before the cursor: readline's whitespace-delimited
+      // rule (skip trailing whitespace, then the word). The ICU/CJK
+      // alternative is a separate editor-UX change, not part of draft undo.
+      // The deletion start never crosses into the block.
+      const before = value.slice(0, cursor)
+      let end = before.length
+      while (end > 0 && /\s/.test(before[end - 1]!)) end--
+      let start = end
+      while (start > 0 && !/\s/.test(before[start - 1]!)) start--
+      deleteInputRange(clampRowStart(start), cursor)
+      return
+    }
+    // ── vim mode (`/vim`) ──────────────────────────────────────────────
+    // INSERT submode: only Esc is intercepted (back to NORMAL — the usual
+    // clear/rewind Esc semantics stay disabled while vim is on).
+    // NORMAL submode: bare characters and Esc are vim keys; help/command/
+    // file overlays, modified combos, Tab, Enter, arrows and other
+    // structured keys keep their existing handlers.
+    /**
+     * Push one vim NORMAL-mode step. Vim edits never touch the draft stack:
+     * `u` and `Ctrl+Z` are two independent histories (see {@link vimUndoRef}).
+     */
+    const vimPushUndo = (): void => {
+      const images = imageRefsFor(valueRef.current)
+      const evicted = vimUndoRef.current.length >= UNDO_LIMIT ? vimUndoRef.current.shift() : undefined
+      vimUndoRef.current.push({ text: valueRef.current, cursor: cursorRef.current, images })
+      if (evicted !== undefined) {
+        discardUnretainedImages(evicted.images.map(image => image.stageId))
+      }
+    }
+    const vimNormalEdit = (next: string, cursorOffset: number) => {
+      updateFoldBlock(null)
+      setInput(next, cursorOffset, 'silent')
+      setSelectedCommand(0)
+      setFileSelected(0)
+    }
+    const vimDeleteRange = (start: number, end: number): void => {
+      if (start >= end) return
+      vimPushUndo()
+      updateFoldBlock(null)
+      deleteInputRange(start, end, 'silent')
+      setSelectedCommand(0)
+      setFileSelected(0)
+    }
+    const handleVimNormal = (input: string) => {
+      // One stdin batch can merge several bare keys into a single event
+      // (fast typing), so re-read the synchronous mirrors and recompute
+      // the grapheme boundaries: every key in the batch operates on the
+      // text/caret its predecessor produced (the outer `value`/`cursor`/
+      // `bounds` reflect only the batch's first key).
+      const value = valueRef.current
+      const cursor = cursorRef.current
+      const bounds = graphemeBoundaries(value)
+      const pending = vimPendingRef.current
+      vimPendingRef.current = ''
+      // Operator pending (`d`): the second key picks the target.
+      if (pending === 'd') {
+        switch (input) {
+          case 'd': { // delete the whole line, newline included (vim `dd`);
+            // the last line has no newline — its content is cleared
+            const lineStart = vimLineStart(value, cursor)
+            const lineEnd = vimLineEnd(value, cursor)
+            const end = lineEnd < value.length ? lineEnd + 1 : lineEnd
+            vimDeleteRange(lineStart, end)
+            return
+          }
+          case '$': { // delete to end of line
+            const end = vimLineEnd(value, cursor)
+            vimDeleteRange(cursor, end)
+            return
+          }
+          case '0':
+          case '^': { // delete to start of line
+            const start =
+              input === '^' ? vimLineFirstNonBlank(value, cursor) : vimLineStart(value, cursor)
+            vimDeleteRange(start, cursor)
+            return
+          }
+          case 'w': { // delete to end of word
+            const end = vimWordEnd(value, cursor)
+            vimDeleteRange(cursor, end)
+            return
+          }
+          default:
+            return // unrecognized second key: cancel the operator, drop it
+        }
+      }
+      switch (input) {
+        case 'h':
+          setInput(value, previousGraphemeBoundary(bounds, cursor))
+          return
+        case 'l':
+          setInput(value, nextGraphemeBoundary(bounds, cursor))
+          return
+        case 'j': { // down one line (single-line input: no-op)
+          const line = cursorLine(value, cursor)
+          const lines = value.split('\n')
+          if (line >= lines.length - 1) return
+          const col = Math.min(cursorColumn(value, cursor), (lines[line + 1] ?? '').length)
+          setInput(value, vimLineEnd(value, cursor) + 1 + col)
+          return
+        }
+        case 'k': { // up one line
+          const line = cursorLine(value, cursor)
+          if (line <= 0) return
+          const lines = value.split('\n')
+          const col = Math.min(cursorColumn(value, cursor), (lines[line - 1] ?? '').length)
+          const prevStart = vimLineStart(value, vimLineStart(value, cursor) - 1)
+          setInput(value, prevStart + col)
+          return
+        }
+        case '0': {
+          setInput(value, vimLineStart(value, cursor))
+          return
+        }
+        case '^': {
+          setInput(value, vimLineFirstNonBlank(value, cursor))
+          return
+        }
+        case '$': {
+          setInput(value, vimLineEnd(value, cursor))
+          return
+        }
+        case 'w':
+          setInput(value, vimWordForward(value, cursor))
+          return
+        case 'b':
+          setInput(value, vimWordBackward(value, cursor))
+          return
+        case 'x': { // delete the character at the caret; at the very end of
+          // the text delete the last character (vim: the caret sits ON the
+          // last char after `$`, so `x` must still delete it). Same rule
+          // when the caret sits right before a '\n' mid-draft — after `$`
+          // the caret is on the line's last char, `x` must delete THAT
+          // char, not the newline (which would join the lines).
+          if (cursor > 0 && (cursor === value.length || value[cursor] === '\n')) {
+            const start = previousGraphemeBoundary(bounds, cursor)
+            vimDeleteRange(start, cursor)
+            return
+          }
+          const end = nextGraphemeBoundary(bounds, cursor)
+          if (end === cursor) return
+          vimDeleteRange(cursor, end)
+          return
+        }
+        case 'X': { // delete the character before the caret
+          if (cursor === 0) return
+          const start = previousGraphemeBoundary(bounds, cursor)
+          vimDeleteRange(start, cursor)
+          return
+        }
+        case 'd':
+          vimPendingRef.current = 'd'
+          return
+        case 'u': { // undo the last vim edit (its own stack, not Ctrl+Z's)
+          syncImageGeneration()
+          const prev = vimUndoRef.current.pop()
+          if (prev === undefined) return
+          advanceDraftRevision()
+          replaceDraftImages(prev.images)
+          updateFoldBlock(null)
+          setInput(prev.text, prev.cursor, 'silent')
+          setSelectedCommand(0)
+          setFileSelected(0)
+          return
+        }
+        case 'i': // insert at the caret
+          vimInsertRef.current = true
+          setVimInsert(true)
+          return
+        case 'I': { // insert at the line's first non-blank (vim `I`)
+          setInput(value, vimLineFirstNonBlank(value, cursor))
+          vimInsertRef.current = true
+          setVimInsert(true)
+          return
+        }
+        case 'a': { // insert after the caret
+          setInput(value, nextGraphemeBoundary(bounds, cursor))
+          vimInsertRef.current = true
+          setVimInsert(true)
+          return
+        }
+        case 'A': { // insert at the line end
+          setInput(value, vimLineEnd(value, cursor))
+          vimInsertRef.current = true
+          setVimInsert(true)
+          return
+        }
+        case 'o': { // new line below, then insert
+          vimPushUndo()
+          const end = vimLineEnd(value, cursor)
+          vimNormalEdit(value.slice(0, end) + '\n' + value.slice(end), end + 1)
+          vimInsertRef.current = true
+          setVimInsert(true)
+          return
+        }
+        case 'O': { // new line above, then insert
+          vimPushUndo()
+          const start = vimLineStart(value, cursor)
+          vimNormalEdit(value.slice(0, start) + '\n' + value.slice(start), start)
+          vimInsertRef.current = true
+          setVimInsert(true)
+          return
+        }
+        default:
+          return // unrecognized key: ignored (never inserts in NORMAL)
+      }
+    }
+    if (vimEnabledRef.current) {
+      if (vimInsertRef.current) {
+        // INSERT: Esc returns to NORMAL instead of the clear/rewind path.
+        if (key.escape && !helpOpen && !overlayOpen && !fileOverlayOpen) {
+          event.stopImmediatePropagation()
+          vimInsertRef.current = false
+          setVimInsert(false)
+          return
+        }
+      } else if (!helpOpen && !overlayOpen && !fileOverlayOpen) {
+        if (key.escape) {
+          // NORMAL: Esc cancels a pending operator and otherwise no-ops
+          // (the clear/rewind double-Esc semantics belong to non-vim mode).
+          vimPendingRef.current = ''
+          event.stopImmediatePropagation()
+          return
+        }
+        const plainChar =
+          input.length > 0 &&
+          !key.ctrl && !key.meta && !key.super && !key.tab && !key.return
+        if (plainChar) {
+          // `?` on an empty input falls through to the help shortcut below.
+          if (input === '?' && value.length === 0) return
+          // `/` opens the slash-command menu even in NORMAL: insert it and
+          // switch to INSERT so the rest of the command types normally
+          // (the menu then owns the keys while it is open). The insertion is
+          // a NORMAL command, so it lands on the vim undo stack (`u` reverts
+          // it); anything typed afterwards is a draft edit whose first
+          // snapshot already contains the `/`, so `Ctrl+Z` never peels the
+          // `/` off on its own.
+          if (input === '/') {
+            const text = valueRef.current
+            const pos = cursorRef.current
+            const next = text.slice(0, pos) + '/' + text.slice(pos)
+            vimPushUndo() // NORMAL command: one vim-undo step, not a draft edit
+            setInput(next, pos + 1, 'silent')
+            setSelectedCommand(0)
+            setFileSelected(0)
+            vimInsertRef.current = true
+            setVimInsert(true)
+            return
+          }
+          event.stopImmediatePropagation()
+          // A merged multi-char event (fast typing) is one vim key per
+          // character — handleVimNormal re-reads the refs each call, so a
+          // batch like `dd` works exactly like two separate keypresses.
+          // Once a key switches back to INSERT (i/a/o/…), the remaining
+          // characters of the batch are ordinary typing and insert as text.
+          for (let i = 0; i < input.length; i++) {
+            if (vimInsertRef.current) {
+              const rest = input.slice(i)
+              const text = valueRef.current
+              const pos = cursorRef.current
+              const next = text.slice(0, pos) + rest + text.slice(pos)
+              setInput(next, pos + rest.length)
+              setSelectedCommand(0)
+              setFileSelected(0)
+              break
+            }
+            handleVimNormal(input[i]!)
+          }
+          return
+        }
+      }
+    }
+
+    if (key.escape) {
+      if (helpOpen) {
+        onToggleHelp()
+        return
+      }
+      // A single Esc closes the open command menu first;
+      // the double-tap-clear semantics only apply to ordinary input.
+      if (overlayOpen) {
+        clearDraftUndoably()
+        return
+      }
+      // File overlay: Esc dismisses the menu for THIS token only — clearing
+      // the input would nuke a mid-message `@` mention's surrounding text.
+      if (fileOverlayOpen) {
+        fileEscRef.current = mention?.start ?? -1
+        return
+      }
+      // With pending messages while working, Esc = interrupt and deliver
+      // them right away (Codex's "interrupt and send immediately"): the
+      // turn is aborted and each message is re-queued once it settles.
+      if (channel.working && channel.pending.length > 0) {
+        const count = channel.interruptAndDeliver(channel.pending.map(item => ({
+          text: item.text,
+          images: item.images ?? [],
+        })))
+        channel.notify(t('interrupt-delivered', { n: count }), {
+          timeoutMs: 2500,
+        })
+        return
+      }
+      // "Send to Chat" chips peel before the draft: the first Esc drops the
+      // contexts panels staged and leaves the typed text untouched, so a second
+      // Esc then clears the input as usual. The press is CONSUMED — this rung
+      // has exactly one meaning, and a running turn must not be interrupted by
+      // the same key that only dropped a chip.
+      const stagedContexts = channel.attachedContexts ?? []
+      if (stagedContexts.length > 0) {
+        event?.stopImmediatePropagation()
+        for (const staged of [...stagedContexts]) channel.detachContext(staged.id)
+        return
+      }
+      // A single Esc clears the current input (if any); the double-tap
+      // path below handles rewind/clear on an already-empty input. A BIG
+      // input folds into a block instead (Esc = the fold toggle; the
+      // expand → fold → expand cycle is lossless, and clearing a big draft
+      // stays reachable via the block-delete Backspace or Ctrl+C).
+      if (value.length > 0) {
+        if (isBigInput(value)) {
+          updateFoldBlock({ start: 0, end: value.length })
+          setSelectedCommand(0)
+          setFileSelected(0)
+          return
+        }
+        // Esc clearing the draft is undoable (D4): Ctrl+Z brings the whole
+        // draft back, images and fold block included.
+        clearDraftUndoably()
+        return
+      }
+      // Double-tap Esc opens the rewind picker. Reaching here means the draft
+      // is empty: every non-empty branch above returns after clearing, so the
+      // second tap can only be the rewind gesture.
+      if (escPendingRef.current) {
+        escPendingRef.current = false
+        if (escTimerRef.current) clearTimeout(escTimerRef.current)
+        onRewindRequest?.()
+        return
+      }
+      escPendingRef.current = true
+      channel.notify(
+        value.length === 0 ? t('esc-again-rewind') : t('esc-again-clear'),
+      )
+      escTimerRef.current = setTimeout(() => {
+        escPendingRef.current = false
+      }, 3000)
+      return
+    }
+    if (input === '?' && value.length === 0 && !expandedRef.current) {
+      onToggleHelp()
+      return
+    }
+    if (input && !key.ctrl && !key.meta && !key.super && !key.tab && !key.escape) {
+      // Typing anything else dismisses the help menu.
+      if (helpOpen) onToggleHelp()
+      // An active selection is REPLACED by the typed text, caret after it.
+      const sel = selectionRef.current
+      const at = sel ? sel.start : cursor
+      const next = sel
+        ? value.slice(0, sel.start) + input + value.slice(sel.end)
+        : value.slice(0, cursor) + input + value.slice(cursor)
+      // Replacing a selection is atomic, exactly like `insertAtCaret`: the
+      // replaced span must not fold into the surrounding typed run.
+      setInput(next, at + input.length, sel ? 'step' : 'group')
+      setSelectedCommand(0)
+      setFileSelected(0)
+    }
+  }, { isActive: !suspended })
+
+  // === Render: hard-wrap every logical line at the input width, then show
+  // the window of visual lines with the caret row always visible.
+  // Narrow terminals: the usable width follows the real terminal down to a
+  // single column — a fixed floor of 10 would wrap far too early and park
+  // the declared cursor past the value box's actual width.
+  // The vim badge ('INSERT '/'NORMAL ', 7 cols) sits BEFORE the value box in
+  // the same row, so the wrap budget must shrink by its width or long lines
+  // would be clipped at the value box's right edge.
+  const vimBadgeCols = vimEnabled ? 7 : 0
+  // 行首会话入口占列：未传 onOpenSessions 时按钮整体不渲染，预算同步归还
+  // （既有调用方的可用列数逐列不变）。用实测常量而不是 stringWidth：该字符
+  // 是 U+1F3E0+VS15，stringWidth 按码点算 2（含 VS15 仍是 2），终端只给 1，
+  // 见 HOME_BUTTON_COLS 的说明。
+  const homeButtonCols = onOpenSessions === undefined ? 0 : HOME_BUTTON_COLS
+  // 补全卡片边框与输入框 idle 边框同色（plan 模式下整套面板一起变 sage
+  // 绿）。`/color` 会话强调色优先于主题 promptBorder（plan 模式仍整体走
+  // sage 绿）。`?? ''` 防御最小 mock channel（只声明用到的字段的回归脚
+  // 本）。声明在渲染派生区之前：展开编辑器的行号高亮与边框同用此色。
+  const sessionAccent = sessionColorHex(channel.sessionColor ?? '')
+  const promptAccent = channel.mode.plan === true ? 'planMode' : (sessionAccent ?? 'promptBorder')
+  // 展开态布局参数：编辑器独占整屏 —— 行号槽（宽度随逻辑行数伸缩）+
+  // 圆角边框 2 + 两侧 padding 各 1 占列，⌸ 入口 / ❯ 前缀 / vim 徽标 /
+  // ⛶ 按钮全部让位；收起态额外扣掉行首 ⌸ 入口（未渲染时 0 列）与行尾
+  // ⛶ 按钮的 2 列。
+  const editorLogicalLines = expanded ? value.split('\n').length : 1
+  const editorNoWidth = Math.max(2, String(editorLogicalLines).length)
+  const editorGutterCols = editorNoWidth + 3
+  const inputWidth = expanded
+    ? Math.max(1, columns - 4 - editorGutterCols)
+    : Math.max(1, columns - 3 - vimBadgeCols - homeButtonCols - (expandEnabled ? 2 : 0))
+  // 展开态无视折叠块：全屏编辑就是为了看全文（foldBlock 状态保留，
+  // 收起后折叠显示恢复）。
+  const block = expanded ? null : foldBlock
+  // Fold-block model: the value renders as [head rows][chip row][tail rows]
+  // — the block is ONE atomic visual row regardless of its text size; text
+  // before/after it stays fully editable and never unfolds it.
+  const foldText = block ? value.slice(block.start, block.end) : value
+  const head = block ? value.slice(0, block.start) : ''
+  const tail = block ? value.slice(block.end) : ''
+  const headRows = block ? wrapToWidth(head, inputWidth) : []
+  const tailRows = block ? wrapToWidth(tail, inputWidth) : []
+  const chipRow = block ? headRows.length : -1
+  const visualLines = block
+    ? [...headRows, '', ...tailRows]
+    : wrapToWidth(value, inputWidth)
+  // Caret geometry uses the FULL wrap (not `value.slice(0, cursor)`):
+  // word-wrap carry moves already-placed clusters, so a prefix wrap would
+  // disagree with the displayed rows whenever the cursor sits inside a
+  // carried word.
+  const caretPlaced = block
+    ? cursor <= block.start
+      ? caretInText(head, inputWidth, cursor)
+      : caretInText(tail, inputWidth, Math.max(0, cursor - block.end))
+    : caretInText(value, inputWidth, cursor)
+  const caretVisualLine =
+    block && cursor > block.start
+      ? headRows.length + 1 + caretPlaced.line
+      : caretPlaced.line
+  const caretCharCol = caretPlaced.charCol
+  const caretVisualCol = caretPlaced.visualCol
+
+  // Fold stats describe the BLOCK (or the whole input when expanded and
+  // the ▾ prefix offers a manual whole-input fold). The chip shows the
+  // block's own line/char count + first-line preview — the preview text
+  // around it is unaffected.
+  const big = isBigInput(foldText)
+  const stats = big
+    ? t('input-fold-stats', { lines: foldText.split('\n').length, chars: foldText.length })
+    : ''
+  const peekOpen = block !== null && hovered && !selectionActive
+
+  // 展开态的编辑区行高预算：圆角边框 2 + 标题行 1 + 状态行 1 + 按钮行 1。
+  const editorMaxRows = Math.max(1, terminalRows - EDITOR_CHROME_ROWS)
+  if (expanded && caretVisualLine !== prevCaretLineRef.current) {
+    // A real caret move re-engages following after wheel browsing.
+    editorFreeScrollRef.current = false
+    prevCaretLineRef.current = caretVisualLine
+  }
+  let windowStart: number
+  let visibleCount: number
+  if (expanded) {
+    // 滚轮推动的窗口与 caret 跟随合并：自由滚动（滚轮浏览）期间不强制
+    // caret 可见；caret 移动后恢复跟随。写回 ref，滚轮分支读到的就是
+    // 合并后的基线。
+    let win = expandedScrollRef.current
+    if (!editorFreeScrollRef.current) {
+      if (caretVisualLine < win) win = caretVisualLine
+      if (caretVisualLine >= win + editorMaxRows) win = caretVisualLine - editorMaxRows + 1
+    }
+    win = Math.max(0, Math.min(win, Math.max(0, visualLines.length - editorMaxRows)))
+    expandedScrollRef.current = win
+    windowStart = win
+    visibleCount = editorMaxRows
+  } else {
+    windowStart = Math.max(
+      0,
+      Math.min(
+        caretVisualLine - MAX_VISIBLE_LINES + 1,
+        visualLines.length - MAX_VISIBLE_LINES,
+      ),
+    )
+    visibleCount = MAX_VISIBLE_LINES
+  }
+  const visibleLines = visualLines.slice(
+    windowStart,
+    windowStart + visibleCount,
+  )
+  // Caret-window jump: when the caret leaves MAX_VISIBLE_LINES (typing past
+  // it, arrow-key walks through a long prompt) the whole visible band is
+  // replaced in place — same-height rows, completely different text. The
+  // per-cell diff that repaints that band is exactly the path that goes
+  // haywire when the inline viewport is even one row out of sync with the
+  // terminal's scrollback ("重叠变花": old rows bleeding through the new
+  // ones). Same one-shot reanchor family as the shrink/floaters/editor
+  // patches above — the window jump is a viewport-level discontinuity, not
+  // an ordinary content edit.
+  const prevWindowStartRef = React.useRef(windowStart)
+  React.useLayoutEffect(() => {
+    if (windowStart !== prevWindowStartRef.current) {
+      prevWindowStartRef.current = windowStart
+      const ink = instances.get(process.stdout) ?? instances.values().next().value
+      ink?.invalidatePrevFrame()
+      ink?.reanchorViewport()
+    }
+  }, [windowStart])
+  // useInput 的滚轮分支需要这份几何（它在这些派生之前注册）。
+  if (expanded) {
+    editorViewportRef.current = { maxRows: editorMaxRows, total: visualLines.length }
+  }
+
+  // Folded chip content: block stats + first-line preview + hover hint,
+  // all pre-truncated to the input width (the row is one line, always).
+  // `·` separators are U+30FB KATAKANA MIDDLE DOT, NOT U+00B7: the latter
+  // is East-Asian-ambiguous (model 1 cell, CJK terminal fonts paint 2) and
+  // this row's stats→preview→hint truncation arithmetic all runs through
+  // stringWidth — a painted-wide separator shifts every segment right by
+  // one column per separator and the row reads as overlapping text.
+  // U+30FB is officially Ambiguous too, but get-east-asian-width hardcodes
+  // it Wide and mainstream terminals (Western included) paint it 2 cells —
+  // the model and the painted width agree in practice. A wcwidth-strict
+  // Western terminal painting it 1 cell would leave a spare column, which
+  // the `- 6` slack below absorbs.
+  const foldBadge = `▸ ${stats}`
+  const foldHint = t('input-fold-hover')
+  const foldPreviewWidth =
+    inputWidth - stringWidth(foldBadge) - stringWidth(`・${foldHint}`) - 6
+  const foldPreview =
+    foldPreviewWidth >= 8
+      ? truncateToWidth(foldText.split('\n')[0] ?? '', foldPreviewWidth)
+      : ''
+
+  // Expanded-state fold affordance: a `▾` prefix at the start of the FIRST
+  // row (only while the window is at the top and no block exists); its
+  // cells fold the whole input into a block again on click.
+  const prefixLabel = `▾ ${stats}・`
+  const prefixCols =
+    !block && !expanded && big && windowStart === 0 ? stringWidth(prefixLabel) : 0
+
+  // Offset range [start, end) of every visual row — the SAME break rule as
+  // wrapToWidth — so the selection highlight can intersect each row. With a
+  // fold block, the chip row maps to the block's own span (never selected:
+  // updateSelection clamps the selection into the head or the tail side).
+  const lineRanges: Array<[number, number]> = block
+    ? [
+        ...visualLineRanges(head, inputWidth),
+        [block.start, block.end],
+        ...visualLineRanges(tail, inputWidth).map(
+          ([s, e]): [number, number] => [s + block.end, e + block.end],
+        ),
+      ]
+    : visualLineRanges(value, inputWidth)
+
+  /**
+   * Inverse runs for one rendered row, shared by the inline prompt and the
+   * expanded editor: the selection's intersection (if any) and the caret
+   * cluster on the caret's row. Both render <Text inverse>; overlapping
+   * intervals merge so a caret inside the selection stays one continuous
+   * highlight. The caret row inverts the WHOLE cluster at the caret column
+   * (solid block) — [col, next boundary) covers a surrogate pair or ZWJ
+   * emoji as one glyph; at the text end it shows a blank inverse cell like
+   * the empty-input caret (appended after everything, so a selection
+   * ending there cannot swallow it).
+   */
+  const rowHighlightPieces = (
+    text: string,
+    absoluteLine: number,
+  ): Array<{ text: string; inverse: boolean; chip: boolean }> => {
+    const [rowStart] = lineRanges[absoluteLine] ?? [0, 0]
+    // Per-character style: 0 plain, 1 chip (a staged token), 2 inverse
+    // (selection or caret cluster). Inverse wins over chip.
+    const PLAIN = 0
+    const CHIP = 1
+    const INVERSE = 2
+    const kinds = new Uint8Array(text.length)
+    const fill = (lo: number, hi: number, kind: number): void => {
+      for (let i = Math.max(lo, 0); i < Math.min(hi, text.length); i++) kinds[i] = kind
+    }
+    const spans = boundImageSpans(value)
+    for (const span of spans) fill(span.start - rowStart, span.end - rowStart, CHIP)
+    const sel = selection
+    if (sel) fill(sel.start - rowStart, sel.end - rowStart, INVERSE)
+    let endBlankCaret = false
+    if (absoluteLine === caretVisualLine) {
+      const col = Math.min(caretCharCol, text.length)
+      // A staged token is one caret cluster: with the caret at its start the
+      // whole token inverts (the selected-chip look), and Delete removes it.
+      const tokenAtCaret = spans.find(span => span.start === rowStart + col)
+      const clusterEnd = tokenAtCaret !== undefined
+        ? Math.min(tokenAtCaret.end - rowStart, text.length)
+        : nextGraphemeBoundary(graphemeBoundaries(text), col)
+      if (clusterEnd > col) fill(col, clusterEnd, INVERSE)
+      else endBlankCaret = col === text.length
+    }
+    const pieces: Array<{ text: string; inverse: boolean; chip: boolean }> = []
+    let pos = 0
+    while (pos < text.length) {
+      const kind = kinds[pos]!
+      let end = pos + 1
+      while (end < text.length && kinds[end] === kind) end++
+      pieces.push({ text: text.slice(pos, end), inverse: kind === INVERSE, chip: kind === CHIP })
+      pos = end
+    }
+    if (endBlankCaret) pieces.push({ text: ' ', inverse: true, chip: false })
+    return pieces
+  }
+
+  const rendered = visibleLines.map((line, index) => {
+    const absoluteLine = windowStart + index
+    if (block && absoluteLine === chipRow) {
+      // The fold block's atomic chip row: click expands it; hover pops the
+      // peek card. The row is one line no matter how big the block is.
+      return (
+        <Box
+          key={`fold-${absoluteLine}`}
+          flexDirection="row"
+          onClick={(event) => {
+            event.stopImmediatePropagation()
+            updateFoldBlock(null)
+          }}
+          onMouseEnter={hoverEnter}
+          onMouseLeave={hoverLeave}
+        >
+          <Text dimColor>{foldBadge}</Text>
+          {foldPreview !== '' && <Text dimColor>・</Text>}
+          {foldPreview !== '' && <Text wrap="truncate-end">{foldPreview}</Text>}
+          <Text dimColor>{`・${foldHint}`}</Text>
+        </Box>
+      )
+    }
+    const withPrefix = absoluteLine === 0 && prefixCols > 0
+    const text = withPrefix ? truncateToWidth(line, inputWidth - prefixCols) : line
+    const prefix = withPrefix ? <Text dimColor>{prefixLabel}</Text> : null
+    const pieces = rowHighlightPieces(text, absoluteLine)
+    return (
+      <Text key={absoluteLine} wrap="truncate-end">
+        {prefix}
+        {pieces.length === 0 ? ' ' : pieces.map((piece, pieceIndex) =>
+          piece.inverse ? (
+            <Text key={pieceIndex} inverse>
+              {piece.text}
+            </Text>
+          ) : piece.chip ? (
+            <Text key={pieceIndex} color="suggestion">
+              {piece.text}
+            </Text>
+          ) : (
+            piece.text
+          ),
+        )}
+      </Text>
+    )
+  })
+
+  // ── 展开态编辑行 ────────────────────────────────────────────────────
+  // Logical line number per visual row (a wrapped continuation keeps its
+  // line's number): the row's range end sitting on a '\n' starts a new
+  // logical line from the NEXT row.
+  const editorRowLogical: number[] = []
+  if (expanded) {
+    let count = 0
+    for (let i = 0; i < lineRanges.length; i++) {
+      editorRowLogical.push(count)
+      const rangeEnd = lineRanges[i]![1]
+      if (value[rangeEnd] === '\n') count++
+    }
+  }
+  const editorRows = expanded
+    ? visibleLines.map((line, index) => {
+        const absoluteLine = windowStart + index
+        const isCaretRow = absoluteLine === caretVisualLine
+        const logicalNo = editorRowLogical[absoluteLine]
+        const gutterLabel =
+          logicalNo === undefined
+            ? ' '.repeat(editorNoWidth)
+            : String(logicalNo + 1).padStart(editorNoWidth, ' ')
+        const pieces = rowHighlightPieces(line, absoluteLine)
+        return (
+          <Text
+            key={absoluteLine}
+            wrap="truncate-end"
+            backgroundColor={isCaretRow ? 'toolCardBackgroundDim' : undefined}
+          >
+            <Text
+              dimColor={!isCaretRow}
+              bold={isCaretRow}
+              color={isCaretRow ? promptAccent : undefined}
+            >
+              {`${gutterLabel} │ `}
+            </Text>
+            {pieces.map((piece, pieceIndex) =>
+              piece.inverse ? (
+                <Text key={pieceIndex} inverse>
+                  {piece.text}
+                </Text>
+              ) : piece.chip ? (
+                <Text key={pieceIndex} color="suggestion">
+                  {piece.text}
+                </Text>
+              ) : (
+                piece.text
+              ),
+            )}
+          </Text>
+        )
+      })
+    : null
+
+  // Peek card content: the BLOCK's text wrapped to the card's inner width,
+  // capped at PEEK_MAX_ROWS visual rows (a preview — click to expand and
+  // edit the real input). The footer reports the clipped remainder.
+  const PEEK_MAX_ROWS = 10
+  const peekVisualLines: string[] = []
+  for (const line of foldText.split('\n')) {
+    for (const row of wrapToWidth(line, cardContentWidth(columns))) {
+      if (peekVisualLines.length >= PEEK_MAX_ROWS) break
+      peekVisualLines.push(row)
+    }
+    if (peekVisualLines.length >= PEEK_MAX_ROWS) break
+  }
+  const peekClipped = peekVisualLines.length >= PEEK_MAX_ROWS
+
+  // Composer height shrink: clearing multi-line text (Enter/Esc/Ctrl+C/
+  // Backspace) collapses the input area within one commit, shifting the
+  // status line up and the whole chrome with it. The renderer's
+  // full-damage pass (didLayoutShift) repaints the shifted siblings, but
+  // inline mode's virtual↔scrollback correspondence needs the stronger
+  // in-place viewport repaint — same treatment as Ctrl+O and the
+  // loaded-context toggle (see Chat.tsx). One-shot, only on SHRINK:
+  // growth scrolls the terminal naturally and needs no recovery.
+  const contentRows = value.length === 0 ? 1 : visibleLines.length
+  noteAuxNumber('promptContentRows', contentRows)
+  const prevContentRowsRef = React.useRef(contentRows)
+  React.useLayoutEffect(() => {
+    if (contentRows < prevContentRowsRef.current) {
+      const ink = instances.get(process.stdout) ?? instances.values().next().value
+      ink?.invalidatePrevFrame()
+      ink?.reanchorViewport()
+    }
+    prevContentRowsRef.current = contentRows
+  }, [contentRows])
+
+  const lastNotification =
+    channel.notifications[channel.notifications.length - 1]
+  // The pet panel can "say" a notice with its speech bubble instead: while
+  // that panel is the ACTIVE one the host suppresses the duplicate toast
+  // here (errors always toast — they may need action). Same render, same
+  // commit, so the swap cannot flash one frame of toast first.
+  const toastVisible =
+    lastNotification !== undefined && (toastSuppressed?.(lastNotification) ?? false) !== true
+
+  // Park the native terminal cursor at the input caret (via the renderer's
+  // cursor-declaration mechanism). Terminal emulators render IME preedit
+  // text and screen-reader focus at the physical cursor, so parking it at
+  // the caret makes CJK/IME composition appear inline at the input instead
+  // of at the screen's bottom row; in line-mode terminals the console echo
+  // of typed characters lands at the same spot. `line`/`column` are
+  // relative to the value box the ref attaches to.
+  const valueBoxRef = useDeclaredCursor({
+    line: caretVisualLine - windowStart,
+    // Clamp the declared column to the wrap width: a grapheme wider than
+    // the last remaining column (emoji at width 1) can push the visual
+    // column past inputWidth, and the park must stay inside the value box.
+    // In the expanded editor the declared box starts at its outer edge
+    // (padding + gutter included), so those columns ride along and the
+    // clamp grows with them.
+    //
+    // The declared column is relative to the VALUE BOX, and `caretVisualCol`
+    // is already measured in that box's cell space: the text box IS the text
+    // run, so nothing that renders before it — the session entry, the `❯ `
+    // glyph, the fold prefix — shifts a cell inside it. Adding any of those
+    // back double-counts them and parks the hardware cursor to the RIGHT of
+    // the inverted caret cell (a 2-column miss shows up as a displaced IME
+    // preedit target). Only the expanded editor declares against a wider box
+    // (gutter + padding), so only that branch adds columns.
+    column: Math.min(
+      caretVisualCol + (expanded ? editorGutterCols + 1 : 0),
+      expanded ? editorGutterCols + 1 + inputWidth : inputWidth,
+    ),
+    active: !suspended && !selectionActive,
+  })
+
+  /**
+   * Map a pointer position relative to the value box to a UTF-16 offset
+   * via the same grapheme walk the renderer wraps with — exact under CJK
+   * widths, wrapped rows and multi-codepoint clusters. Rows are clamped to
+   * the VISIBLE window (drag moves never auto-scroll past it in v1); the
+   * fold chip row maps to null (its cells belong to the expand affordance,
+   * not to text).
+   */
+  const localToOffset = (localCol: number, localRow: number): number | null => {
+    const lastVisible = Math.min(visualLines.length - 1, windowStart + visibleCount - 1)
+    const clamped = Math.max(windowStart, Math.min(windowStart + localRow, lastVisible))
+    // Fold prefix (▾) row: the rendered first row is truncated by prefixCols,
+    // so both the column and the wrap budget shift — without the correction
+    // a drag starting on the first row lands prefixCols to the right of the
+    // pointer (consistent with handleValueClick's click mapping). Presses ON the
+    // prefix cells clamp to the row start (drag-from-0, like selecting the
+    // whole first row backwards).
+    const isPrefixRow = !block && clamped === 0 && prefixCols > 0
+    const col = isPrefixRow ? Math.max(0, localCol - prefixCols) : localCol
+    const width = isPrefixRow ? inputWidth - prefixCols : inputWidth
+    if (block) {
+      if (clamped === chipRow) return null
+      return clamped < chipRow
+        ? clickToCursorOffset(head, width, clamped, col)
+        : block.end + clickToCursorOffset(tail, width, clamped - chipRow - 1, col)
+    }
+    return clickToCursorOffset(value, width, clamped, col)
+  }
+
+  /**
+   * Click-to-position the caret: map a click inside the value box (local
+   * row/column relative to the box) to a UTF-16 cursor offset via the same
+   * grapheme walk the renderer wraps with — exact under CJK widths, wrapped
+   * rows and multi-codepoint clusters. Clicks land on the boundary nearest
+   * the clicked cell (mid-grapheme snaps to its start). With a fold block,
+   * clicks map into the head/tail text (the chip row has its own expand
+   * onClick); without one, the fold prefix's cells fold the whole input.
+   *
+   * The drag protocol resets ink's multi-click chain on every press inside
+   * the value box (it carries onDragStart), so double-click word selection
+   * is self-detected here: two clicks within DOUBLE_CLICK_MS and one cell.
+   * Shift+click extends the selection from its start edge (or the caret)
+   * to the clicked offset; a plain click clears the selection and moves
+   * the caret.
+   *
+   * `colOffset` shifts the local column origin: the expanded editor's
+   * value box starts at the line-number gutter, so its callers subtract
+   * the gutter width (0 for the inline prompt).
+   */
+  /** A plain click on a `[Image #N]` token: a staged one is reported as the
+   *  caret image (the caret was just placed at its start, so the caller
+   *  shows the preview even if it was dismissed); a stale one warns.
+   *  Offsets come from the input's own click-to-cursor mapping, never from
+   *  screen coordinates. */
+  const openStagedImageAt = (offset: number): void => {
+    syncImageGeneration()
+    for (const match of valueRef.current.matchAll(COMPOSER_IMAGE_TOKEN)) {
+      const start = match.index ?? 0
+      if (start > offset) break
+      if (offset < start + match[0].length) {
+        const stageId = draftImagesRef.current.get(match[0])
+        const image = stageId === undefined ? undefined : channel.stagedImage(stageId)
+        if (image === undefined) {
+          // Evicted by the FIFO cap or cleared by a session switch: the
+          // placeholder text will NOT attach an image on submit. A raw
+          // token (never staged) is plain text and gets no notice.
+          if (stageId !== undefined) {
+            channel.notify(t('input-image-token-stale', { token: match[0] }), { color: 'warning', timeoutMs: 5000 })
+          }
+        } else {
+          reportCaretImage('click')
+        }
+        return
+      }
+    }
+  }
+
+  const handleValueClick = (e: ClickEvent, colOffset = 0) => {
+    const now = Date.now()
+    const modified = e.shift || e.alt || e.ctrl
+    const isDouble =
+      !modified &&
+      now - lastClickAtRef.current < DOUBLE_CLICK_MS &&
+      Math.abs(e.col - lastClickColRef.current) <= 1 &&
+      Math.abs(e.row - lastClickRowRef.current) <= 1
+    if (modified) {
+      // Shift+click is range extension, never a word-select click. It also
+      // breaks the local chain so a following plain click cannot complete a
+      // double-click that started under a modifier.
+      lastClickAtRef.current = 0
+      lastClickColRef.current = -1
+      lastClickRowRef.current = -1
+    } else {
+      lastClickAtRef.current = now
+      lastClickColRef.current = e.col
+      lastClickRowRef.current = e.row
+    }
+    const localCol = e.localCol - colOffset
+    const clickedVisual = windowStart + e.localRow
+    const clamped = Math.max(0, Math.min(clickedVisual, visualLines.length - 1))
+    if (block) {
+      if (clamped === chipRow) return
+      const offset =
+        clamped < chipRow
+          ? clickToCursorOffset(head, inputWidth, clamped, localCol, isDouble ? 'grapheme-start' : 'nearest')
+          : block.end + clickToCursorOffset(tail, inputWidth, clamped - chipRow - 1, localCol, isDouble ? 'grapheme-start' : 'nearest')
+      if (isDouble) {
+        // Word select stays inside the clicked side: the block is atomic.
+        const side = offset <= block.start
+        const w = wordSelectionAt(value, offset, side ? 0 : block.end, side ? block.start : value.length)
+        if (w) {
+          updateSelection(w.start, w.end)
+          placeCaret(selectionRef.current?.end ?? w.end, 'end')
+        }
+        return
+      }
+      if (e.shift) {
+        const base = selectionRef.current ? selectionRef.current.start : cursorRef.current
+        updateSelection(base, offset)
+        placeCaret(offset, 'nearest')
+        return
+      }
+      clearSelection()
+      // A click on a staged token puts the caret at its start: the token is
+      // the caret cluster, so it highlights whole.
+      placeCaret(offset, 'start')
+      openStagedImageAt(offset)
+      return
+    }
+    if (clamped === 0 && prefixCols > 0 && localCol < prefixCols) {
+      // Folding hides the entire editable projection, so no selection may
+      // survive invisibly inside the chip and keep owning Ctrl+C/Delete.
+      clearSelection()
+      dragAnchorRef.current = null
+      setCursor(value.length)
+      updateFoldBlock({ start: 0, end: value.length })
+      return
+    }
+    const col =
+      clamped === 0 && prefixCols > 0 ? Math.max(0, localCol - prefixCols) : localCol
+    const offset = clickToCursorOffset(
+      value,
+      clamped === 0 && prefixCols > 0 ? inputWidth - prefixCols : inputWidth,
+      clamped,
+      col,
+      isDouble ? 'grapheme-start' : 'nearest',
+    )
+    if (isDouble) {
+      const w = wordSelectionAt(value, offset, 0, value.length)
+      if (w) {
+        updateSelection(w.start, w.end)
+        placeCaret(selectionRef.current?.end ?? w.end, 'end')
+      }
+      return
+    }
+    if (e.shift) {
+      const base = selectionRef.current ? selectionRef.current.start : cursorRef.current
+      updateSelection(base, offset)
+      placeCaret(offset, 'nearest')
+      return
+    }
+    clearSelection()
+    placeCaret(offset, 'start')
+    openStagedImageAt(offset)
+  }
+
+  /**
+   * Drag selection (component-level drag protocol): the press origin is
+   * derived from the event's start/current delta (dragstart fires on the
+   * FIRST motion), the focus follows every dragmove. The caret rides the
+   * focus edge; updateSelection clamps both ends into one fold side, so a
+   * drag can never cross the chip row. `colOffset` as in handleValueClick.
+   */
+  const handleDragStart = (e: DragEvent, colOffset = 0) => {
+    const anchorLocalCol = e.localCol - (e.col - e.startCol) - colOffset
+    const anchorLocalRow = e.localRow - (e.row - e.startRow)
+    const anchor = localToOffset(anchorLocalCol, anchorLocalRow)
+    if (anchor === null) {
+      dragAnchorRef.current = null
+      return
+    }
+    dragAnchorRef.current = anchor
+    placeCaret(anchor, 'nearest')
+  }
+  const handleDragMove = (e: DragEvent, colOffset = 0) => {
+    const anchor = dragAnchorRef.current
+    if (anchor === null) return
+    const focus = localToOffset(e.localCol - colOffset, e.localRow)
+    if (focus === null) return
+    // The caret rides the focus edge, clamped into the anchor's fold side
+    // exactly like updateSelection clamps the range — the caret must never
+    // jump across the chip row while the selection stays behind.
+    let caret = focus
+    const block = foldBlockRef.current
+    if (block) {
+      caret = anchor <= block.start ? Math.min(focus, block.start) : Math.max(focus, block.end)
+    }
+    updateSelection(anchor, focus)
+    placeCaret(normalizeCursorOffset(valueRef.current, caret), 'nearest')
+  }
+  const handleDragEnd = () => {
+    dragAnchorRef.current = null
+  }
+
+  // 浮层整体挂载条件：与内部面板可见条件精确同值。关闭时必须把整个
+  // absolute 浮层移除——渲染器的 absolute-removed 检测只看被移除节点自身
+  // 的 style.position，常驻浮层 + 移除普通子节点不会触发 blit 解毒，被
+  // 覆盖的转录行会留空（见 Chat.tsx dialogOverlayOpen 注释）。展开态由
+  // 全屏编辑器接管，内联浮层全部撤下。
+  const floatersOpen =
+    !suspended &&
+    !expanded &&
+    (helpOpen || channel.pending.length > 0 || fileOverlayOpen || overlayOpen || peekOpen)
+  // 顶边框右侧的会话名标签 chip：色随强调色；超宽截断，宽度
+  // 随终端列数伸缩但不超过 28 显示单元。默认关闭——`/settings` 的
+  // 「会话名标签」开关（dsh-tui.promptSessionLabel）开启后显示。
+  // "Send to Chat" chips (side-panel §6.7): the contexts panels staged for the
+  // next submission, rendered as one strip directly above the prompt border.
+  // Read defensively — hosts and older fixtures mount this composer with a
+  // partial channel stub (Chat guards `agentViewRows` for the same reason),
+  // and a missing projection means "nothing attached". A render-time TypeError
+  // here would be swallowed by ink and silently freeze the screen.
+  const attachedContexts = channel.attachedContexts ?? []
+  const sessionTitle = channel.sessionTitle ?? ''
+  const topRightLabel: InputBorderLabel | undefined =
+    channel.promptSessionLabel === true && sessionTitle !== ''
+      ? {
+          text: truncateToWidth(sessionTitle, Math.max(8, Math.min(28, columns - 8))),
+          color: channel.mode.plan === true ? 'planMode' : (sessionAccent ?? 'accent'),
+          ink: 'inverseText',
+        }
+      : undefined
+
+  // 浮层最佳路径（/ 命令卡、@ 文件卡、帮助/队列）经渲染器 absolute-overlay
+  // 机制覆盖转录尾部与状态行。若覆盖期间上方兄弟重绘（spinner 滴答、流式
+  // 文本），覆盖单元格会混入 prevScreen 的旧转录内容——"重叠变花"的根因
+  // （渲染器注释描述的同族问题）。Chat.tsx 对其浮层/高度切换都做视口重锚
+  // （Ctrl+O、loaded-context）；此处为斜杠/文件浮层的开关补上同样的恢复：
+  // 打开时保证卡片整块重绘、关闭时保证被覆盖行回到干净的转录内容，而非与
+  // scrollback 失同步后残留花屏。
+  const prevFloatersOpenRef = React.useRef(floatersOpen)
+  React.useLayoutEffect(() => {
+    if (floatersOpen === prevFloatersOpenRef.current) return
+    prevFloatersOpenRef.current = floatersOpen
+    const ink = instances.get(process.stdout) ?? instances.values().next().value
+    ink?.invalidatePrevFrame()
+    ink?.reanchorViewport()
+  }, [floatersOpen])
+
+  // 全屏编辑器的真实可见性同时受 expanded 与 prompt-slot suspension
+  // 控制。对话框临时接管时撤下、关闭后恢复，和手动展开/收起一样都必须
+  // 重锚 inline 视口；只在一次真正的 false→true 展开时归零滚动位置，
+  // suspension 往返保留用户浏览到的行。
+  const editorVisible = expanded && !suspended
+  const prevEditorVisibleRef = React.useRef(editorVisible)
+  React.useLayoutEffect(() => {
+    if (expanded && !prevExpandedRef.current) expandedScrollRef.current = 0
+    prevExpandedRef.current = expanded
+    if (editorVisible === prevEditorVisibleRef.current) return
+    prevEditorVisibleRef.current = editorVisible
+    const ink = instances.get(process.stdout) ?? instances.values().next().value
+    ink?.invalidatePrevFrame()
+    ink?.reanchorViewport()
+  }, [editorVisible, expanded])
+
+  // Feature turned off mid-session while the editor is up: withdraw the
+  // cover (the draft and every other editing state survive).
+  React.useEffect(() => {
+    if (expanded && !expandEnabled) collapseEditor()
+  }, [expanded, expandEnabled])
+
+  // ── 全屏草稿编辑节点 ────────────────────────────────────────────────
+  // 每次渲染构造新鲜闭包（value/caret/handlers），经 module store 发布给
+  // Chat 根部末尾的 PromptEditorLayer（树序最后 → 盖住全部后绘兄弟）。
+  // useInsertionEffect 发布：sink 的同步重渲染发生在 layout 阶段之前，
+  // useDeclaredCursor（layout effect）读到的新 ref 已指向编辑区 Box。
+  // 点击/拖拽坐标以内容区为原点（localCol 去掉行号槽宽度）。
+  const editorNode = editorVisible ? (
+    <Box
+      flexDirection="column"
+      width="100%"
+      height="100%"
+      borderStyle="round"
+      borderColor={promptAccent}
+      backgroundColor="toolCardBackground"
+    >
+      {/* 标题行：编辑图标 + 标题 · 右侧实时统计 */}
+      <Box flexDirection="row" flexShrink={0} paddingLeft={1} paddingRight={1}>
+        <Text bold color={promptAccent}>{`✎ ${t('input-expand-editor-title')}`}</Text>
+        <Box flexGrow={1} />
+        <Text dimColor>
+          {t('input-fold-stats', {
+            lines: value.split('\n').length,
+            chars: value.length,
+          })}
+        </Text>
+      </Box>
+      {/* 编辑区：行号槽 + 全套选区/caret 高亮，点击定位/拖选/双击选词。
+          坐标换算：localCol 相对 Box 外缘（含 paddingLeft），故偏移 =
+          padding 1 + 行号槽宽（见 handleValueClick 的 colOffset）。滚轮走
+          位置路由（onWheel），驱动展开态自己的滚动窗口。 */}
+      <Box
+        ref={valueBoxRef}
+        flexDirection="column"
+        flexGrow={1}
+        flexShrink={1}
+        paddingLeft={1}
+        paddingRight={1}
+        onClick={(event) => {
+          handleValueClick(event, editorGutterCols + 1)
+        }}
+        onDragStart={(event) => {
+          handleDragStart(event, editorGutterCols + 1)
+        }}
+        onDragMove={(event) => {
+          handleDragMove(event, editorGutterCols + 1)
+        }}
+        onDragEnd={handleDragEnd}
+        onWheel={(event) => {
+          const viewport = editorViewportRef.current
+          if (!viewport) return
+          editorFreeScrollRef.current = true
+          const max = Math.max(0, viewport.total - viewport.maxRows)
+          expandedScrollRef.current = Math.max(
+            0,
+            Math.min(expandedScrollRef.current + Math.round(event.deltaY), max),
+          )
+          setExpandedTick(tick => tick + 1)
+        }}
+      >
+        {editorRows}
+      </Box>
+      {/* 状态行：vim 徽标 · 行列 · 右侧键位提示 */}
+      <Box flexDirection="row" flexShrink={0} paddingLeft={1} paddingRight={1}>
+        {vimEnabled && (
+          <Text bold color={vimInsert ? 'success' : 'warning'}>
+            {vimInsert ? 'INSERT' : 'NORMAL'}{' '}
+          </Text>
+        )}
+        <Text dimColor>
+          {t('input-expand-editor-position', {
+            line: cursorLine(value, cursor) + 1,
+            col: cursorColumn(value, cursor) + 1,
+          })}
+        </Text>
+        <Box flexGrow={1} />
+        <Text dimColor>
+          {`${t('input-expand-editor-hint-send')} · ${t('input-expand-editor-hint-collapse')}`}
+        </Text>
+      </Box>
+      {/* 按钮行：主操作发送（accent 填充）+ 次操作收起，均可点击/hover */}
+      <Box flexDirection="row" flexShrink={0} paddingLeft={1} paddingRight={1} columnGap={1}>
+        <EditorButton
+          label={`⏎ ${t('input-expand-editor-send')}`}
+          hint="Ctrl+Enter"
+          primary
+          accent={promptAccent}
+          onClick={submitFromEditor}
+        />
+        <EditorButton
+          label={t('input-expand-editor-collapse')}
+          hint="Esc"
+          onClick={collapseEditor}
+        />
+        <Box flexGrow={1} />
+        <Text dimColor>{t('input-expand-editor-scroll')}</Text>
+      </Box>
+    </Box>
+  ) : null
+  React.useInsertionEffect(() => {
+    setPromptEditorNode(editorNode)
+  })
+  React.useEffect(() => {
+    // 卸载保险：PromptInput 被替换（问卷/面板接管）时撤下全屏浮层。
+    return () => {
+      setPromptEditorNode(null)
+    }
+  }, [])
+
+  // Approval, question and managed-dialog panels temporarily own Chat's
+  // prompt slot. Stay mounted so an async command can settle without losing
+  // its exact text/image draft, while contributing no layout, input, cursor,
+  // editor layer, or external injection controller.
+  if (suspended) return null
+
+  return (
+    <Box flexDirection="column" marginTop={1}>
+      {/* 瞬态面板浮层（帮助/队列/补全）：零布局高度、向上覆盖转录尾部，
+          帧高不随面板开关涨落——否则帧顶行会被滚进 scrollback 并在关闭
+          重绘时二次写入（/model 切换多一份启动画的根因，见 OverlayAbove）。 */}
+      {floatersOpen && (
+      <OverlayAbove maxHeight={Math.max(terminalRows - 6, 1)}>
+        {helpOpen && (
+          <Box marginBottom={1}>
+            <HelpMenu
+              commands={channel.commandList}
+              viewportHeight={helpViewportHeight}
+              viewportWidth={columns}
+              scrollRef={helpScrollRef}
+              onCommandPick={(name) => {
+                // 点击命令行 = 填入 /name 并关闭帮助（Tab 补全的鼠标等价）
+                updateFoldBlock(null)
+                // `/${name} ` — the whole fill is one undo step.
+                setInput(`/${name} `, name.length + 2, 'step')
+                onToggleHelp()
+              }}
+            />
+          </Box>
+        )}
+        {!helpOpen && channel.pending.length > 0 && (
+          <Box flexDirection="column" paddingLeft={2} paddingBottom={1}>
+            {channel.pending.some(item => item.placement === 'steer') && (
+              <Box flexDirection="column">
+                <Text dimColor>⚡ {t('input-pending-steer-label')}</Text>
+                {channel.pending
+                  .filter(item => item.placement === 'steer')
+                  .map(item => (
+                    <Text key={item.id} dimColor wrap="truncate">
+                      {'  '}↳ {item.text}
+                    </Text>
+                  ))}
+              </Box>
+            )}
+            {channel.pending.some(item => item.placement === 'followup') && (
+              <Box flexDirection="column">
+                <Text dimColor>⏳ {t('input-pending-queue-label')}</Text>
+                {channel.pending
+                  .filter(item => item.placement === 'followup')
+                  .map(item => (
+                    <Text key={item.id} dimColor wrap="truncate">
+                      {'  '}↳ {item.text}
+                    </Text>
+                  ))}
+              </Box>
+            )}
+            <Text dimColor>Alt+↑ {t('input-pending-actions-hint')}</Text>
+          </Box>
+        )}
+        {fileOverlayOpen && (
+          <FileSuggestions
+            files={fileMatches}
+            selectedIndex={fileSelected}
+            columns={columns}
+            query={mention?.query ?? ''}
+            accent={promptAccent}
+            // 点击行 = 接受该项（与 Enter 同路径）
+            onPick={(index) => {
+              const file = fileMatches[index]
+              if (file) acceptFile(file)
+            }}
+            // 滚轮 = 移动选中行（与 ↑/↓ 同路径，窗口跟随）
+            onWheelStep={(step) => {
+              setFileSelected(i => Math.max(0, Math.min(fileMatches.length - 1, i + step)))
+            }}
+          />
+        )}
+        {overlayOpen && (
+          <CommandSuggestions
+            commands={suggestions}
+            selectedIndex={selectedCommand}
+            columns={columns}
+            query={value}
+            accent={promptAccent}
+            // 点击行 = 运行该命令（与 Enter 同路径）
+            onPick={(index) => {
+              const command = suggestions[index]
+              if (command) tryRunCommand(command.commandLine)
+            }}
+            // 滚轮 = 移动选中行（与 ↑/↓ 同路径，窗口跟随）
+            onWheelStep={(step) => {
+              setSelectedCommand(i => Math.max(0, Math.min(suggestions.length - 1, i + step)))
+            }}
+          />
+        )}
+        {peekOpen && (
+          // 悬停预览卡片：只读展示折叠内容的头部（输入框自身保持一行，
+          // 布局零跳动）。点击任一行 = 固定展开进入真实输入框编辑；悬停
+          // 期间鼠标直接打字同样先展开（见折叠态按键分支）。卡片自身的
+          // enter/leave 维持 hovered，防止 chip→卡片过渡闪烁。
+          <Box onMouseEnter={hoverEnter} onMouseLeave={hoverLeave}>
+            <SuggestionCard
+              title={stats}
+              columns={columns}
+              accent={promptAccent}
+              footer={
+                peekClipped
+                  ? t('input-fold-peek-footer', { lines: foldText.split('\n').length })
+                  : undefined
+              }
+              rows={peekVisualLines.map((row, index) => (
+                <Text key={index} wrap="truncate-end">
+                  {row}
+                </Text>
+              ))}
+              onRowPick={() => {
+                updateFoldBlock(null)
+                setHovered(false)
+              }}
+            />
+          </Box>
+        )}
+      </OverlayAbove>
+      )}
+      {attachedContexts.length > 0 && (
+        // The chip strip sits in the band directly above the prompt border —
+        // the row band the `[Image #N]` tokens occupy inside the input.
+        // Chips lay out side by side and each truncates at the row end, so the
+        // strip is ALWAYS exactly one row tall no matter how many panels stage
+        // a context or how long their titles are.
+        <Box
+          flexDirection="row"
+          width="100%"
+          height={1}
+          overflow="hidden"
+          paddingLeft={2}
+          columnGap={2}
+        >
+          {attachedContexts.map(item => (
+            // Each chip is its own shrinkable cell (ink boxes shrink by
+            // default) so a long title truncates at ITS OWN end instead of
+            // pushing the later chips off the row.
+            <Box key={item.id} overflow="hidden">
+              <Text color={promptAccent} wrap="truncate-end">
+                {t('prompt-attached-context-chip', { title: item.title })}
+              </Text>
+            </Box>
+          ))}
+        </Box>
+      )}
+      {lastNotification && toastVisible && (
+        // position=absolute takes zero layout height so the transcript never
+        // shifts when a notification appears/disappears; the layer floats one
+        // row above the prompt border, right-aligned.
+        <Box
+          position="absolute"
+          marginTop={-1}
+          height={1}
+          width="100%"
+          paddingLeft={2}
+          paddingRight={1}
+          flexDirection="column"
+          justifyContent="flex-end"
+          overflow="hidden"
+        >
+          <Box justifyContent="flex-end">
+            <Text
+              color={lastNotification.color}
+              dimColor={!lastNotification.color}
+              wrap="truncate"
+            >
+              {lastNotification.text}
+            </Text>
+          </Box>
+        </Box>
+      )}
+      {/* The prompt's own top/bottom border rows, self-drawn so the effort
+          overlay can play on them (sweep → tier name → fade; see
+          EffortInputBorder). Idle colour keeps the plan-mode accent the old
+          Box border carried. */}
+      <EffortInputBorder
+        effort={channel.reasoningEffort}
+        levels={channel.effortLevels}
+        columns={columns}
+        onLight={isLightThemeActive(themeName)}
+        idleColor={promptAccent}
+        topRightLabel={topRightLabel}
+      >
+        <Box flexDirection="row" alignItems="flex-start" width="100%">
+          {/* ⌂ 会话列表入口：点击打开会话浏览；hover 提亮为输入框强调色。
+              行首固定 2 列（`⌂` 1 列 + 分隔空格 1 列，见 homeButtonCols）；
+              未传 onOpenSessions 时整体不渲染（宽度预算同步归还）。 */}
+          {onOpenSessions !== undefined && (
+            <Box
+              flexShrink={0}
+              onClick={(event) => {
+                event.stopImmediatePropagation()
+                onOpenSessions?.()
+              }}
+              onMouseEnter={() => {
+                setHomeHovered(true)
+              }}
+              onMouseLeave={() => {
+                setHomeHovered(false)
+              }}
+            >
+              <Text
+                dimColor={!homeHovered}
+                bold={homeHovered}
+                color={homeHovered ? promptAccent : undefined}
+              >
+                {HOME_BUTTON_TEXT}
+              </Text>
+            </Box>
+          )}
+          <EffortChargeGlyph
+            effort={channel.reasoningEffort}
+            levels={channel.effortLevels}
+            working={channel.working}
+          />
+          {vimEnabled && (
+            <Text bold color={vimInsert ? 'success' : 'warning'}>
+              {vimInsert ? 'INSERT' : 'NORMAL'} </Text>
+          )}
+          <Box
+            ref={expanded ? undefined : valueBoxRef}
+            flexGrow={1}
+            flexShrink={1}
+            onClick={handleValueClick}
+            onDragStart={handleDragStart}
+            onDragMove={handleDragMove}
+            onDragEnd={handleDragEnd}
+          >
+            {value.length === 0 ? (
+              // Solid block caret on a BLANK cell: the terminal paints the
+              // IME preedit (pinyin) at the physical cursor, which is parked
+              // right here, so nothing else may occupy this cell.
+              <>
+                <Text inverse> </Text>
+                {/* 三幕点焰第二幕：空输入行居中短暂浮现档名大写（纯文
+                    本流自带偏移空格——不引入嵌套 Box，行数恒定；有文字
+                    时不显示）。3 = 行内 `❯ `（2 列）+ 空输入块光标（1
+                    列）；行首 ⌂ 入口渲染时徽标之前还要多占它的列数。 */}
+                <EffortTierBadge
+                  effort={channel.reasoningEffort}
+                  levels={channel.effortLevels}
+                  onLight={isLightThemeActive(themeName)}
+                  columns={columns}
+                  leadingColumns={3 + homeButtonCols}
+                />
+              </>
+            ) : (
+              <Box flexDirection="column">{rendered}</Box>
+            )}
+          </Box>
+          {/* ⛶ 全屏草稿编辑入口：点击展开；hover 提亮为输入框强调色。
+              inputWidth 已为它预留 2 列（见渲染派生区）；设置关闭时
+              整体不渲染（宽度预算同步归还）。 */}
+          {expandEnabled && (
+            <Box
+              flexShrink={0}
+              onClick={(event) => {
+                event.stopImmediatePropagation()
+                toggleExpand()
+              }}
+              onMouseEnter={() => {
+                setExpandHovered(true)
+              }}
+              onMouseLeave={() => {
+                setExpandHovered(false)
+              }}
+            >
+              <Text
+                dimColor={!expandHovered}
+                bold={expandHovered}
+                color={expandHovered ? promptAccent : undefined}
+              >
+                ⛶
+              </Text>
+            </Box>
+          )}
+        </Box>
+      </EffortInputBorder>
+      {/* Agent-view footer: "← N agents" when background sessions are
+          waiting on the user, "← for agents" otherwise — the ← affordance's
+          discoverability hint. Only rendered when the Chat screen supplies
+          the count. */}
+      {backgroundAgentsNeedingInput !== undefined && (
+        <Box flexDirection="row" justifyContent="flex-end" paddingRight={2}>
+          <Text dimColor>
+            {backgroundAgentsNeedingInput > 0
+              ? t('input-background-hint-count', { n: backgroundAgentsNeedingInput })
+              : t('input-background-hint-idle')}
+          </Text>
+        </Box>
+      )}
+    </Box>
+  )
+}
+
+/**
+ * Grapheme word-wrap for one logical line: break at the last space when
+ * the row overflows; hard-wrap a word that cannot fit; never split a
+ * cluster (ZWJ emoji, combining sequences, CJK wide cells stay whole).
+ */
+function wrapLineRows(
+  line: string,
+  width: number,
+): Array<{ start: number; end: number }> {
+  if (line === '') return [{ start: 0, end: 0 }]
+  const rows: Array<{ start: number; end: number }> = []
+  const segmenter = getGraphemeSegmenter()
+  // The space inside `[Image #N]` is not a break opportunity: the token is
+  // one unit on screen (its caret cluster and chip styling span it), so it
+  // wraps whole, like a word.
+  const unbreakable = imageTokenSpans(line)
+  let rowStart = 0
+  let currentWidth = 0
+  let offset = 0
+  let lastBreak = -1
+  for (const { segment } of segmenter.segment(line)) {
+    const w = stringWidth(segment)
+    while (currentWidth + w > width && offset > rowStart) {
+      if (lastBreak > rowStart) {
+        rows.push({ start: rowStart, end: lastBreak })
+        rowStart = lastBreak
+        currentWidth = stringWidth(line.slice(rowStart, offset))
+        lastBreak = -1
+      } else {
+        rows.push({ start: rowStart, end: offset })
+        rowStart = offset
+        currentWidth = 0
+        lastBreak = -1
+      }
+    }
+    currentWidth += w
+    offset += segment.length
+    if (segment === ' ' && imageTokenAround(unbreakable, offset) === undefined) lastBreak = offset
+  }
+  rows.push({ start: rowStart, end: offset })
+  return rows
+}
+
+/** Wrap text to `width` columns via {@link wrapLineRows} (newlines honoured). */
+function wrapToWidth(text: string, width: number): string[] {
+  return text.split('\n').flatMap(line =>
+    wrapLineRows(line, width).map(r => line.slice(r.start, r.end)),
+  )
+}
+
+/**
+ * Locate `offset` in the wrapped layout of `text`. Uses the full wrap —
+ * not a prefix — so a cursor inside a carried word maps to the displayed
+ * row. At a wrap join the caret stays on the earlier row (after the space).
+ */
+function caretInText(
+  text: string,
+  width: number,
+  offset: number,
+): { line: number; charCol: number; visualCol: number } {
+  let line = 0
+  let lineBase = 0
+  let last = { line: 0, charCol: 0, visualCol: 0 }
+  for (const logical of text.split('\n')) {
+    for (const r of wrapLineRows(logical, width)) {
+      const start = lineBase + r.start
+      const charCol = Math.max(0, offset - start)
+      last = {
+        line,
+        charCol,
+        visualCol: stringWidth(logical.slice(r.start, r.start + charCol)),
+      }
+      if (offset <= lineBase + r.end) return last
+      line++
+    }
+    lineBase += logical.length + 1
+  }
+  return last
+}
+
+/**
+ * Inverse of {@link wrapToWidth}: map a click position (visual row index +
+ * visual column) back to a UTF-16 offset in the original text. Uses the
+ * same {@link wrapLineRows} row boundaries, so every visual row's start
+ * offset is known exactly. Within the clicked row, the caret snaps to the
+ * boundary nearest the click: a grapheme whose midpoint lies past the
+ * click column takes the caret before it, otherwise after.
+ */
+function clickToCursorOffset(
+  text: string,
+  width: number,
+  visualLine: number,
+  visualCol: number,
+  snapWithin: 'nearest' | 'grapheme-start' = 'nearest',
+): number {
+  const segmenter = getGraphemeSegmenter()
+  let row = 0
+  let lineBase = 0
+  for (const line of text.split('\n')) {
+    for (const r of wrapLineRows(line, width)) {
+      if (row === visualLine) {
+        let currentWidth = 0
+        let local = 0
+        for (const { segment } of segmenter.segment(line.slice(r.start, r.end))) {
+          const w = stringWidth(segment)
+          // Caret positioning uses the nearest edge. Double-click selection
+          // instead needs the grapheme UNDER the cell: on the second cell of a
+          // CJK/emoji glyph, nearest-edge would point after the glyph (and the
+          // final glyph would select nothing).
+          if (snapWithin === 'grapheme-start' && currentWidth + w > visualCol) {
+            return lineBase + r.start + local
+          }
+          if (currentWidth + w / 2 > visualCol) return lineBase + r.start + local
+          if (currentWidth + w > visualCol) return lineBase + r.start + local + segment.length
+          currentWidth += w
+          local += segment.length
+        }
+        return lineBase + r.end
+      }
+      row++
+    }
+    lineBase += line.length + 1
+  }
+  return lineBase
+}
+
+/**
+ * Offset range [start, end) of every visual row, using the same {@link
+ * wrapLineRows} boundaries as `wrapToWidth`. The selection highlight
+ * intersects each row with these ranges so offsets map 1:1 onto the
+ * rendered row strings.
+ */
+function visualLineRanges(text: string, width: number): Array<[number, number]> {
+  const ranges: Array<[number, number]> = []
+  let lineBase = 0
+  for (const line of text.split('\n')) {
+    for (const r of wrapLineRows(line, width)) ranges.push([lineBase + r.start, lineBase + r.end])
+    lineBase += line.length + 1
+  }
+  return ranges
+}
+
+/** Word characters for double-click selection: letters (any script),
+ *  digits and the punctuation set terminal emulators treat as word-part by
+ *  default (`/usr/bin/bash` selects whole — iTerm2 defaults). */
+const WORD_CHAR = /[\p{L}\p{N}_/.\-+~\\]/u
+
+/** Character class for double-click word expansion: whitespace, word
+ *  char, everything else (punctuation/symbols). A same-class grapheme
+ *  run is one word. */
+function selectionCharClass(c: string): 0 | 1 | 2 {
+  if (c === '' || /\s/.test(c)) return 0
+  if (WORD_CHAR.test(c)) return 1
+  return 2
+}
+
+/**
+ * Word selection around `offset` within [lo, hi): expand left/right over
+ * grapheme clusters of the same class as the clicked one (terminal
+ * double-click semantics — punctuation runs select as one). Returns null
+ * when the offset sits at the range's end (nothing to select).
+ */
+function wordSelectionAt(
+  text: string,
+  offset: number,
+  lo: number,
+  hi: number,
+): { start: number; end: number } | null {
+  if (offset < lo || offset >= hi) return null
+  const bounds = graphemeBoundaries(text.slice(lo, hi)).map(b => b + lo)
+  let i = 0
+  while (i < bounds.length - 1 && bounds[i + 1]! <= offset) i++
+  const clusterAt = (index: number): string => text.slice(bounds[index]!, bounds[index + 1]!)
+  const cls = selectionCharClass(clusterAt(i))
+  let a = i
+  while (a > 0 && selectionCharClass(clusterAt(a - 1)) === cls) a--
+  let b = i
+  while (b < bounds.length - 2 && selectionCharClass(clusterAt(b + 1)) === cls) b++
+  return { start: bounds[a]!, end: bounds[b + 1]! }
+}

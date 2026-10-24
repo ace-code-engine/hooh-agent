@@ -19,7 +19,8 @@ from typing import List, NamedTuple, Optional, Sequence, Tuple
 from ui.ace_text import display_width, truncate_width
 
 __all__ = ["MARGIN", "ROLES", "Segment", "Line", "Screen", "line_width",
-           "pad_line", "fit_row", "blank_line", "margin", "rule", "problems"]
+           "pad_line", "fit_row", "blank_line", "margin", "rule", "problems",
+           "content_width"]
 
 MARGIN = 2          # 页边距：左右各 2 cell（规范第二节）
 ROLES = ("dim", "text", "strong", "accent", "swatch", "ok", "warn", "err")
@@ -83,11 +84,31 @@ def blank_line(width: int) -> Line:
     return [Segment(" " * max(0, int(width)), "dim")]
 
 
-def margin(line: Sequence[Segment], width: int) -> Line:
-    """左右各 MARGIN 格页边距：内容刚好 width-2*MARGIN，加上两边就是终端宽度。"""
-    content = max(0, int(width) - 2 * MARGIN)
-    return ([Segment(" " * MARGIN, "dim")] + pad_line(line, content)
-            + [Segment(" " * MARGIN, "dim")])
+def margin(line: Sequence[Segment], width: int, margin: int = MARGIN) -> Line:
+    """左右各 `margin` 格页边距：内容刚好 width-2*margin，加上两边就是终端宽度。
+
+    `width` 传的是**终端宽**（不是内容宽）—— 折成内容宽是 `content_width()` 的事，
+    这里只负责把已经算好的内容放进页边距里。两个函数配成一对，语义别混。
+    """
+    m = max(0, int(margin))
+    content = max(0, int(width) - 2 * m)
+    return ([Segment(" " * m, "dim")] + pad_line(line, content)
+            + [Segment(" " * m, "dim")])
+
+
+def content_width(cols: int, margin: int = MARGIN) -> int:
+    """终端列数 → **内容区**列数。**这是全仓唯一该减页边距的地方。**
+
+    为什么单拎出来（抄 dsh-TUI `PageMargin` 的那条不变量）：它把终端尺寸收窄成内容尺寸
+    之后，下面每一屏都按内容宽算，**不许再减一次**。ace 此前反过来——每个屏各自拿着
+    终端宽再各减各的（`fit_width(cols, margin=4)` 一处、`ace_screen` 一处、全屏状态行
+    一处），于是"到底还剩几列"有几种算法，窄终端上就表现为有的地方溢出、有的地方白留。
+    """
+    try:
+        c = int(cols)
+    except (TypeError, ValueError):
+        c = 0
+    return max(1, c - 2 * max(0, int(margin)))
 
 
 def rule(width: int, mode: str = "ascii") -> str:

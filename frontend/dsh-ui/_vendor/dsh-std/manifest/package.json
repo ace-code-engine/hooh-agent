@@ -1,0 +1,8 @@
+{
+  "name": "@dsh-std/manifest",
+  "version": "0.0.0-hooh-stub",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "types": "index.d.ts"
+}

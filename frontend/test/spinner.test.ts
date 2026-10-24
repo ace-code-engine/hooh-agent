@@ -31,6 +31,7 @@ import {
   stallLevel,
 } from '../src/render/spinner.js';
 import { PHASE_VERB, verbKeyFor } from '../src/components/Spinner.js';
+import { displayWidth } from '../src/render/text.js';
 import { mountTree } from './mount.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -87,19 +88,38 @@ describe('与 ui/ace_spinner.py 一致', () => {
   it('字形都是单宽、无 emoji（旧终端里 emoji 会画成方框）', () => {
     for (const phase of PHASES) {
       for (const f of GLYPHS[phase].frames) {
-        expect([...f].length, `${phase}/${f}`).toBe(1);
-        expect(f.codePointAt(0)!, `${phase}/${f} 不该是 emoji`).toBeLessThan(0x1f000);
+        // 注意是**逐字符**：一帧现在可以是多格（推理那串噪声填充是 5 格）。
+        for (const ch of [...f]) {
+          expect(displayWidth(ch), `${phase}/${f} 里的 ${ch}`).toBe(1);
+          expect(ch.codePointAt(0)!, `${phase}/${f} 里的 ${ch} 不该是 emoji`).toBeLessThan(0x1f000);
+        }
       }
     }
+  });
+
+  it('★推理帧是**噪声填充**：空 → 满 → 倒放回空（用户给的参考件那套算法）', () => {
+    const frames = GLYPHS.reasoning.frames;
+    const mid = (frames.length - 1) / 2;
+    expect(frames[0]).toBe('·····');                       // 起手是空的
+    expect(frames[mid]).toBe('█████');                     // 最长的那一帧 = 填满
+    expect(frames[frames.length - 1]).toBe('·····');       // 收尾也回到空
+    // **倒放**：后半段就是前半段的镜像（填满之后往回走，不是继续往前冲）
+    for (let i = 1; i <= mid; i++) {
+      expect(frames[frames.length - 1 - i], `倒放第 ${i} 帧`).toBe(frames[i]);
+    }
+    // 只出现过"满"和"空"两种格子状态（源片是二值填充，不是灰度）
+    const chars = new Set(frames.join(''));
+    expect([...chars].sort()).toEqual(['·', '█']);
   });
 });
 
 describe('帧推进', () => {
-  it('按帧间隔推进', () => {
-    expect(frameAt('reasoning', 0)).toBe('◐');
-    expect(frameAt('reasoning', 0.24)).toBe('◓');
-    expect(frameAt('reasoning', 0.48)).toBe('◑');
-    expect(frameAt('reasoning', 0.96)).toBe('◐'); // 回到第一帧
+  it('按帧间隔推进（推理现在是噪声填充，11 帧一轮）', () => {
+    expect(frameAt('reasoning', 0)).toBe('·····');
+    expect(frameAt('reasoning', 0.18)).toBe('·····');      // 第 2 帧仍是空的
+    expect(frameAt('reasoning', 0.36)).toBe('···██');      // 开始长
+    expect(frameAt('reasoning', 0.18 * 4)).toBe('█████');  // 填满
+    expect(frameAt('reasoning', 0.18 * 11)).toBe('·····'); // 一轮走完回到起手
   });
 
   it('不同阶段速度不同（这是语义，不是装饰）', () => {
@@ -107,9 +127,12 @@ describe('帧推进', () => {
     expect(phaseInterval('tool_running')).toBeLessThan(phaseInterval('reasoning'));
   });
 
-  it('**无动效时恒取第一帧** —— 降级要降到底，只慢一半同样难受', () => {
+  it('**无动效时恒取一个固定帧** —— 降级要降到底，只慢一半同样难受', () => {
     for (const t of [0, 0.5, 10, 999]) {
-      expect(frameAt('reasoning', t, true)).toBe('◐');
+      // 推理那个阶段特殊：填充动画的首帧是空格子，静态时会像"没在干活"，
+      // 所以无动效给它**填满**那一帧（Python 侧 `frame_at` 同口径）。
+      expect(frameAt('reasoning', t, true)).toBe('█████');
+      expect(frameAt('tool_running', t, true)).toBe('▁');
     }
   });
 
@@ -190,5 +213,31 @@ describe('Spinner 渲染（R-7 卡住）', () => {
     const out = lastFrame() ?? '';
     unmount();
     expect(out).not.toContain('spin_stalled');
+  });
+
+  it('★知道是哪个工具就说具名的（"准备中"看不出在调 file_write 还是 file_read）', async () => {
+    const named = (k: string, p?: Record<string, string | number>): string =>
+      p ? `${k}:${p.tool}` : k;
+    const { lastFrame, unmount } = mountTree(
+      React.createElement(Spinner, {
+        phase: 'tool_running', t: named, color: noColor, reducedMotion: true, tool: 'file_write',
+      }),
+    );
+    const out = lastFrame() ?? '';
+    unmount();
+    expect(out).toContain('calling_tool_named:file_write');
+    expect(out).not.toContain('spin_verb_5');       // 具名了就不再退化回笼统动词
+  });
+
+  it('工具阶段但不知名字 → 退回动词表（不印一个空的"正在调用 "）', async () => {
+    const { lastFrame, unmount } = mountTree(
+      React.createElement(Spinner, {
+        phase: 'tool_running', t, color: noColor, reducedMotion: true, tool: '',
+      }),
+    );
+    const out = lastFrame() ?? '';
+    unmount();
+    expect(out).toContain('spin_verb_5');
+    expect(out).not.toContain('calling_tool_named');
   });
 });

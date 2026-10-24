@@ -62,6 +62,7 @@ import {
 import { g, gstr } from '../render/glyphs.js';
 import { truncateWidth } from '../render/text.js';
 import { VimLineEditor } from '../render/vim.js';
+import { Rule } from './layout/PageMargin.js';
 import { Menu } from './Menu.js';
 
 const CLOSED: MenuState = { items: [], selected: 0, open: false, kind: '', query: '', span: [0, 0] };
@@ -574,6 +575,11 @@ export function Input({
         </Text>
       ) : null}
 
+      {/* 输入区上下两条**出血整宽**细线 —— dsh-TUI 聊天页的做法（圆角框只出现在它的启动页，
+          套到聊天输入上是抄错了版本）。`Rule` 的 `bleed` 默认开：线从第 0 列直通终端右缘，
+          输入行留在内容列。规范 §1.2 认的分区手段就是整宽细线，不是边框。 */}
+      <Rule color={color} />
+
       <Text>
         {/* 提示符用 **magenta** —— 与 ACE 的 Python 侧一致（`ai_code.py` 里写的是
             `c('magenta', '❯')`）。
@@ -594,6 +600,8 @@ export function Input({
         {fold ? null : <Text color={color('text')}>{value.slice(cursor + 1)}</Text>}
         {vimStatus ? <Text color={color('dim')}> {vimStatus}</Text> : null}
       </Text>
+
+      <Rule color={color} />
 
       {fold ? <Text color={color('dim')}>{t('paste_folded', { n: fold.lines })}</Text> : null}
 

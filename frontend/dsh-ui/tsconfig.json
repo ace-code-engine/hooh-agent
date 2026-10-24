@@ -1,0 +1,50 @@
+{
+  // 迁入的 dsh-TUI UI 树（未接线）。**故意不并进 `../tsconfig.json`**：
+  // 它是"先搬进来、再逐层接线"的在建工程，让它把 ace 自己的 tsc/测试弄红是反的。
+  // 放在这里单独编译，专门用来暴露"还差哪些外部绑定"。
+  "compilerOptions": {
+    "target": "ES2022",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2022", "DOM"],
+    "jsx": "react-jsx",
+    "types": ["node"],
+    "strict": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+    "noEmit": true,
+    // 这是**第三方迁入的树**（671 个文件，我们一行没改）。上游在自己的完整依赖图里
+    // 能过，我们只 vendor 了类型子集，于是几处 `| null` 的差别会冒出来（多在
+    // `dsh-adapter/oauth/*` —— DSH 账号登录，我们不迁）。**对我们自己的接线代码不放松**：
+    // 适配层写在 `frontend/src/` 里，走那边严格的 tsconfig。
+    "strictNullChecks": false,
+    "paths": {
+      // 上游 package.json 的 imports 别名（`#tui-profile/*` → `./tui-profile/protocols/*`）、
+      // 借来的类型（`_vendor/platform`：只拷 .d.ts + package.json，运行时我们自己接线）、
+      // 以及 `@dsh-std/*` 的精确垫片（`_vendor/dsh-std`）。
+      "#tui-profile/*": ["./tui-profile/protocols/*"],
+      "@deepseek-ai/*": ["./_vendor/platform/@deepseek-ai/*"],
+      "@dsh-std/*": ["./_vendor/dsh-std/*"],
+      "@dsh-tui-vendor/mathjax-tex-svg": ["./_vendor/mathjax-tex-svg"],
+      // 这 4 个是上游的真 npm 依赖（本机 profile 装着）。我们只借它们的**类型**：
+      // 映射到**目录**，让各自的 package.json `types` 生效（sharp 的入口是 .d.mts）。
+      "dsh-working-activity": ["./_vendor/platform/dsh-working-activity"],
+      "dsh-working-activity/config": ["./_vendor/platform/dsh-working-activity/lib/types/config.d.ts"],
+      "dsh-working-activity/frames": ["./_vendor/platform/dsh-working-activity/lib/types/frames.d.ts"],
+      "dsh-working-activity/*": ["./_vendor/platform/dsh-working-activity/*"],
+      "sharp": ["./_vendor/platform/sharp"],
+      "sixel": ["./_vendor/platform/sixel"],
+      "lovely-mermaid": ["./_vendor/platform/lovely-mermaid/dist/index.d.ts"]
+    },
+    // 上游这几项本来就是关的（第三方 Ink 渲染器写得更松），照抄以免噪声淹没真问题
+    "noUnusedLocals": false,
+    "noUnusedParameters": false,
+    "noImplicitAny": false,
+    "noUncheckedIndexedAccess": false,
+    "exactOptionalPropertyTypes": false,
+    "noImplicitOverride": false,
+    "noFallthroughCasesInSwitch": false
+  },
+  "include": ["**/*.ts", "**/*.tsx"]
+}

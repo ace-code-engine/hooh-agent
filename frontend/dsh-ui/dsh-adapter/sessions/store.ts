@@ -1,0 +1,257 @@
+/**
+ * The session index — a local cache keyed by the backend's own change token.
+ *
+ * Deriving a session's title costs a bounded read; doing it for every session
+ * on every picker open costs that read times the history. The persistence
+ * service already hands out the exact token needed to avoid it:
+ * `listSnapshots()` returns, per session, an opaque revision that changes
+ * whenever the stored log changes. An entry whose revision still matches is
+ * reused verbatim. A changed logical revision can still reuse a summary when
+ * its physical artifact stamp matches: historical revisions also depend on
+ * other sessions, whereas these derived fields read only the located file.
+ * A session edited by another client invalidates its artifact stamp.
+ *
+ * The revision is treated as opaque, as its contract requires. It happens to
+ * be stat-derived today, but parsing it to shortcut a `stat` would couple this
+ * cache to one backend's private format and break the moment a store without
+ * per-session files is used.
+ *
+ * Two halves live in one entry because they have different lifetimes:
+ * `derived` facts come from the log and are checked against its revision or
+ * physical artifact stamp. `branch` is a local note about how this install
+ * used the session and no log change can invalidate it.
+ *
+ * Every operation is best-effort. The index is a cache: a corrupt file, a
+ * losing concurrent write, or a read-only home directory costs a re-derivation
+ * and nothing else, so nothing here throws.
+ *
+ * @module @deepseek-harness-tui/dsh-tui/sessions/store
+ */
+import { mkdirSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { DATA_DIR } from '../../utils/paths.js'
+import type { TitleSource } from './types.js'
+
+/**
+ * Bumped for cached mtime. Version 3 derivations remain readable and receive
+ * that field on their next listing; version 2 could cache incomplete reads as
+ * empty, so only its branch notes survive.
+ */
+const SCHEMA_VERSION = 4
+
+const INDEX_FILE = join(DATA_DIR, 'session-index.json')
+let loadedStamp: string | undefined
+let loadedIndex: SessionIndex | undefined
+
+function indexStamp(): string | undefined {
+  try {
+    const stats = statSync(INDEX_FILE)
+    return `${stats.dev}:${stats.ino}:${stats.size}:${stats.mtimeMs}:${stats.ctimeMs}`
+  } catch {
+    return undefined
+  }
+}
+
+/** Cheap file generation check for asynchronous listing writes. */
+export function indexFileStamp(): string | undefined {
+  return indexStamp()
+}
+
+/** Facts derived from a log at one revision. */
+export interface DerivedEntry {
+  readonly revision: string
+  /** Artifact size at this observation; append growth can retain older title evidence. */
+  readonly bytes: number
+  /** Last-write time observed with this revision, for the revision-only path. */
+  readonly modifiedAt: number | undefined
+  /** Physical file identity; a replacement invalidates append-only evidence. */
+  readonly identity: string | undefined
+  /** Optional in older indexes; certifies only the physical-file-derived summary. */
+  readonly artifactStamp?: string
+  /** Old EOF neighborhood hash, paired with the backend's append-only contract. */
+  readonly anchor: string | undefined
+  readonly title: string
+  readonly titleSource: TitleSource
+  /** False keeps the same revision eligible for another progressive attempt. */
+  readonly titleComplete: boolean
+  readonly hasPrompt: boolean
+  readonly model: string | undefined
+  readonly label: string | undefined
+}
+
+/** One session's cached record: derived facts plus this install's own notes. */
+export interface IndexEntry {
+  readonly derived: DerivedEntry | undefined
+  /** Git branch this install was on when it last used the session. */
+  readonly branch: string | undefined
+}
+
+/** The whole cache, session id → entry. */
+export type SessionIndex = Map<string, IndexEntry>
+
+/** A title source as written to disk, or undefined for anything unexpected. */
+function readTitleSource(value: unknown): TitleSource | undefined {
+  return value === 'renamed' || value === 'auto' || value === 'prompt' || value === 'fallback'
+    ? value
+    : undefined
+}
+
+/** Narrow one persisted entry; an unrecognizable record is simply absent. */
+function readEntry(value: unknown, derivedValid: boolean): IndexEntry | undefined {
+  if (value === null || typeof value !== 'object') return undefined
+  const record = value as Record<string, unknown>
+  const branch = typeof record['branch'] === 'string' ? record['branch'] : undefined
+  const raw = derivedValid ? record['derived'] : undefined
+  if (raw === null || typeof raw !== 'object') return { derived: undefined, branch }
+  const derived = raw as Record<string, unknown>
+  const revision = derived['revision']
+  const bytes = derived['bytes']
+  const modifiedAt = derived['modifiedAt']
+  const identity = derived['identity']
+  const anchor = derived['anchor']
+  const title = derived['title']
+  const titleSource = readTitleSource(derived['titleSource'])
+  const titleComplete = derived['titleComplete']
+  if (
+    typeof revision !== 'string' ||
+    typeof bytes !== 'number' ||
+    !Number.isFinite(bytes) ||
+    bytes < 0 ||
+    (modifiedAt !== undefined && (typeof modifiedAt !== 'number' || !Number.isFinite(modifiedAt))) ||
+    (identity !== undefined && typeof identity !== 'string') ||
+    (anchor !== undefined && typeof anchor !== 'string') ||
+    typeof title !== 'string' ||
+    titleSource === undefined ||
+    typeof titleComplete !== 'boolean' ||
+    typeof derived['hasPrompt'] !== 'boolean'
+  ) {
+    return { derived: undefined, branch }
+  }
+  return {
+    branch,
+    derived: {
+      revision,
+      bytes,
+      modifiedAt: typeof modifiedAt === 'number' ? modifiedAt : undefined,
+      identity: typeof identity === 'string' ? identity : undefined,
+      artifactStamp: typeof derived['artifactStamp'] === 'string' ? derived['artifactStamp'] : undefined,
+      anchor: typeof anchor === 'string' ? anchor : undefined,
+      title,
+      titleSource,
+      titleComplete,
+      hasPrompt: derived['hasPrompt'] === true,
+      model: typeof derived['model'] === 'string' ? derived['model'] : undefined,
+      label: typeof derived['label'] === 'string' ? derived['label'] : undefined,
+    },
+  }
+}
+
+/**
+ * Load the cache.
+ * @returns The parsed index; version 3 derivations are upgraded lazily and
+ *   version 2 retains branch notes only.
+ */
+export function readIndex(): SessionIndex {
+  const stamp = indexStamp()
+  if (loadedIndex !== undefined && loadedStamp === stamp) return new Map(loadedIndex)
+  const index: SessionIndex = new Map()
+  let parsed: unknown
+  try {
+    parsed = JSON.parse(readFileSync(INDEX_FILE, 'utf8'))
+  } catch {
+    loadedStamp = stamp
+    loadedIndex = index
+    return new Map(index)
+  }
+  if (parsed === null || typeof parsed !== 'object') {
+    loadedStamp = stamp
+    loadedIndex = index
+    return new Map(index)
+  }
+  const file = parsed as Record<string, unknown>
+  if (file['version'] !== SCHEMA_VERSION && file['version'] !== 3 && file['version'] !== 2) {
+    loadedStamp = stamp
+    loadedIndex = index
+    return new Map(index)
+  }
+  const entries = file['entries']
+  if (entries === null || typeof entries !== 'object') {
+    loadedStamp = stamp
+    loadedIndex = index
+    return new Map(index)
+  }
+  for (const [id, value] of Object.entries(entries as Record<string, unknown>)) {
+    const entry = readEntry(value, file['version'] === SCHEMA_VERSION || file['version'] === 3)
+    if (entry !== undefined) index.set(id, entry)
+  }
+  loadedStamp = stamp
+  loadedIndex = index
+  return new Map(index)
+}
+
+/**
+ * Persist the cache, atomically.
+ *
+ * The write goes to a per-process temporary name and is renamed into place, so
+ * a reader never observes a half-written file and a crash never leaves one.
+ * A concurrent writer may win the rename; the loser's derivations are simply
+ * recomputed next time.
+ *
+ * @param index - The index to store. Stable id order ignores scan scheduling.
+ */
+export function writeIndex(index: SessionIndex): void {
+  const entries: Record<string, unknown> = {}
+  for (const [id, entry] of [...index].sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)) {
+    entries[id] = {
+      ...(entry.derived === undefined ? {} : { derived: entry.derived }),
+      ...(entry.branch === undefined ? {} : { branch: entry.branch }),
+    }
+  }
+  const temporary = `${INDEX_FILE}.${process.pid}.tmp`
+  try {
+    // 0700/0600: DATA_DIR also hosts history.jsonl / mouse-debug.log (0600
+    // files), so directory creation and the index itself (session titles
+    // quote the user's first input; branch names) must match that privacy
+    // posture. Creation only — pre-existing paths keep their current mode.
+    mkdirSync(DATA_DIR, { recursive: true, mode: 0o700 })
+    writeFileSync(temporary, JSON.stringify({ version: SCHEMA_VERSION, entries }), { mode: 0o600 })
+    renameSync(temporary, INDEX_FILE)
+    loadedStamp = indexStamp()
+    loadedIndex = new Map(index)
+  } catch {
+    try {
+      rmSync(temporary, { force: true })
+    } catch {
+      // Nothing left to do; the cache stays as it was.
+    }
+  }
+}
+
+/**
+ * Record the git branch this install is on for a session.
+ *
+ * Kept here rather than in the log because it is not a fact about the session,
+ * it is a fact about how this machine used it — the same reason it is reported
+ * as "branch when last used" and omitted entirely for sessions that predate
+ * the note. Inventing a branch for them would be worse than showing none.
+ *
+ * @param sessionId - Session being used.
+ * @param branch - Current branch, or undefined to leave any note untouched.
+ */
+export function noteBranch(sessionId: string, branch: string | undefined): void {
+  if (branch === undefined || branch.length === 0) return
+  const index = readIndex()
+  const existing = index.get(sessionId)
+  if (existing?.branch === branch) return
+  index.set(sessionId, { derived: existing?.derived, branch })
+  writeIndex(index)
+}
+
+/*
+ * Deliberately absent: a "forget this entry" call for the picker's delete, and
+ * a "patch this title" call for its rename. Listing prunes entries whose
+ * session no longer exists, and a renamed log has a new revision whose
+ * re-derivation reads the very title event the rename just appended — both
+ * paths already converge on the right answer, so a second mechanism to reach
+ * it could only disagree with the first.
+ */

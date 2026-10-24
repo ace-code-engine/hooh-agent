@@ -222,6 +222,18 @@ export function Picker({
                   isFocused={index === focusIndex}
                   isSelected={!multi && checkedSet.has(item.key)}
                   color={color}
+                  // 鼠标：**移到哪一项，光标就跟到哪一项**（与键盘 ↑↓ 是同一个 focus 状态，
+                  // 两种输入不打架）；**点一项**在单选下等同回车确认，多选下等同 Tab 勾选
+                  // （多选不支持"点一下就提交"—— 那会把勾选列表点没了）。
+                  onHover={() => setFocus(index)}
+                  onClick={() => {
+                    setFocus(index);
+                    if (multi) {
+                      setChecked((cs) => toggleKey(cs, item.key));
+                      return;
+                    }
+                    onConfirm({ key: item.key, keys: [item.key], multi: false });
+                  }}
                 />
               </Box>
             );

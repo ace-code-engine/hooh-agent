@@ -12,7 +12,8 @@ import { Box, Text } from '../../vendor/dsh-ink/kernel.js';
 import React from 'react';
 
 import { gstr } from '../render/glyphs.js';
-import { displayWidth } from '../render/text.js';
+import { displayWidth, truncateWidth } from '../render/text.js';
+import { usePageInset } from './layout/PageMargin.js';
 import type { Meta } from '../state/store.js';
 import type { StatusSegmentWire } from '../protocol/types.js';
 
@@ -135,19 +136,43 @@ export function StatusLine({ meta, busy, color, width, t }: StatusLineProps): Re
   // 前端自己再算一份就会出现"CLI 说 92%、前端说 40%"这种两边都对不上的局面。
   // 引擎还没发过 `status` 时（界面挂载早于第一个事件）才退回自算 —— 那一行不该是空的。
   const fromEngine = segmentsFromEngine(meta.statusSegments ?? [], meta);
-  const segs = fitSegments(
-    fromEngine.length ? fromEngine : buildSegments(meta, busy, t),
-    Math.max(10, width),
-  );
+  const all = fromEngine.length ? fromEngine : buildSegments(meta, busy, t);
+
+  // 左右分组（照 dsh-TUI 的底栏）：右边的 `context` 是"这轮还能写多少"的答案，
+  // 位置固定才好扫；其余信息留在左边按优先级丢。
+  const ctx = all.find((s) => s.name === 'context');
+  const rest = all.filter((s) => s.name !== 'context');
+  const right = ctx ? ` ${ctx.text.trim()} ` : '';
+
+  // **整宽反显条**：反显用的是终端自己的前后景（不抢主题），规范 §3 把"反显"列进
+  // 五种层级手段、§1.5 禁的是铺底色 —— 两者不是一回事。
+  // 出血：结构条直通终端左右边缘，所以自己把页边距补回来（与 `<Rule>` 同一条口径）。
+  const inset = usePageInset();
+  const total = width + 2 * inset.x;
+  const rightW = displayWidth(right);
+  const room = Math.max(4, total - rightW - 2);
+  let left = fitSegments(rest, room);
+  let used = displayWidth(left.map((s) => s.text).join(' · '));
+  if (used > room && left.length > 0) {
+    // `fitSegments` 在只剩一段时不再丢弃（它保证"不静默少东西"），所以那一段可能仍然
+    // 超长。这里按列截断它 —— 右端的上下文是"这轮还能写多少"的答案，不许被挤掉。
+    const head = left[0]!;
+    left = [{ ...head, text: truncateWidth(head.text, room) }];
+    used = displayWidth(left[0]!.text);
+  }
+  const gap = Math.max(1, total - used - rightW - 1);
+
   return (
-    <Box>
-      <Text color={color('dim')}> </Text>
-      {segs.map((s, i) => (
-        <Text key={s.name}>
-          {i > 0 ? <Text color={color('border')}>{gstr(' · ')}</Text> : null}
+    <Box width={total} marginLeft={-inset.x}>
+      <Text inverse> </Text>
+      {left.map((s, i) => (
+        <Text key={s.name} inverse>
+          {i > 0 ? gstr(' · ') : null}
           <Text color={color(s.token ?? 'text')}>{s.text}</Text>
         </Text>
       ))}
+      <Text inverse>{' '.repeat(gap)}</Text>
+      {ctx ? <Text inverse color={color(ctx.token ?? 'text')}>{right}</Text> : null}
     </Box>
   );
 }

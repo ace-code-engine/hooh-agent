@@ -15,6 +15,7 @@ import type { ReactElement } from 'react';
 import { describe, expect, it } from 'vitest';
 
 import { Transcript } from '../src/components/Transcript.js';
+import { Input } from '../src/components/Input.js';
 import {
   PAGE_INSET,
   PageMargin,
@@ -88,6 +89,41 @@ describe('★不变量：内容行宽 = 终端宽 - 两侧内缩', () => {
       for (const line of body) expect(line.startsWith(' '.repeat(PAGE_INSET.x))).toBe(true);
     });
   }
+});
+
+describe('输入区的上下线：出血整宽（与 Python 侧同一条口径）', () => {
+  const noop = (): boolean => true;
+
+  it('两条线从第 0 列直通终端右缘（内容宽 76 + 两侧内缩 2×2 = 80）', () => {
+    const W = 80;
+    const out = renderLines(
+      <PageMargin width={W}>
+        <Input t={(k) => k} color={noColor} onSubmit={noop} busy={false}
+               width={contentColumns(W)} />
+      </PageMargin>,
+      W,
+    );
+    const rules = out.lines.filter((l) => l.trim().length > 0
+      && l.trim().split('').every((c) => c === '-'));
+    expect(rules).toHaveLength(2);                       // 输入行上下各一条
+    for (const r of rules) {
+      expect(r[0]).toBe('-');                            // 没有页边距缩进 = 真的出血了
+      expect(displayWidth(r)).toBe(W);                   // 直通终端左右边缘
+    }
+  });
+
+  it('输入行本身留在内容列里（线出血、正文不越界）', () => {
+    const W = 80;
+    const out = renderLines(
+      <PageMargin width={W}>
+        <Input t={(k) => k} color={noColor} onSubmit={noop} busy={false}
+               width={contentColumns(W)} />
+      </PageMargin>,
+      W,
+    );
+    const inputLine = out.lines.find((l) => l.includes('❯'))!;
+    expect(displayWidth(inputLine)).toBeLessThanOrEqual(W - PAGE_INSET.x);
+  });
 });
 
 describe('结构线：版面级出血，转录内部的线不出血', () => {

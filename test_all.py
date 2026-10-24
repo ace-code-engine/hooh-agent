@@ -43,9 +43,26 @@ except Exception:  # noqa: BLE001 —— 加固失败也要能跑
 
 # 测试临时目录统一放在工作区（部分受限环境禁止写系统临时区 / mkdtemp 目录）
 import uuid  # noqa: E402
+import tempfile  # noqa: E402
 
 TEST_TMP = FOLDER / ".test_tmp"
 TEST_TMP.mkdir(exist_ok=True)
+
+# 但**反过来的受限也有**：本机（Windows）工作区目录的权限只给了"建文件"，
+# 没给"建子目录"（实测 `G:\AI_Project\ace\.test_tmp` 上沙箱身份只有
+# Write/Delete —— 目录意义上的 Write 是 FILE_ADD_FILE，建子目录要的是
+# AppendData/FILE_ADD_SUBDIRECTORY）。那样 `mktemp()` 必然 PermissionError，
+# 而它跑在 import 期 —— **一行测试都执行不到**就整个退出（实测）。
+# 所以先探一次：工作区建不出子目录就退到系统临时区，并在 --keep-tmp 之外
+# 明确打印一行说明，免得"测试换了地方"变成看不见的行为。
+try:
+    _probe = TEST_TMP / f"probe_{uuid.uuid4().hex[:8]}"
+    _probe.mkdir()
+    _probe.rmdir()
+except OSError:
+    TEST_TMP = Path(tempfile.gettempdir()) / "ace_test_tmp"
+    TEST_TMP.mkdir(parents=True, exist_ok=True)
+    print(f"  ⚠ 工作区建不出子目录，临时目录改用 {TEST_TMP}（受限 ACL/沙箱环境）")
 
 # H-26：仓库自己的 `.ace_sessions/` 是**用户真实会话历史**的目录。测试里那些
 # `ai_code.py` 子进程此前只给了 cwd、没给 `--project-root`，于是把测试会话写了进去
@@ -81,6 +98,26 @@ def mktemp(_name: str = "") -> Path:
     d.mkdir(parents=True, exist_ok=True)
     _TMP_MADE.append(d)
     return d
+
+
+def mktemp_outside(_name: str = "") -> Path:
+    """仓库**之外**的临时目录（系统临时区）。
+
+    为什么必须单独有一个：有一批用例的前提就是"这片目录不在当前 git 仓库里" ——
+    `[83]` 的"非 git 仓库建 worktree → 如实声明"直接依赖它，`[83]` 的"worktree 根在
+    项目根**之外**"也是。`mktemp()` 建在 `.test_tmp` 下（**在仓库里**，`git rev-parse`
+    沿父目录一路向上会命中本仓库），拿它当"非 git 目录"用，用例会静默变成"在真仓库里
+    建 worktree" —— 实测踩过：`/workspace new T2 --worktree wt` 真的建出了
+    `G:\\AI_Project\\ace\\wt`，而断言要的是"如实声明不是 git 仓库"。
+
+    仍然走"只建不收"的反面（H-23）：登记进 `_TMP_MADE`，退出时收掉。
+    实现刻意用**普通 `mkdir`** 而不是 `tempfile.mkdtemp()`：后者在 Windows 上按私有
+    DACL 建目录，受限环境里连它自己都写不进去（见本文件第 44 行那条规矩）。
+    """
+    base = Path(tempfile.gettempdir()) / f"ace_out_{uuid.uuid4().hex[:8]}"
+    base.mkdir(parents=True, exist_ok=True)
+    _TMP_MADE.append(base)
+    return base
 
 
 def _cleanup_tmp() -> None:
@@ -931,6 +968,25 @@ if _want("8"):
     check("原生纯文本包装为最终回复",
           rep.startswith("<INTERNAL>") and "answer.\n完成" in rep, rep)
 
+    # —— 模型**完全没走协议**时把它当最终回答（实测 deepseek-v4-flash 问「你好」就回纯文本）——
+    # 回归现场：此前这段原样进执行层 ⇒ `_stage_parse` 只认标签 ⇒ 每轮
+    # `FORMAT_ERROR: 缺少 <EXTERNAL> 标签`，用户看到 4 张错误卡、白烧 4 轮（12 秒）才拿到回答。
+    from ai_code import _as_final_reply as _afr  # noqa: E402
+    from execution_layer import AgentOutputParser as _AOP  # noqa: E402
+    _plain = "你好。工作区是 G:\\AI_Project\\ace，本次会话只读。"
+    _wrapped = _afr(_plain)
+    _parsed = _AOP.parse(_wrapped)
+    check("★纯文本回答被包装成协议（不再是 FORMAT_ERROR）",
+          _parsed.get("error") == "" and _plain[:8] in str(_parsed.get("final_reply") or ""),
+          _parsed)
+    check("★只写了一半的协议仍然如实报错（那是真错，不该被悄悄咽掉）",
+          "缺少 <EXTERNAL> 标签" in _AOP.parse(_afr("<INTERNAL>想了</INTERNAL>")).get("error", ""),
+          _AOP.parse(_afr("<INTERNAL>想了</INTERNAL>")))
+    check("★完整协议原样放行（不重复包装）",
+          _afr("<INTERNAL>x</INTERNAL>\n<EXTERNAL>\nanswer.\ny\n</EXTERNAL>").count("<INTERNAL>") == 1, "")
+    check("★空白输出仍按错处理（不包装成一条空回答）",
+          _AOP.parse(_afr("   ")).get("error") != "", "")
+
     # —— 反幻觉：声称完成 vs 意图陈述 ——
     # 真实事故：Qwen2.5-coder:7b 回了"文件已创建在桌面上"，一个工具都没调，
     # CLI 却打了绿色的"✓ 完成（1 轮）"。这里锁住"完成态措辞"与"意图/提问措辞"的边界，
@@ -1705,10 +1761,18 @@ if _want("9"):
         check("首屏有「当前会话」面板与标题", any("当前会话" in x for x in _lines), _lines[:6])
         check("首屏面板里写着模型/目录/历史三项",
               all(any(k in x for x in _lines) for k in ("模型", "目录", "历史")),
-              [x for x in _lines if "│" in x][:4])
-        _boxlines = [x for x in _lines if x[:1] in ("╭", "│", "╰")]
-        check("首屏面板每行等宽（框不会歪）",
-              {_dw9(x) for x in _boxlines} == {_lw}, sorted({_dw9(x) for x in _boxlines}))
+              [x for x in _lines if "模型" in x][:2])
+        # 首屏**不用边框**：`docs/TUI-SWISS-SPEC.md` §1.2 写的是"分区只用整宽细线"，
+        # §五 禁止清单第一条就是"边框"。原来那两个圆角框是这份规范里唯一没落地的条款
+        # （dsh-TUI 的首屏/聊天头部同为零边框 —— 看它的截图确认过）。两条一起钉：
+        # 没有框线字符 + 每一条整宽细线恰好等于面板宽。
+        check("首屏不用边框（规范 §1.2：分区靠整宽细线，不靠框）",
+              not any(x[:1] in ("╭", "│", "╰", "┌", "└") for x in _lines),
+              [x[:30] for x in _lines if x[:1] in ("╭", "│", "╰")])
+        _secs = [x for x in _lines if "──" in x]
+        check("首屏的整宽细线都恰好等于面板宽（细线不会歪）",
+              bool(_secs) and {_dw9(x) for x in _secs} == {_lw},
+              sorted({_dw9(x) for x in _secs}))
         check("首屏整屏不超宽（ANSI 不计入列宽）",
               all(_dw9(x) <= _lw for x in _lines),
               [(x[:40], _dw9(x)) for x in _lines if _dw9(x) > _lw][:3])
@@ -6085,6 +6149,161 @@ if _want("33"):
           and _theme_copy.current_theme() == "dark",
           _theme_copy.tc("success"))
 
+    # —— 色值翻译层（三种消费者共用的那一处）——
+    # 上一版的问题是同一件事有三个格式（Rich 名 / 十六进制 / 已烘好的 SGR 串），
+    # 于是"改一次色要改三个地方、必然漏一个"。现在只有 sgr() 认格式。
+    check("sgr: 十六进制 → 真彩 SGR",
+          _theme.sgr("#7DA1DE") == "38;2;125;161;222", _theme.sgr("#7DA1DE"))
+    check("sgr: #RGB 缩写", _theme.sgr("#fff") == "38;2;255;255;255", _theme.sgr("#fff"))
+    check("sgr: rgb() 写法", _theme.sgr("rgb(1,2,3)") == "38;2;1;2;3", _theme.sgr("rgb(1,2,3)"))
+    check("sgr: ansi256(n)", _theme.sgr("ansi256(173)") == "38;5;173", _theme.sgr("ansi256(173)"))
+    check("sgr: ansi:blueBright（dsh-TUI 的写法）", _theme.sgr("ansi:blueBright") == "94",
+          _theme.sgr("ansi:blueBright"))
+    check("sgr: Rich 色名", _theme.sgr("ansibrightblack") == "90", _theme.sgr("ansibrightblack"))
+    check("sgr: 已是 SGR 参数的原样放行", _theme.sgr("38;5;245") == "38;5;245",
+          _theme.sgr("38;5;245"))
+    check("sgr: bg:#RRGGBB → 背景真彩", _theme.sgr("bg:#242B3A") == "48;2;36;43;58",
+          _theme.sgr("bg:#242B3A"))
+    check("sgr: 认不出来返回空串（不上色，不抛异常）",
+          _theme.sgr("nonsense") == "" and _theme.sgr("") == "" and _theme.sgr(None) == "")
+
+    # —— 雾蓝色板（照 dsh-TUI 的 Gentle Mist Blue 家族）——
+    check("雾蓝三套齐备",
+          {"mist-dark", "mist-light", "mist-ansi"} <= set(_theme.PALETTES), "")
+    check("雾蓝 dark/light 同 token 集",
+          set(_theme.MIST_DARK) == set(_theme.MIST_LIGHT), "")
+    check("雾蓝色板含 17 个语义 token + 6 个传统短色名",
+          set(_theme.SEMANTIC_TOKENS) <= set(_theme.MIST_DARK)
+          and set(_theme.LEGACY_COLOR_NAMES) <= set(_theme.MIST_DARK), "")
+    check("旧的两套值一个字没动（dark error 仍是 ansired / accent 仍是 ansiyellow）",
+          _theme.PALETTES["dark"] is _theme.THEMES["dark"]
+          and _theme.THEMES["dark"]["error"] == "ansired"
+          and _theme.THEMES["dark"]["accent"] == "ansiyellow", "")
+
+    # —— --color：选板 / 覆盖 / auto / 认不出来的名字 ——
+    check("apply_color(色板名) 切到雾蓝",
+          _theme.apply_color("mist-dark") == "mist-dark"
+          and _theme.sgr_for("accent") == "38;2;125;161;222", _theme.sgr_for("accent"))
+    check("apply_color(覆盖式) 只改写出来的 token",
+          _theme.apply_color("accent=#FF9EC7") == "mist-dark"
+          and _theme.sgr_for("accent") == "38;2;255;158;199"
+          and _theme.sgr_for("error") == "38;2;218;138;147", _theme.sgr_for("accent"))
+    check("apply_color 覆盖里坏值跳过、好值照常生效",
+          _theme.apply_color("nope=zzz,accent=#FFFFFF") == "mist-dark"
+          and _theme.sgr_for("accent") == "38;2;255;255;255", _theme.sgr_for("accent"))
+    check("apply_color(全坏) 返回空串（调用方据此报错）",
+          _theme.apply_color("nope=zzz") == "", _theme.apply_color("nope=zzz"))
+    check("apply_color(未知色板名) 返回空串",
+          _theme.apply_color("no-such-palette") == "", "")
+    check("apply_color(auto) 按终端背景解析成雾蓝的深/浅",
+          _theme.apply_color("auto") in ("mist-dark", "mist-light"),
+          _theme.apply_color("auto"))
+    _theme.clear_overrides()
+
+    # —— 自定义主题文件（~/.ace/themes/<name>.json，形式照 dsh-TUI）——
+    _tdir2 = mktemp() / "themes"
+    _tdir2.mkdir(parents=True, exist_ok=True)
+    (_tdir2 / "sakura.json").write_text(
+        '{"name": "sakura", "displayName": "樱花粉", "base": "mist-dark",'
+        ' "colors": {"accent": "#FF9EC7", "nope": "#123456"}}', encoding="utf-8")
+    (_tdir2 / "broken.json").write_text("{ not json", encoding="utf-8")
+    _real_dir = _theme.CUSTOM_THEME_DIR
+    _theme.CUSTOM_THEME_DIR = _tdir2
+    _theme._CUSTOM_CACHE.clear()
+    try:
+        check("自定义主题能加载并叠加到 base 上",
+              _theme.apply_color("sakura") == "sakura"
+              and _theme.sgr_for("accent") == "38;2;255;158;199"
+              and _theme.sgr_for("error") == "38;2;218;138;147", _theme.sgr_for("accent"))
+        check("自定义主题里的未知键跳过", "nope" not in _theme._palette("sakura"), "")
+        check("坏 JSON 的主题文件不抛异常、也不挡住启动",
+              _theme.apply_color("broken") == "" and _theme.set_theme("broken") is None, "")
+        check("主题名挡住路径穿越", _theme._safe_theme_name("../evil") is False
+              and _theme._safe_theme_name("ok-name_1") is True, "")
+        check("list_theme_names 里有内置与自定义",
+              "mist-dark" in _theme.list_theme_names()
+              and "sakura" in _theme.list_theme_names(), "")
+    finally:
+        _theme.CUSTOM_THEME_DIR = _real_dir
+        _theme._CUSTOM_CACHE.clear()
+        _theme.clear_overrides()
+        _theme.set_theme(None)
+
+    # —— c() 必须真的跟着色板走（否则"抄了配色但界面没变"）——
+    _saved_color = ai_code.USE_COLOR
+    ai_code.USE_COLOR = True
+    _theme.set_theme("dark")
+    _dark_bytes = ai_code.c("cyan", "x")
+    _theme.set_theme("mist-dark")
+    _mist_bytes = ai_code.c("cyan", "x")
+    _theme.set_theme("dark")
+    ai_code.USE_COLOR = _saved_color
+    check("c(dark) 与改造前逐字节一致（\\033[36m…\\033[0m）",
+          _dark_bytes == "\033[36mx\033[0m", repr(_dark_bytes))
+    check("c(mist) 走真彩（--color 真的改到画面）",
+          _mist_bytes == "\033[38;2;86;182;194mx\033[0m", repr(_mist_bytes))
+    check("c() 未知色名仍降级为不上色", ai_code.c("no-such-color", "x") == "x"
+          or ai_code.c("no-such-color", "x") == "\033[39mx\033[0m",
+          repr(ai_code.c("no-such-color", "x")))
+    _theme.set_theme(None)
+
+    # —— 终端外壳（底栏 / 补全菜单 / 全屏 / 选择器）——
+    # 这三处此前各自内联一份十六进制：换色要改三个地方、必然漏两个。现在共用一个
+    # `ptk_styles()`，且 dark/light 的值与改造前**逐字相同**（缺省不换色）。
+    _today = {
+        "prompt": "ansimagenta bold", "continuation": "ansibrightblack",
+        "footer": "bg:#2b2b3c #aaaaaa", "footer-ro": "bg:#2b2b3c #5fa8ff",
+        "footer-w": "bg:#2b2b3c #f6c453", "footer-f": "bg:#2b2b3c #ff6b6b",
+        "footer-goal": "bg:#2b2b3c #7ecb8f",
+        "completion-menu.completion.current": "bg:#5f3dc4 #ffffff",
+        "fs.header": "bg:#2b2b3c #ffffff bold", "fs.scroll": "bg:#2b2b3c #9cdcfe",
+        "frame.label": "bold #f6c453", "sel.row.sel": "bg:#5f3dc4 #ffffff",
+        "sel.empty": "#666666 italic", "sel.preview": "#9cdcfe",
+    }
+    _st_dark, _st_light = _theme.ptk_styles("dark"), _theme.ptk_styles("light")
+    check("外壳样式：dark 与改造前逐字相同（缺省不换色）",
+          all(_st_dark.get(k) == v for k, v in _today.items())
+          and len(_st_dark) == len(_st_light), len(_st_dark))
+    check("外壳样式：light 与 dark 共用一份（照旧，不顺手改浅色终端的观感）",
+          _st_light == _st_dark, "")
+    _st_mist = _theme.ptk_styles("mist-dark")
+    check("外壳样式：雾蓝跟着色板走（底栏底=user_bg、可写=perm_write）",
+          _st_mist["footer"].startswith("bg:#242B3A ")
+          and _st_mist["footer-w"].endswith(_theme.MIST_DARK["perm_write"])
+          and _st_mist != _st_dark, _st_mist["footer"])
+    check("外壳样式：三组键齐备（底栏 / 全屏 / 选择器）",
+          all(k in _st_mist for k in ("footer", "completion-menu.completion",
+                                      "fs.header", "frame.border", "sel.row")), "")
+    check("外壳样式：16 色板不会把 SGR 参数当颜色写进去",
+          "bg:40" not in " ".join(_theme.ptk_styles("mist-ansi").values()), "")
+    # 这条会真的复现过 bug：prompt_toolkit 的色名白名单**不含 `ansibrightwhite`**
+    # （`ansibrightblack`/`ansibrightblue` 都在），而雾蓝 16 色板的 text 正是它 ——
+    # 修之前 `--color mist-ansi` 一开经典 REPL 就 ValueError。
+    try:
+        from prompt_toolkit.styles import Style as _Style33  # noqa: E402
+    except ImportError:
+        _Style33 = None
+    if _Style33 is not None:
+        _bad_style = []
+        for _n in _theme.list_theme_names():
+            if _n == "auto":
+                continue
+            try:
+                _Style33.from_dict(_theme.ptk_styles(_n))
+            except Exception as _e:  # noqa: BLE001
+                _bad_style.append((_n, str(_e)))
+        check("外壳样式：每个色板都能被 prompt_toolkit 解析（色名白名单）",
+              not _bad_style, _bad_style[:2])
+    else:
+        skip("外壳样式：每个色板都能被 prompt_toolkit 解析", "未安装 prompt_toolkit")
+    # 源码级：三处内联样式字典已经清掉（防回退到"各存一份"）
+    _src33 = "\n".join(
+        Path(_f).read_text(encoding="utf-8")
+        for _f in ("ai_code.py", "ui/ace_fullscreen.py", "ui/ace_selector.py"))
+    check("外壳样式：三处调用点不再内联十六进制（都走 ptk_styles）",
+          _src33.count("Style.from_dict(ace_theme.ptk_styles())") == 3
+          and "bg:#5f3dc4" not in _src33, _src33.count("ptk_styles()"))
+
     # ============================================================
     # [34] 工具卡片 —— ace_cards：三态标记 / 折叠 / 整卡渲染
     # ============================================================
@@ -6158,9 +6377,14 @@ if _want("33"):
     _glyphs33 |= {_ch33 for _f33 in _w33.BLOCK_FIGURE.values() for _r33 in _f33
                   for _ch33 in _r33 if _ch33.strip()}
     _glyphs33.add(_w33.THINK_MARK)
-    # spinner 的字形表是模块私有的（`_GLYPHS`）—— 这里读它正是为了"**画得出来的都得有替身**"
+    # spinner 的字形表是模块私有的（`_GLYPHS`）—— 这里读它正是为了"**画得出来的都得有替身**"。
+    # **逐字符**展开：推理阶段那串噪声填充是**多格**帧（`··███`），
+    # 整帧当一个"字形"去查替身必然全缺（`··███` 不在表里，`·`/`█` 才在）。
     for _frames33, _iv33 in _sp33._GLYPHS.values():
-        _glyphs33 |= set(_frames33)
+        _glyphs33 |= {_ch33 for _f33 in _frames33 for _ch33 in _f33}
+    # 开屏那个噪声圆盘的明暗 ramp 同理（它画在首屏，cp936 上同样要有替身）
+    from ui import ace_noise_circle as _nc33  # noqa: E402
+    _glyphs33 |= {_ch33 for _ch33 in _nc33.RAMP if _ch33.strip()}
     _missing33 = sorted(_g for _g in _glyphs33 if _g and _g not in _af33)
     check("界面上会画的字形都在 ASCII_FALLBACK 里（缺失 ⇒ cp936 上显示成 `?` 且不报错）",
           not _missing33, f"缺替身: {_missing33}")
@@ -10931,9 +11155,67 @@ if _want("59"):
           == [_sp59.frames_for("tool_running")[i] for i in (0, 1, 2)], "")
     check("指示器：认不出的阶段退回默认（不抛）",
           _sp59.frames_for("nope") == _sp59.frames_for(_sp59.DEFAULT_PHASE), "")
-    check("指示器：无动效时固定首帧（不动也能看出状态）",
-          _sp59.frame_at("reasoning", 5.0, reduced_motion=True)
-          == _sp59.frames_for("reasoning")[0], "")
+    check("指示器：无动效时固定一个**非空**字形（不动也能看出状态）",
+          _sp59.frame_at("reasoning", 5.0, reduced_motion=True) == "█" * _sp59.NOISE_CELLS
+          and _sp59.frame_at("tool_running", 5.0, reduced_motion=True)
+          == _sp59.frames_for("tool_running")[0], "")
+
+    # —— 噪声填充（照 `circle-noise-fill.html` 缩到 5 格；用户给的参考件）——
+    _nf59 = _sp59.noise_frames()
+    check("★噪声填充：帧表就是 `_GLYPHS['reasoning']` 的那串（生成器与字面量不许漂 —— "
+          "前端一致性测试按字面量解析）",
+          tuple(_nf59) == tuple(_sp59.frames_for("reasoning")), _nf59)
+    check("★噪声填充：空 → 满 → **倒放**回空（后半段是前半段的镜像）",
+          _nf59[0] == "·" * _sp59.NOISE_CELLS
+          and _nf59[(len(_nf59) - 1) // 2] == "█" * _sp59.NOISE_CELLS
+          and _nf59[len(_nf59) - 1] == "·" * _sp59.NOISE_CELLS
+          and all(_nf59[len(_nf59) - 1 - i] == _nf59[i] for i in range(len(_nf59))),
+          _nf59)
+    check("★噪声填充：纯函数（同参数逐帧相同）+ 每帧等宽",
+          _sp59.noise_frames() == _nf59
+          and len({len(x) for x in _nf59}) == 1, _nf59)
+    check("★噪声填充：填满是**成团**的（相邻格先亮，不是隔一格跳）",
+          # 第 3 帧只有右侧连着两格亮 —— 随机出生顺序会长成 `█·█··` 这种散点
+          _nf59[2] in ("···██", "██···"), _nf59[2])
+
+    # —— 噪声圆盘（真·图形版：`circle-noise-fill.html` 的二维字符格移植）——
+    from ui import ace_noise_circle as _nc59  # noqa: E402
+    _d59 = _nc59.disc_frames(steps=4, reverse=True)
+    _lit59 = [sum(1 for _row in _f for _ch in _row if _ch != " ") for _f in _d59]
+    _peak59 = (len(_d59) - 1) // 2
+    check("★圆盘：帧序列是**多行图形**（不是一行进度条）",
+          len(_d59[0]) == _nc59.NOISE_ROWS and len(_d59[0][0]) == _nc59.NOISE_COLS,
+          (len(_d59[0]), len(_d59[0][0])))
+    check("★圆盘：正向填满、中间是满盘、倒放回空（已填格数对称）",
+          _lit59[_peak59] == max(_lit59) and _lit59[0] == _lit59[-1]
+          and _lit59 == _lit59[::-1], _lit59)
+    check("★圆盘：满盘时**四角为空**（是圆不是方）",
+          all(_d59[_peak59][j][i] == " "
+              for j, i in ((0, 0), (0, -1), (-1, 0), (-1, -1))), "")
+    check("★圆盘：纯函数（同参数逐帧相同）+ 尺寸一致",
+          _nc59.disc_frames(steps=4, reverse=True) == _d59
+          and len({(len(_f), len(_f[0])) for _f in _d59}) == 1, "")
+    check("★圆盘：只画 ramp 里的字形（没有意外字符）",
+          {_ch for _f in _d59 for _row in _f for _ch in _row if _ch != " "}
+          <= set(_nc59.RAMP), "")
+
+    # —— ace 的 OpenAI 兼容端点（`docs/design/DSH-TUI-BRIDGE.md`：dsh-TUI 的 UI 跑 ace 的引擎）——
+    from tools import ace_openai_proxy as _px59  # noqa: E402
+    _comp59 = _px59._completion("ace", "你好")
+    check("★端点：返回体是 OpenAI 的形状（choices/message/content/finish_reason）",
+          _comp59["object"] == "chat.completion"
+          and _comp59["choices"][0]["message"]["content"] == "你好"
+          and _comp59["choices"][0]["finish_reason"] == "stop", _comp59)
+    _sess59 = object.__new__(_px59.AceSession)
+    _sess59._seen_users = 0
+    check("★端点：只喂**新出现**的用户消息（ace 自己记着上下文，不重放历史）",
+          _sess59.new_user_texts([{"role": "user", "content": "一"}]) == ["一"]
+          and _sess59.new_user_texts([{"role": "user", "content": "一"},
+                                      {"role": "assistant", "content": "答"},
+                                      {"role": "user", "content": "二"}]) == ["二"], "")
+    check("★端点：同一段历史被重发时不回空回答（宁可让 ace 再答一遍）",
+          _sess59.new_user_texts([{"role": "user", "content": "一"},
+                                  {"role": "user", "content": "二"}]) == ["二"], "")
 
     # —— 卡住程度与颜色过渡 ——
     check("卡住程度：阈值内为 0，之后递增，再过一倍时长到满",
@@ -11432,6 +11714,11 @@ if _want("61"):
     _demo61 = (FOLDER / "demo" / "record_demo.py").read_text(encoding="utf-8")
     _m61 = _re61.search(r'_SPINNER_GLYPHS = "([^"]+)"', _demo61)
     _known61 = set(_m61.group(1)) if _m61 else set()
+    # 推理阶段那串是**多格**帧（噪声填充），登记在 `_NOISE_FRAMES` 里而不是单字形表 ——
+    # 两边都要读，否则这条守卫会把"登记了但登记在另一张表"误报成没同步。
+    _mnoise61 = _re61.search(r"_NOISE_FRAMES = \(([^)]*)\)", _demo61)
+    if _mnoise61:
+        _known61 |= set(_re61.findall(r'"([^"]*)"', _mnoise61.group(1)))
     _all_frames61 = set()
     for _ph in _sp61.PHASES:
         _all_frames61.update(_sp61.frames_for(_ph))
@@ -11923,7 +12210,9 @@ if _want("63"):
     # `mode=0o700` 建目录，在受限环境里那个目录**连自己都写不进去**（实测
     # `mkdtemp()` 之后 `mkdir('plain')` / `mkdir('.guardian')` / `chmod` 全部 WinError 5），
     # 于是 `Guardian.__init__` 在 `AgentCLI(...)` 构造时就炸掉整个全量运行。
-    # 这正是本文件第 44 行写下的规矩，[63] 此前是唯一的例外。
+    # 这正是本文件第 44 行写下的规矩。[63] 曾经是唯一例外；2026-10 复查时
+    # [81]/[83]/[89] 三段还留着 9 处 `tempfile.mkdtemp()`，一并换成 `mktemp()`
+    # —— 换掉还顺手补上了 H-23 的清理（mkdtemp 建的目录此前没人收）。
     import ai_code as _ai63  # noqa: E402
     _ai63.CONFIG_PATH = mktemp() / "cfg63.json"
 
@@ -17433,7 +17722,7 @@ if _want("81"):
     from core.ace_ledgers import RuleProposal as _RP81  # noqa: E402
     from core import ace_rules as _AR81  # noqa: E402
 
-    _root81 = Path(tempfile.mkdtemp())
+    _root81 = mktemp_outside()
     _cli81 = ai_code.AgentCLI({"project_root": str(_root81), "permission": "write"},
                               mock=True)
     _prop81 = _RP81(tool="file_write", pattern="docs/", action="deny",
@@ -17570,14 +17859,14 @@ if _want("83"):
         except ValueError:
             return True
 
-    _proj83 = Path(tempfile.mkdtemp())
-    _outer83 = Path(tempfile.mkdtemp())          # 假装一条 worktree 根（在项目根**之外**）
+    _proj83 = mktemp_outside()
+    _outer83 = mktemp_outside()   # 假装一条 worktree 根（在项目根**之外**）
     _t83a = _TEB83(project_root=str(_proj83))
     check("[83] ★前提：worktree 根确实在项目根之外（不是同一个目录，也不在其下）",
           _outside83(_outer83, _proj83) and _outside83(_proj83, _outer83), "")
     check("[83] ★未注册 → 项目根之外仍然拒绝（接线不得放松既有边界）",
           _t83a._confined(_outer83 / "a.txt") is None
-          and _t83a._confined(Path(tempfile.mkdtemp()) / "b.txt") is None, "")
+          and _t83a._confined(mktemp_outside() / "b.txt") is None, "")
     _ace83 = _proj83 / ".ace"
     _ace83.mkdir(parents=True, exist_ok=True)
     _st83x = _ws83.WorkspaceStore(primary_root=_proj83)
@@ -17587,7 +17876,7 @@ if _want("83"):
     check("[83] ★注册过的 worktree 根 → `_confined` 放行（接线前这里是 None）",
           _t83b._confined(_outer83 / "a.txt") == (_outer83 / "a.txt").resolve(), "")
     check("[83] ★在册也不放宽到第三方目录（denied 仍 denied）",
-          _t83b._confined(Path(tempfile.mkdtemp()) / "c.txt") is None, "")
+          _t83b._confined(mktemp_outside() / "c.txt") is None, "")
     check("[83] ★坏 JSON 不当放行：读不动 → 退回单工作区语义（更窄，不是更宽）",
           (_ace83 / "workspaces.json").write_text("{不是 JSON", encoding="utf-8") is not None
           and _TEB83(project_root=str(_proj83))._confined(_outer83 / "a.txt") is None, "")
@@ -17607,7 +17896,7 @@ if _want("83"):
                       "file_read", path=str(_outer83))
     check("[83] ★e2e：worktree 根**内**的目录列表也可读（新根是完整工作区，不是单个文件白名单）",
           _r83d["status"] == "SUCCESS" and "hello.txt" in str(_r83d.get("data")), _r83d)
-    _base83 = Path(tempfile.mkdtemp())
+    _base83 = mktemp_outside()
     (_base83 / "f.txt").write_text("x", encoding="utf-8")
     _r83o = run_agent(ExecutionLayer(project_root=str(_base83), permission_level="readonly"),
                       "file_read", path=str(_base83 / "f.txt"))
@@ -17625,7 +17914,7 @@ if _want("83"):
     _r83e = run_agent(_esc83, "file_write", path=str(_ace83 / "workspaces.json"),
                       content='{"version":1,"primary_root":null,"workspaces":'
                               '[{"id":"ws_x","task_id":"task_x","worktree_path":"'
-                              + str(Path(tempfile.mkdtemp())).replace("\\", "\\\\")
+                              + str(mktemp_outside()).replace("\\", "\\\\")
                               + '"}]}')
     check("[83] ★提权路径堵死：模型不能写 allowedRoots 的来源（.ace/workspaces.json → 403）",
           _r83e["status"] == "403", _r83e)
@@ -17684,7 +17973,7 @@ if _want("83"):
           "撤销覆盖" in _out83w and "--project-root" in _out83w, _out83w[-400:])
 
     # 命令面闭环：`/workspace new` 建 Task + 落盘 → 重开进程读回（save() 的第一个调用方）
-    _root83c = Path(tempfile.mkdtemp())
+    _root83c = mktemp_outside()
     _cli83 = ai_code.AgentCLI({"project_root": str(_root83c), "permission": "readonly"},
                               mock=True)
     with contextlib.redirect_stdout(io.StringIO()):
@@ -17927,7 +18216,7 @@ if _want("89"):
     from core import ace_secscan as _ss89  # noqa: E402
 
     # —— 扫描：判据复用（不另立名单），只判文件名/路径、不读内容 ——
-    _root89 = Path(tempfile.mkdtemp())
+    _root89 = mktemp_outside()
     (_root89 / ".env").write_text("KEY=abc", encoding="utf-8")
     (_root89 / "id_rsa").write_text("-----BEGIN RSA PRIVATE KEY-----", encoding="utf-8")
     (_root89 / "backup.bat").write_text("@echo off", encoding="utf-8")

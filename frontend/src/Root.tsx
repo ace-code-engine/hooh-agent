@@ -20,6 +20,10 @@ import { App, reducer, type AceClientLike } from './App.js';
 // 备用屏用**内核版**（`?1049` 由内核连同它的帧缓冲/污染检测一起管）。
 // 回滚 = 把下面这行换回 `'./tui/alternate-screen.js'`（自制 1049 版一直原样留着）。
 import { AlternateScreen } from './tui/alternate-screen-kernel.js';
+// 主屏鼠标跟踪挂在**备用屏外层**：进出全屏时备用屏组件卸载/挂载会各自写
+// 鼠标模式序列，这层把全屏开关当 `reassertKey`，备用屏退出后重新接管
+// （时序与为什么必须有它，见 mouse-tracking.tsx 文件头）。
+import { MouseTracking } from './tui/mouse-tracking.js';
 import { I18n, SUPPORTED, type Lang } from './i18n.js';
 import type { AceEvent } from './protocol/types.js';
 import type { BuildMenuOptions } from './render/menu.js';
@@ -89,18 +93,20 @@ export function Root({
   }, [client]);
 
   return (
-    <AlternateScreen enabled={fs}>
-      <App
-        client={client}
-        t={t}
-        fullscreen={fs}
-        onFullscreenChange={setFs}
-        state={state}
-        dispatch={dispatch}
-        colorOf={colorOf}
-        menuOptions={menuOptions}
-        {...(initialMessage !== undefined ? { initialMessage } : {})}
-      />
-    </AlternateScreen>
+    <MouseTracking reassertKey={fs}>
+      <AlternateScreen enabled={fs}>
+        <App
+          client={client}
+          t={t}
+          fullscreen={fs}
+          onFullscreenChange={setFs}
+          state={state}
+          dispatch={dispatch}
+          colorOf={colorOf}
+          menuOptions={menuOptions}
+          {...(initialMessage !== undefined ? { initialMessage } : {})}
+        />
+      </AlternateScreen>
+    </MouseTracking>
   );
 }

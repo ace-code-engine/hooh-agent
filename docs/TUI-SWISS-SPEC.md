@@ -13,6 +13,8 @@
 4. **层级只有五种手段**：空白、全大写+字距（标签）、加粗、三级灰阶、反显（选中）。没有第六种。
 5. **不铺背景色。** 让终端底色透出来（铺底色会和用户主题打架，透明终端下还会有缝）。需要"块"时用左侧 2 格竖条 `▌` 或整宽细线。
 6. **动画 ≤5Hz，且只在"有事发生"时跑。** 减少动效开关打开后必须完全静止，并给出一个可读的静止帧。
+   唯一例外：**一次性开场揭幕**（开屏字标）——只播一次、不循环、≤1.2s，首帧之前就绪、末帧即静态画面；
+   减少动效开关打开时帧数 == 1（直接就是末帧）。除它以外，任何"活着"的动画都按本条禁掉。
 
 ---
 
@@ -67,6 +69,28 @@ ace 现在的 `ui/ace_theme.py` 有 8 个以上色相，收敛如下：
 **四档 profile**：truecolor（`38;2`）/ 256（`38;5`，抄 Rich `Color.downgrade()` 的灰阶+6×6×6）/ 16 / 无色。
 无色档必须靠**字形**区分而不是颜色（`□` vs `■`、`·` vs `o`），并保证两个不同状态的字形宽度相同。
 
+### 4.1 色板：唯一真相源，禁止第四套
+
+**`ui/ace_theme.py` 的 `PALETTES` 是全仓唯一的色表**（色板名 → token → 值）。三种消费者
+（`ai_code.c()` 的传统 REPL / `ace_render.cell()` 的引擎屏 / `cell_hex()` 的 SVG 预览）都从它取值。
+`frontend/src/theme/tokens.ts` 是它的**镜像**，`frontend/test/theme.test.ts` 直接读那个 `.py` 逐条比对。
+
+色板名：`dark` / `light`（旧两套，值不变，**默认**）、`mist-dark` / `mist-light` / `mist-ansi`
+（「雾蓝 Gentle Mist Blue」，移植自 [dsh-TUI](https://github.com/ccch1mneyyy/dsh-TUI)）、
+`auto`（按终端背景在雾蓝深/浅之间选）、以及 `~/.ace/themes/<name>.json` 的自定义主题。
+选板与覆盖都走 `--color`（`accent=#FF9EC7,warn=#E0C08A` = 在当前色板上局部覆盖）。
+
+**值的格式只有一处认**：`ace_theme.sgr()` —— `#RGB` / `#RRGGBB` / `rgb()` / `ansi256(n)` /
+`ansi:name` / Rich 色名 / 已成型的 SGR 参数 / `bg:` 前缀。新增消费者**不许**再自己解析颜色串，
+也不许再内联 hex（`ui/ace_fullscreen.py` / `ui/ace_selector.py` 那几处内联 hex 属待清项）。
+
+两条铁律：
+
+1. **缺省不换色。** 不显式给 `--color` / `color` / `ACE_THEME` 时，检测结果仍是 `dark` / `light`
+   —— 升级不许替用户决定他看什么颜色（实测踩过：把浅底检测改成返回 `mist-light`，直接顶掉了既有契约）。
+2. **一屏只有一套色。** `--color` 必须同时转交前端与引擎（`ace.cmd` 把参数同时给两边），
+   否则会出现"上半屏雾蓝、下半屏旧色"。
+
 ---
 
 ## 五、禁止清单
@@ -84,6 +108,7 @@ ace 现在的 `ui/ace_theme.py` 有 8 个以上色相，收敛如下：
 | 三级灰阶 + 单强调 + 合并语义色 | `ui/ace_theme.py`（`THEMES` 收敛为 3+1+3） |
 | 网格、右对齐定宽列、状态段优先级 | `ui/ace_layout.py`（`fit_status_line` 已有优先级，把宽度单位统一到 cell 网格） |
 | 整宽细线（含 ASCII / DEC 线绘两档） | `ui/ace_layout.py` 新增 `rule(width)` 纯函数 |
+| 一次性开场揭幕（帧序列 == 纯数据，末帧 == 静态） | `ui/ace_layout.py` 新增 `reveal_frames()`，与 `banner_frames` 同契约 |
 | 反显选中 | `ui/ace_selector.py` |
 | 工具卡去边框 → 细线 + `▌` 竖条 | `ui/ace_cards.py`（`GLYPH_FALLBACK` 已存在，补 conhost 双宽字形） |
 | 色卡 / 像素工具 | 新增 `ui/ace_swatches.py` |
@@ -100,7 +125,8 @@ ace 现在的 `ui/ace_theme.py` 有 8 个以上色相，收敛如下：
 3. **无色可读**：剥掉 ANSI 后的 golden 文本逐字比对（没有颜色也得能读）。
 4. **响应**：60 / 80 / 120 列各一张 golden。
 5. **减少动效**：开关打开时，帧序列长度 == 1。
-6. 人眼只确认两件事：色块看着是不是正方形；细线在你的终端里是否连贯。
+6. **末帧即静态**：开屏揭幕的 `frames[-1]` 与"根本不开动画"的输出逐字节相等（行内容、宽度、ANSI 都算）。
+7. 人眼只确认两件事：色块看着是不是正方形；细线在你的终端里是否连贯。
 
 ---
 

@@ -79,6 +79,7 @@ from ui import ace_widgets  # noqa: E402  （边角小零件：状态图标/分�
 from ui import ace_tools  # noqa: E402  （工具看板：四态点 + 同帧同步 + 只重画变化行）
 from ui import ace_turn  # noqa: E402  （一轮的交互状态机：排队/两段式中断/授权选项）
 from ui import ace_home  # noqa: E402  （主页模型：分区/条目/渲染，纯逻辑）
+from ui import ace_theme  # noqa: E402  （主题色层：色板 / --color / 自定义主题）
 from core import ace_styles  # noqa: E402  （输出风格预设：提示词 + 显示旗标）
 from core import ace_effort  # noqa: E402  （思考强度：档位 + 提示词增量，纯逻辑）
 from core import ace_prefix  # noqa: E402  （WP-3：前缀指纹/归因/drift + 工具面预算，纯逻辑）
@@ -633,6 +634,12 @@ class CLIConfig:
             raise ValueError(f"auto_commit 必须是布尔值，收到: {self.auto_commit!r}")
 
 # ---- ANSI 颜色（非 tty 或 NO_COLOR 时自动关闭，遵循 NO_COLOR 约定）----
+#
+# 这张表现在只管**结构**（加粗/弱化/斜体/复位）与"色板不认识"时的兜底；
+# 真正的颜色由 `ui/ace_theme.py` 的色板决定（`--color` 选板 / 自定义主题）。
+# 为什么保留这些色名键：`_MD_STYLES`、`ui/ace_cards.colorize` 与 test_all [9] 都按
+# 名字取用，而且 dark/light 下色板回退到同一批 ANSI 名 —— 输出逐字节不变，
+# 换色只影响显式选择雾蓝色板的时候。
 ANSI = {
     "reset": "\033[0m", "bold": "\033[1m", "dim": "\033[2m", "italic": "\033[3m",
     "red": "\033[31m", "green": "\033[32m", "yellow": "\033[33m",
@@ -641,6 +648,8 @@ ANSI = {
     # 别名放在这里而不是让调用方改 `yellow`，是为了让"语义名 → ANSI"只在这一处决定。
     "warn": "\033[33m",
 }
+# 只走上面那张表的"结构色"：主题层不该管加粗/弱化（它不是颜色）。
+_STRUCTURAL_COLORS = ("reset", "bold", "dim", "italic")
 # FORCE_COLOR：管道/重定向下强制保留颜色。NO_COLOR 优先级更高（用户明确要求关色）。
 # demo/record_demo.py 靠它抓到带色的真实会话，否则录出来的演示是灰的。
 USE_COLOR = bool((sys.stdout.isatty() or os.environ.get("FORCE_COLOR"))
@@ -655,6 +664,9 @@ if os.name == "nt":
 def c(color: str, text: str) -> str:
     """给文本上色。**未知色名降级为不上色，绝不抛异常。**
 
+    取值顺序：结构色（bold/dim/italic/reset）→ 主题色板（`ace_theme.sgr_for`，
+    含 17 个语义 token 与 red/green/… 6 个短色名）→ 旧 ANSI 表兜底。
+
     这里曾经是 `ANSI[color]`：色板少一个键就让整轮对话炸掉。
     实际踩过两次 —— `_MD_STYLES` 里的 `italic`（模型回一句 `*斜体*` 即触发）和
     `ui/ace_home.py` 的 `warn`（`--sandbox job` 时首屏直接 traceback）。
@@ -662,7 +674,13 @@ def c(color: str, text: str) -> str:
     """
     if not USE_COLOR:
         return text
-    return f"{ANSI.get(color, '')}{text}{ANSI['reset']}"
+    if color in _STRUCTURAL_COLORS:
+        return f"{ANSI[color]}{text}{ANSI['reset']}"
+    code = ace_theme.sgr_for(color)          # 主题层优先（--color 就是在这里生效的）
+    if code:
+        return f"\033[{code}m{text}{ANSI['reset']}"
+    legacy = ANSI.get(color, "")
+    return f"{legacy}{text}{ANSI['reset']}" if legacy else text
 
 
 # Markdown 渲染的色板：语义 kind → ANSI 名（`ui/ace_markdown` 只用 kind，不认颜色，
@@ -924,6 +942,9 @@ def merge_config(args) -> Dict:
         "kb_root": getattr(args, "kb", None),
         "skills_dir": getattr(args, "skills", None),
         "approval_policy": getattr(args, "approval_policy", None),
+        # `--color`：故意用 `None` 当默认。这个字典用 `if v` 过滤，默认值一旦是
+        # 真值（比如 "auto"）就会**永远盖掉** ~/.ai_code.json 里的选择。
+        "color": getattr(args, "color", None),
     }.items() if v})
     cfg.setdefault("base_url", os.environ.get("AGENT_BASE_URL", ""))
     cfg.setdefault("api_key", os.environ.get("AGENT_API_KEY", ""))
@@ -1185,7 +1206,7 @@ class ModelClient:
                     on_delta(converted)
                 return converted
             return final_reply_protocol(full)
-        return full
+        return _as_final_reply(full)
 
     @staticmethod
     def trim_messages(messages: List[Dict], max_history: int) -> List[Dict]:
@@ -1309,6 +1330,27 @@ _STATUS_LEVELS = {
     "class:footer-f": "danger",
     "class:footer-goal": "goal",
 }
+
+
+def _as_final_reply(text: str) -> str:
+    """模型**一个协议标签都没有**时，把它当最终回答包装（而不是原样交给执行层）。
+
+    为什么要这一步：模型（实测 deepseek-v4-flash）时不时直接回一段纯文本 —— 例如问
+    「你好」就答「你好。工作区是 …」。此前这段被原样交给执行层，而 `_stage_parse`
+    只认 `<INTERNAL>`/`<EXTERNAL>` ⇒ **每轮都判 `FORMAT_ERROR: 缺少 <EXTERNAL> 标签`**，
+    用户看到 4 张错误卡、白烧 4 轮，最后才把那句话当回答打出来（附 12 秒延迟）。
+
+    判据刻意收得很紧：**一个标签都没有**才算"没走协议"。只写了一半（有 `<INTERNAL>`
+    没 `<EXTERNAL>`、或标签残缺）仍然交给执行层按真错处理 —— 那是真的格式错误，
+    需要模型纠正，不该被这里悄悄咽掉。带工具调用的文本也不受影响（`self.tools` 那条分支
+    在更前面，`content_to_tool_protocol` 先跑）。
+
+    安全方向：包装只是"把这段文本当回答显示"，**不会**让它绕过任何闸门 ——
+    真正会动文件的工具调用要么走原生 tool_calls，要么走完整协议，两者都不经过这里。
+    """
+    if text.strip() and "<INTERNAL>" not in text and "<EXTERNAL>" not in text:
+        return final_reply_protocol(text)
+    return text
 
 
 def _status_level(style: str) -> str:
@@ -4137,17 +4179,20 @@ class _LandingUI:
         return ace_panel.fit_width(cols)
 
     @staticmethod
-    def _paint_box(line: str) -> str:
-        """把框线染成暗色、内容保持原样。
+    def _section_block(title: str, rows: List[str], width: int,
+                       right: str = "") -> List[str]:
+        """无边框分区：`── 标题 ────── 右侧` + 缩进两格的键值行。
 
-        为什么按首尾字符切而不是整行上色：整行上色会把内容也变灰，面板里的当前值
-        就分不出主次了。
+        首屏与聊天头部此前用 `ace_panel.box()` 画圆角框，而 `docs/TUI-SWISS-SPEC.md`
+        §1.2 写的是"**不用边框**，分区只用整宽细线"、§五 禁止清单第一条就是"边框"
+        —— 那两个框是那份规范里唯一没落地的条款。dsh-TUI 的首屏/聊天头部同为
+        零边框（看截图确认），分区靠整宽细线与留白，所以这不是口味问题。
+
+        标题行染暗色（`c("dim")`）、内容保持原样：整行上色会把值也变灰，
+        面板里的当前值就分不出主次了（这是从旧圆角框那版继承下来的一条经验）。
         """
-        if line[:1] in ("╭", "╰"):
-            return c("dim", line)
-        if line[:1] == "│" and line[-1:] == "│":
-            return c("dim", "│") + line[1:-1] + c("dim", "│")
-        return line
+        return [c("dim", ace_panel.section(title, width, right=right))] \
+            + ["  " + r for r in rows]
 
     def _model_brief(self) -> str:
         """模型一行摘要：`deepseek-v4-flash · api.deepseek.com`（mock 时直说 mock）。"""
@@ -4162,7 +4207,13 @@ class _LandingUI:
         return f"{self.client.model or '?'}" + (f" · {host}" if host else "")
 
     def _session_panel(self, width: int) -> List[str]:
-        """「当前会话」面板：模型 / 三维度 / 目录 / 历史 —— 一眼看清现在的运行环境。"""
+        """「当前会话」块：模型 / 三维度 / 目录 / 历史 —— 一眼看清现在的运行环境。
+
+        **不用边框**（原来是 `ace_panel.box()` 画的圆角框）：`docs/TUI-SWISS-SPEC.md`
+        §1.2 明写"分区只用整宽细线"，§五 禁止清单第一条就是"边框"；首屏那两个框一直是
+        这份规范里唯一没落地的条款。dsh-TUI 的首屏与聊天头部同样是**零边框**、
+        只靠整宽细线分区（看它的截图确认过）。
+        """
         perm = str(self.cfg.get("permission", "readonly"))
         sb = str(self.cfg.get("sandbox", "off") or "off")
         net = t("net_on") if getattr(self.el.executor, "network_enabled", True) else t("net_off")
@@ -4189,8 +4240,8 @@ class _LandingUI:
             ace_panel.row(t("panel_k_cwd"), root, width),
             ace_panel.row(t("panel_k_history"), hist, width),
         ]
-        return ace_panel.box(t("panel_session_title"), rows, width,
-                             title_right=f"v{version.__version__}")
+        return self._section_block(t("panel_session_title"), rows, width,
+                              right=f"v{version.__version__}")
 
     def _resumed_when(self) -> str:
         """上次会话的时间（从日志文件 mtime 推）。取不到就说"上次"。"""
@@ -4201,10 +4252,10 @@ class _LandingUI:
             return t("panel_when_unknown")
 
     def _recent_panel(self, width: int) -> List[str]:
-        """「最近会话」面板：最近 3 次会话（时间 / 条数 / 首句）。
+        """「最近会话」块：最近 3 次会话（时间 / 条数 / 首句）。
 
         首屏显示它是有实际用处的：启动时会自动续聊最近一次会话，用户至少该看见
-        "模型现在记得的是哪一次"。
+        "模型现在记得的是哪一次"。没有历史时返回空列表（不画一个空块）。
         """
         rows: List[str] = []
         try:
@@ -4215,17 +4266,24 @@ class _LandingUI:
                 if cur and str(sess_dir / str(s["name"])) == cur:
                     continue          # 本次会话不列进"最近"
                 preview = " ".join(str(s.get("preview") or "").split())[:48]
-                rows.append("  ".join([
-                    ace_panel.format_when(s["mtime"], time.time()),
+                # 两行一条：主行右对齐"多少轮"，次行降灰放会话文件名 —— 照 dsh-TUI
+                # 会话管理屏的行设计（计数右对齐才比得了大小，次行降灰才分得出主次）。
+                _main, _sub = ace_panel.list_row(
+                    " ".join([ace_panel.format_when(s["mtime"], time.time()),
+                              preview or t("panel_no_preview")]),
                     t("panel_turns", n=s["messages"]),
-                    preview or t("panel_no_preview")]))
-                if len(rows) >= 3:
+                    str(s["name"]),
+                    width)
+                rows.append(_main)
+                if _sub:
+                    rows.append(c("dim", _sub))
+                if len(rows) >= 6:        # 3 条 × 2 行
                     break
         except Exception:  # noqa: BLE001 —— 首屏不该因为历史读不出来就崩
             rows = []
         if not rows:
             return []
-        return ace_panel.box(t("panel_recent_title"), rows, width)
+        return self._section_block(t("panel_recent_title"), rows, width)
 
     def landing_lines(self, sel: int, width: Optional[int] = None,
                       with_logo: bool = True) -> List[str]:
@@ -4237,11 +4295,11 @@ class _LandingUI:
             right = [c("bold", f"HooH · 互  v{version.__version__}"), ""]
             out += ace_panel.side_by_side(logo, right, width=w)
             out.append("")
-        out += [self._paint_box(ln) for ln in self._session_panel(w)]
+        out += self._session_panel(w)
         recent = self._recent_panel(w)
         if recent:
             out.append("")
-            out += [self._paint_box(ln) for ln in recent]
+            out += recent
         out.append("")
         entries = []
         for label_key, desc_key, action, _group in self.LANDING_ITEMS:
@@ -8100,11 +8158,17 @@ class AgentCLI(_AtCommands, _SlashCommands, _LandingUI):
     # ---------- REPL ----------
 
     def _play_banner_animation(self) -> None:
-        """首屏标题动效：逐字浮现 + 下划线生长（只在真终端里播）。
+        """开屏动效：**噪声圆盘**（`circle-noise-fill.html` 那套算法的字符格版）。
 
         为什么要播：一片静态文字刷上去之后，用户分不清"界面已经就绪"还是"还在加载"。
-        一段 0.4 秒的浮现把这件事说清楚了。**非 TTY 直接跳过**（管道/CI 里多出几帧纯属
-        噪音），`ACE_NO_ANIM=1` 或配置 `animate: false` 也能关掉。
+        原来是"标题逐字浮现 + 下划线生长"（`ace_layout.banner_frames`，4 帧 × 60ms）——
+        那是**文字**动效；参考件给的是一条**图形**动画：一个圆盘被噪声**成团**点满。
+        搬进终端就得是二维格子网格（`ui/ace_noise_circle`），一行几格的那种不是这个效果。
+
+        节奏：正向填满 → **倒放**回空（用户要的"最长的时候倒放"），一次约 1.1s
+        （规范 §6 给开屏开的那条例外是"一次性、≤1.2s"）。非 TTY 直接跳过（管道/CI 里
+        多几帧纯属噪音 —— 录制演示图走的正是管道），`ACE_NO_ANIM=1`、
+        配置 `animate: false`、`ACE_REDUCE_MOTION=1` 也都能关。
         """
         if os.environ.get("ACE_NO_ANIM"):
             return
@@ -8117,14 +8181,34 @@ class AgentCLI(_AtCommands, _SlashCommands, _LandingUI):
             return
         if self._reduce_motion():
             return                       # 减少动效：首屏也不播
-        frames = ace_layout.banner_frames(
-            "HooH", t("banner_sub", ver=version.__version__), steps=4)
-        for _f in frames[:-1]:
-            sys.stdout.write(f"\r{_f[0]}")
+        try:
+            from ui import ace_noise_circle
+            frames = ace_noise_circle.disc_frames(steps=6, reverse=True)
+        except Exception:  # noqa: BLE001 —— 动效失败不该拦住启动，退回静态首屏
+            return
+        rows = len(frames[0]) if frames else 0
+        width = len(frames[0][0]) if rows else 0
+        # 用 ANSI 光标上移重画整块：圆盘是多行图形，`\r` 只能回到本行开头（原来那套
+        # 单行动效用的就是 `\r`，对多行图形不够用）。
+        up = "\x1b[%dA" % rows if rows > 1 else ""
+        try:
+            sys.stdout.write("\n" * rows)                 # 先占位，别把首屏顶下去
+            for i, frame in enumerate(frames):
+                if i:
+                    sys.stdout.write(up)
+                for line in frame:
+                    sys.stdout.write("\r\x1b[K" + c("cyan", line) + "\n")
+                sys.stdout.flush()
+                time.sleep(0.09)
+            # 收尾：清掉这块，首屏自己会重新打（同一个词闪两下比不动效更糟）
+            sys.stdout.write(up)
+            for _ in range(rows):
+                sys.stdout.write("\r\x1b[K\n")
+            sys.stdout.write(up)
             sys.stdout.flush()
-            time.sleep(0.06)
-        sys.stdout.write("\r" + " " * (len(frames[-1][0]) + 4) + "\r")
-        sys.stdout.flush()
+        except Exception:  # noqa: BLE001
+            return
+        _ = width
 
     def repl(self, return_to_landing: bool = False) -> None:
         """聊天 REPL；return_to_landing=True 时退出聊天回到主界面，否则结束程序"""
@@ -8137,7 +8221,7 @@ class AgentCLI(_AtCommands, _SlashCommands, _LandingUI):
         # 头部用与首屏同一套面板：模型/边界/目录/历史四行，字段一多也不会错位
         print(c("bold", "HooH") + c("dim", t("banner_sub", ver=version.__version__)))
         _hw = self._panel_width()
-        for _ln in [self._paint_box(x) for x in self._session_panel(_hw)]:
+        for _ln in self._session_panel(_hw):
             print(_ln)
         for _ln in self._banner_extras():
             print(_ln)
@@ -8325,22 +8409,9 @@ class AgentCLI(_AtCommands, _SlashCommands, _LandingUI):
                     # 续行标记：多行输入时第 2 行起用"… "对齐，让人知道还在同一句里
                     prompt_continuation=lambda width, line_number, is_soft_wrap: [
                         ("class:continuation", "… ")],
-                    style=Style.from_dict({
-                        "prompt": "ansimagenta bold",
-                        "prompt-bash": "ansiyellow bold",
-                        "prompt-multi": "ansicyan bold",
-                        "continuation": "ansibrightblack",
-                        "perm": "ansicyan bold",
-                        "footer": "bg:#2b2b3c #aaaaaa",
-                        "footer-dim": "bg:#2b2b3c #666666",
-                        "footer-ro": "bg:#2b2b3c #5fa8ff",
-                        "footer-w": "bg:#2b2b3c #f6c453",
-                        "footer-f": "bg:#2b2b3c #ff6b6b",
-                        "footer-goal": "bg:#2b2b3c #7ecb8f",
-                        "completion-menu.completion": "bg:#2b2b3c #ffffff",
-                        "completion-menu.completion.current": "bg:#5f3dc4 #ffffff",
-                        "completion-menu.completion.meta": "bg:#1e1e2e #aaaaaa",
-                    }),
+                    # 外壳配色走 `ptk_styles()`：底栏/补全菜单/全屏/选择器共用一份，
+                    # 换色（--color）只改色板那一处，不再有"三处硬编码、漏两个"。
+                    style=Style.from_dict(ace_theme.ptk_styles()),
                 )
                 print(c("dim", "  ✓ 实时补全已启用（输入 / 或 @ 弹菜单；Tab 补全 · Enter 发送；"
                                "打全的命令一次回车就跑）"))
@@ -9660,6 +9731,11 @@ def main() -> None:
                              "输入行四块固定布局；F5 退出全屏回到普通 REPL")
     parser.add_argument("--preview-width", type=int, default=0,
                         help="配合 --preview：按指定列宽渲染（默认按当前终端，取不到用 100）")
+    parser.add_argument("--color", default=None,
+                        help="配色：色板名（auto / dark / light / mist-dark / mist-light / "
+                             "mist-ansi / ~/.ace/themes/<name>.json 里的自定义主题），"
+                             "或直接覆盖 token：--color accent=#FF9EC7,warn=#E0C08A。"
+                             "不带 = 才当色板名。不带本参数时看 ACE_THEME，再按终端背景选")
     parser.add_argument("--save-config", action="store_true", help="把当前参数保存到 ~/.ai_code.json")
     parser.add_argument("--install-ui", action="store_true",
                         help="准备界面依赖（prompt_toolkit）：先看当前解释器"
@@ -9707,6 +9783,17 @@ def main() -> None:
         sys.exit(0 if _install_executor() else 1)
 
     cfg = merge_config(args)
+    # 配色要在**任何一屏画面之前**定下来：`c()`（传统 REPL/首屏/卡片）、引擎屏的
+    # `cell()`、SVG 预览三处都从同一个色板取值，所以只在这里应用一次。
+    # 同时写回 ACE_THEME：引擎屏（ui/ace_engine_repl.py）与被拉起的子进程读的是
+    # 环境变量，不这么写就会出现"上半屏新色、下半屏旧色"。
+    if cfg.get("color"):
+        _picked = ace_theme.apply_color(cfg["color"])
+        if _picked:
+            os.environ["ACE_THEME"] = _picked
+        else:
+            print(c("yellow", "  ⚠ 未知配色 {!r}，可用：{}".format(
+                cfg["color"], "、".join(ace_theme.list_theme_names()))))
     if getattr(args, "json", False):
         # --json：把 stdout 换成事件代理（一处生效，几百处 print 不用逐个改），
         # 并把颜色关掉 —— 事件流的消费者不是终端。

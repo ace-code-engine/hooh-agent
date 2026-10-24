@@ -15,7 +15,7 @@ import {
 } from '../vendor/dsh-ink/kernel.js';
 
 import { ScrollBox } from './tui/scroll-box.js';
-import React, { useCallback, useEffect, useReducer, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useReducer, useRef, useState } from 'react';
 
 import { Banner } from './components/Banner.js';
 import { ChoiceDialog, type ChoiceAnswer } from './components/ChoiceDialog.js';
@@ -25,6 +25,7 @@ import { Input } from './components/Input.js';
 import { PAGE_INSET, PageMargin, Rule, contentColumns } from './components/layout/PageMargin.js';
 import { PermissionDialog } from './components/PermissionDialog.js';
 import { Picker, type PickerItem } from './components/pickers/index.js';
+import { SessionManager } from './components/sessions/SessionManager.js';
 import { SessionTree } from './components/session-tree/index.js';
 import { SettingsPanel } from './components/settings/SettingsPanel.js';
 import { parseSettings, type SettingSection } from './components/settings/schema.js';
@@ -123,6 +124,8 @@ type Panel =
   | { kind: 'settings'; sections: readonly SettingSection[] }
   /** 选择器：`command` 是**既有命令**，选中项拼在它后面发回去。 */
   | { kind: 'pick'; command: string; titleKey: string; items: readonly PickerItem[] }
+  /** 会话管理屏（双栏：工作区 / 会话）—— 数据与 `/resume` 选择器同一份。 */
+  | { kind: 'sessions' }
   /** 全屏草稿编辑器（键位 = 注册表的 `external_editor`）。 */
   | { kind: 'draft' };
 
@@ -233,6 +236,19 @@ export function App({ client, t, colorOf, initialMessage, menuOptions, fullscree
   // 不会宽出页边距、把长行挤折；不传 prop 的那些（转录/卡片里的 Markdown）走
   // `useColumns()`，读到的已经是 `PageMargin` 覆盖过的内容区尺寸。
   const content = contentColumns(cols);
+
+  /**
+   * 正在跑的工具名（活动行用它说"正在调用 file_write"而不是笼统的"准备中"）。
+   * 从后往前找**最后一条**还在 running 的工具：同一轮可能有多个工具，最近开始的那个
+   * 才是用户此刻关心的（引擎的事件序也是这个顺序）。
+   */
+  const runningTool = useMemo((): string => {
+    for (let i = state.items.length - 1; i >= 0; i--) {
+      const it = state.items[i];
+      if (it && it.kind === 'tool' && it.status === 'running') return it.tool;
+    }
+    return '';
+  }, [state.items]);
 
   // 主页拉一次就够（进入会话后它会被滚上去）。拉不到就**不显示** —— 一个空壳主页
   // （有分区标题没条目）比没有主页更让人困惑。
@@ -414,18 +430,11 @@ export function App({ client, t, colorOf, initialMessage, menuOptions, fullscree
    */
   const openResume = useCallback((): boolean => {
     if (sessions.length === 0) return false; // 没得挑就别装样子：照旧把命令发给引擎
-    setPanel({
-      kind: 'pick',
-      command: '/resume',
-      titleKey: 'sessions_pick',
-      items: sessions.map((s, i) => ({
-        key: String(i + 1),
-        label: `${i + 1}. ${s.label || s.id || s.path}`,
-        description: [s.when, t('sessions_turns', { n: s.turns })].filter((x) => x !== '').join(' · '),
-      })),
-    });
+    // 从"选择器"升级成**会话管理屏**（双栏：左工作区、右会话 + 筛选）。回传的仍是
+    // `/resume <编号>`（编号口径与引擎 `pick_by_index` 一致，1 起算），所以引擎侧一行不用动。
+    setPanel({ kind: 'sessions' });
     return true;
-  }, [sessions, t]);
+  }, [sessions]);
 
   /**
    * 闭集选择器（权限 / 沙箱 / 联网 / 强度）：候选来自引擎发的 `option_sets`（CAP-02）。
@@ -632,6 +641,22 @@ export function App({ client, t, colorOf, initialMessage, menuOptions, fullscree
         />
       );
     }
+    if (panel.kind === 'sessions') {
+      return (
+        <SessionManager
+          sessions={sessions}
+          t={t}
+          color={colorOf}
+          width={content}
+          onClose={closePanel}
+          onPick={(index) => {
+            closePanel();
+            // 与选择器同一条出口：既有命令 + 1 起算的编号（引擎的 `pick_by_index`）。
+            void runCommand(`/resume ${index + 1}`);
+          }}
+        />
+      );
+    }
     if (panel.kind === 'pick') {
       return (
         <Picker
@@ -797,6 +822,7 @@ export function App({ client, t, colorOf, initialMessage, menuOptions, fullscree
               color={colorOf}
               reducedMotion={process.env.ACE_REDUCE_MOTION === '1'}
               lastOutputAt={state.meta.lastOutputAt}
+              tool={runningTool}
             />
           </Box>
         ) : null}

@@ -49,6 +49,9 @@ ASCII_FALLBACK = {
     # `ui/ace_widgets` 的小零件：状态图标 `ℹ`、进度条的子格块（八分之一块）、整块 `█`。
     # 守卫（test_all [33]）盯的就是"画得出来但没替身" ⇒ cp936 上显示一个 `?` 且不报错。
     "ℹ": "i", "█": "#",
+    # 开屏噪声圆盘（`ui/ace_noise_circle.RAMP`）的暗→亮三段：cp936 上没有这三个
+    # 网点字符，降级成 `.`/`:`/`#` 之后"圆盘在长"这件事仍然看得出来（只是没有灰阶）。
+    "░": ".", "▒": ":", "▓": "#",
     "▏": "|", "▎": "|", "▍": "|", "▌": "|", "▋": "|", "▊": "|", "▉": "|",
     # 方块小人（`ui/ace_widgets.BLOCK_FIGURE`）用的四分块，以及思考标记 `∴`
     "▐": "|", "▛": "#", "▜": "#", "▝": ".", "▘": ".", "▗": ".", "▖": ".",
@@ -114,7 +117,17 @@ def console_codepage() -> Optional[int]:
 
 
 def display_encoding() -> str:
-    """**实际影响显示**的编码：优先控制台代码页，其次 stdout 的编码。"""
+    """**实际影响显示**的编码：优先控制台代码页，其次 stdout 的编码。
+
+    `ACE_DISPLAY_ENCODING` 可显式钉死（`utf-8` / `cp936` / …）—— 录制演示图、跑跨平台
+    对拍时需要它：否则同一份 CLI 输出在 cp936 控制台（Windows）与 UTF-8 终端（CI）上会
+    录出两张不同的图（`▶` 降级成 `>`），`demo/record_demo.py --check` 在两边必然对不上。
+    默认不设 = 原行为（看控制台代码页）。
+    """
+    import os as _os
+    forced = (_os.environ.get("ACE_DISPLAY_ENCODING") or "").strip().lower()
+    if forced:
+        return forced
     cp = console_codepage()
     if cp:
         return "utf-8" if cp == 65001 else f"cp{cp}"

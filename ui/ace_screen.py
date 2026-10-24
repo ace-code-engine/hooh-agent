@@ -23,16 +23,45 @@ import sys
 import threading
 from typing import Callable, List, Optional, Sequence, Union
 
-from ui.ace_cell import Screen, Segment, fit_row
+from ui.ace_cell import (MARGIN, Screen, Segment, content_width, fit_row,
+                         line_width, margin)
 from ui.ace_canvas import Canvas, Patch, diff
 from ui.ace_render import render_canvas, render_terminal
 from ui.ace_text import char_width
 
-__all__ = ["SessionScreen", "QuestionPump", "run_session", "check"]
+__all__ = ["SessionScreen", "QuestionPump", "run_session", "input_card", "check"]
 
 Push = Union[Screen, Sequence[str]]
 
 _CONT = "\x00"          # 模拟器里的宽字符续格占位（与输出无关，只为列号对齐）
+
+# 输入区上下两条线用整宽 `─`（dsh-TUI 聊天页的做法）：出血到终端左右边缘，无圆角、
+# 也没有左右竖线 —— 竖线在窄终端下最先被挤掉，而两条横线已经足够把输入区分出来。
+_CARD_H = "─"
+
+
+def input_card(rows: Sequence[str], bleed_width: int = 0) -> Screen:
+    """输入行 + 菜单行 → 上下两条**出血整宽**细线夹住的输入区。
+
+    `bleed_width` = **终端**宽（两条线按它画，从第 0 列直通右缘）；`0` = 不画线。
+
+    为什么是"出血的整宽线"而不是圆角框：dsh-TUI 的**聊天页输入行**就是上下两条整宽细线
+    （`EffortInputBorder`；看它的真实截图确认过），圆角框只出现在它的**启动页**输入卡上。
+    我第一版把启动页那种圆角框套到了聊天输入上，属于抄错了版本。整宽线同时也是
+    `docs/TUI-SWISS-SPEC.md` §1.2 认的分区手段（规范禁止边框）。
+
+    菜单/提示行接在下面那条线之后 —— 它们不属于输入框内容，塞进线里会让分区随菜单高度乱跳。
+    """
+    text = [str(r) for r in (rows or [])] or [""]
+    rule = max(1, int(bleed_width))
+    out: Screen = []
+    if bleed_width > 0:
+        out.append([Segment(_CARD_H * rule, "dim")])
+    out.append([Segment(text[0], "text")])
+    if bleed_width > 0:
+        out.append([Segment(_CARD_H * rule, "dim")])
+    out += [[Segment(r, "dim")] for r in text[1:]]
+    return out
 
 
 class SessionScreen:
@@ -40,9 +69,14 @@ class SessionScreen:
 
     def __init__(self, write: Callable[[str], object], width: int = 120,
                  region_rows: int = 2, profile: str = "256",
-                 theme: str = "dark", max_region_rows: int = 12) -> None:
+                 theme: str = "dark", max_region_rows: int = 12,
+                 margin: int = MARGIN) -> None:
         self._write = write
-        self.width = int(width)
+        self.width = int(width)                          # 终端宽（页边距之外）
+        self.margin = max(0, int(margin))                 # 左右各几格页边距
+        # 内容宽由 `ace_cell.content_width` 单点决定：这一层以下都按内容宽算，
+        # **不许再减一次**（dsh-TUI `PageMargin` 的那条不变量）。
+        self.content = content_width(self.width, self.margin)
         self.region_rows = max(1, int(region_rows))      # 最少保留几行
         self.max_region_rows = max(self.region_rows, int(max_region_rows))
         self.profile = profile
@@ -78,14 +112,28 @@ class SessionScreen:
         """设置底部保留区。
 
         与上一版的关键差别：**高度是动态的**（输入菜单弹出来时区域会变高），所以这里
-        不再截到固定行数，而是逐行 `fit_row` 规整到终端宽度、最多留 `max_region_rows`
-        行。高度一变，`flush` 会自动改成"收回旧区 + 整块重画"。
+        不再截到固定行数，而是逐行 `fit_row` 规整到**内容宽**、再放进页边距
+        （`ace_cell.margin` 之后每条正好等于终端宽），最多留 `max_region_rows` 行。
+        高度一变，`flush` 会自动改成"收回旧区 + 整块重画"。
         """
         if screen is None:
             self._region = None
             return
-        rows = [fit_row(list(r), self.width) for r in screen]
+        rows: Screen = []
+        for r in screen:
+            segs = list(r)
+            # 出血行（整宽结构线）由构造方按**终端宽**画好 —— 判据就是"宽度已经等于终端宽"。
+            # 内容行最多只有内容宽（这里先 fit 到 content），所以不会被误判。
+            # 见 `input_card` 与 `docs/TUI-SWISS-SPEC.md` §1.2（结构线出血、正文留边距）。
+            if self.margin and line_width(segs) == self.width:
+                rows.append(fit_row(segs, self.width))
+            else:
+                rows.append(margin(fit_row(segs, self.content), self.width, self.margin))
         self._region = rows[-self.max_region_rows:]
+
+    def _indent(self, text: str) -> str:
+        """车道一的定稿行也吃页边距 —— 页边距只在这一处决定，转录与底部区一起缩进。"""
+        return (" " * self.margin + text) if (text and self.margin) else text
 
     # ---------------- 输出侧 ----------------
     def _emit(self, text: str) -> None:
@@ -148,10 +196,10 @@ class SessionScreen:
                 self._painted_rows = 0
             for kind, payload in self._pending:
                 if kind == "raw":
-                    self._emit(payload + "\r\n")          # 原样：颜色是上游的
+                    self._emit(self._indent(payload) + "\r\n")   # 原样：颜色是上游的
                 else:
-                    self._emit(render_terminal([payload], self.profile,
-                                               self.theme)[0] + "\r\n")
+                    self._emit(self._indent(
+                        render_terminal([payload], self.profile, self.theme)[0]) + "\r\n")
             self._pending = []
             if self._region is not None:
                 self._emit(self._paint_full())
@@ -234,16 +282,19 @@ class QuestionPump:
 
 
 def run_session(editor, screen: "SessionScreen", keys, drain, on_submit,
-                running=None, status=None, on_menu=None, tick: float = 0.05,
+                running=None, status=None, activity=None, on_menu=None, tick: float = 0.05,
                 pump: Optional[QuestionPump] = None, on_key=None) -> str:
     """引擎主循环：一帧 = 排空引擎输出 → 画底部区 → 读一个键（带超时）。
 
     - `drain()`：返回**已定稿**的转录行（`Screen` 或字符串行），没有就返回空；
-    - `status()`：返回状态行的 `Line`，可以不提供；
+    - `activity()`：返回**活动行**的 `Line`（"此刻在干什么"），可以不提供；
+    - `status()`：返回**底栏**的 `Line`（"这个会话的环境"），可以不提供；
     - `on_submit(text)`：用户回车后交给上层（起一轮 / 入队）；
     - `on_key(key)`：返回真表示这个键被上层吃掉了（如忙时 Esc = 请求中断）；
     - `pump`：引擎在别的线程提问时的交接点（见 `QuestionPump`）；
     - `keys.read(timeout=tick)`：超时返回 `None`（继续推帧），EOF 返回 `""`。
+
+    底部区顺序 = `[活动行] → 输入区 → [底栏]`（照 dsh-TUI 的槽位）。
 
     返回退出原因：`"eof"` / `"interrupt"` / `"stopped"`。
     """
@@ -256,14 +307,21 @@ def run_session(editor, screen: "SessionScreen", keys, drain, on_submit,
         pending = drain() if callable(drain) else None
         if pending:
             screen.push(pending)
+        # 底部区顺序**照 dsh-TUI**：
+        #   [活动行（本轮在干什么）] → 输入区（上下两条出血整宽线）→ [底栏]
+        # 它在 `Chat.tsx` 里的位置就是活动行在输入簇**之上**（C2 槽）、底栏在输入簇**之下**
+        # （`Chat.tsx:5954` / `:6154`）——两件事：活动行说"此刻在干什么"，底栏说"这个会话的环境"。
+        # 这一层是我们自己的帧缓冲，顺序就是一个列表；前端受内核限制做不到的那件事，这里没有限制。
         region: Screen = []
+        if callable(activity):
+            head = activity()
+            if head:
+                region.append(list(head))
+        region += input_card(editor.render(), screen.width)
         if callable(status):
             head = status()
             if head:
                 region.append(list(head))
-        for i, row in enumerate(editor.render()):
-            # 第 0 行是输入行（正文），其余是菜单/提示（弱化）——层级只靠灰阶，不用颜色
-            region.append([Segment(row, "text" if i == 0 else "dim")])
         screen.set_region(region)
         screen.flush()
 
@@ -385,8 +443,11 @@ def check(width: int = 60, height: int = 14) -> List[str]:
         return [[Segment("状态：" + label)], [Segment("-" * width)]]
 
     def tail(n: int = 2) -> List[str]:
-        """主屏模式下底部区跟着光标走（不是钉在屏幕最底下），所以取最后几个**非空**行。"""
-        rows = [t for t in term.text() if t.strip()]
+        """主屏模式下底部区跟着光标走（不是钉在屏幕最底下），所以取最后几个**非空**行。
+
+        去掉行首空格再比 —— 页边距（`MARGIN` 格）是布局的一部分，断言不该把它算进内容。
+        """
+        rows = [t.strip() for t in term.text() if t.strip()]
         return rows[-n:] if len(rows) >= n else rows
 
     # 1. 首帧：3 行定稿 + 2 行底部区
@@ -401,6 +462,28 @@ def check(width: int = 60, height: int = 14) -> List[str]:
         bad.append("首帧底部区第二行不对：{!r}".format(last2))
     if "gamma" not in "\n".join(term.text()):
         bad.append("首帧转录没写出去")
+
+    # 1b. 页边距（抄 dsh-TUI `PageMargin` 的不变量）：60/80/120 三档下，
+    #     底部区每条**恰好等于终端宽**，且左右各 MARGIN 格；转录同样缩进。
+    for w in (60, 80, 120):
+        cw = content_width(w)
+        if cw != w - 2 * MARGIN:
+            bad.append("内容宽 {} 不等于 {}（页边距只该在一处减）".format(cw, w - 2 * MARGIN))
+        probe = SessionScreen(lambda _t: None, width=w, profile="none")
+        # 内容行按**内容宽**给（宽度 == 终端宽的行是"出血结构线"，判据不同，见下）
+        probe.set_region([[Segment("状态：就绪")], [Segment("-" * (w - 2 * MARGIN))]])
+        for r in (probe._region or []):
+            if line_width(r) != w:
+                bad.append("{} 列下底部区行宽 {} != {}".format(w, line_width(r), w))
+            if r[0].text != " " * MARGIN or r[-1].text != " " * MARGIN:
+                bad.append("{} 列下页边距不对".format(w))
+        # 出血行：宽度已经等于终端宽 ⇒ 原样放行、不许再加页边距（规范 §1.2 的结构线）
+        _bl = SessionScreen(lambda _t: None, width=w, profile="none")
+        _bl.set_region([[Segment("─" * w)]])
+        if (_bl._region or [[None]])[0][0].text != "─" * w:
+            bad.append("{} 列下整宽线被页边距缩进了".format(w))
+    if not any(t.startswith(" " * MARGIN + "alpha") for t in term.text()):
+        bad.append("转录没有页边距（车道一与底部区应该同一条缩进）")
 
     # 2. 空转一帧：0 字节
     chunks.clear()
@@ -521,6 +604,28 @@ def _check_loop(width: int = 60) -> List[str]:
     tail.close()
     if "".join(leftover).strip() == "":
         bad.append("close() 没有擦掉底部区（退出后状态行会留在屏幕上）")
+
+    # 输入区（照 dsh-TUI 的**聊天页**输入行）：上下两条**出血整宽**细线夹住输入行。
+    # 圆角框是它启动页的做法，套到聊天输入上是抄错了版本（见 `input_card` 的 docstring）。
+    card = input_card(["▊ hi", "菜单行"], width)      # 第二参 = 终端宽（所以两条线出血）
+    want_rule = "─" * width
+    if [r[0].text for r in card[:3]] != [want_rule, "▊ hi", want_rule]:
+        bad.append("输入区形状不对：{!r}".format([r[0].text for r in card]))
+    if line_width(card[0]) != width or line_width(card[2]) != width:
+        bad.append("输入区的两条线不是终端宽（没出血到边缘）")
+    if [r[0].role for r in card] != ["dim", "text", "dim", "dim"]:
+        bad.append("输入区的层级不对（线该弱化、正文该是正文）")
+    # 出血线不许被页边距缩进：`set_region` 必须原样放行"宽度 == 终端宽"的行，
+    # 而内容行照旧吃页边距。这条是"整宽线"这件事在渲染层唯一的判据。
+    probe = SessionScreen(lambda _t: None, width=width, profile="none")
+    probe.set_region(card)
+    _reg = probe._region or []
+    if not _reg or _reg[0][0].text != want_rule:
+        bad.append("整宽细线被页边距缩进了（出血行必须原样放行）")
+    if len(_reg) > 1 and _reg[1][0].text != " " * MARGIN:
+        bad.append("输入行没有页边距（内容行该缩进）")
+    if not any("─" * 20 in "\n".join(s) for s in snaps):
+        bad.append("真会话循环里没画出输入区的整宽线")
     return bad
 
 

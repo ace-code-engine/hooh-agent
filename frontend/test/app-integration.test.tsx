@@ -209,12 +209,14 @@ describe('设置面板：`/config`', () => {
 });
 
 describe('选择器：`/resume` 与闭集命令', () => {
-  it('`/resume` → 候选是 sessions.request 那份；回车发出 `/resume <编号>`', async () => {
+  it('`/resume` → 打开**会话管理屏**（数据仍是 sessions.request 那份）；回车发出 `/resume <编号>`', async () => {
     const { client, ...tree } = await setup();
     await submit(tree, '/resume');
     const opened = frame(tree);
     expect(opened).toContain('缓存穿透那次');
-    expect(opened).toContain(i18n.t('sessions_pick'));
+    // `/resume` 的入口从"选择器"升级成**会话管理屏**（双栏：工作区 / 会话 + 筛选）：
+    // 断言改成那块屏的标题键，元素仍是同一份 `sessions.request`。
+    expect(opened).toContain(i18n.t('sessions_manage_title'));
 
     tree.stdin.write('\u001b[B'); // ↓ 到第二条
     await tick();

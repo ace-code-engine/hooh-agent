@@ -37,8 +37,27 @@ config = {
     },
     "prefix_cache": True,                   # WP-3：每请求前校验不可变前缀的 SHA-256 指纹（默认开）
     "tool_surface_budget": 0,               # WP-3：工具常驻上限；0 = 全量常驻（与改动前逐字相同）
+    "color": "auto",                        # 配色（同 --color）：色板名 / "auto" / "accent=#RRGGBB,..."（见下）
 }
 ```
+
+### 配色（`color`，同 `--color`）
+
+```json
+"color": "mist-dark"                        // 选色板
+"color": "auto"                             // 跟随终端背景 → mist-light / mist-dark
+"color": "accent=#FF9EC7,warn=#E0C08A"      // 在当前色板上局部覆盖
+"color": "sakura"                           // ~/.ace/themes/sakura.json（自定义主题）
+```
+
+- 内置色板：`dark` / `light`（**默认**，值未变）/ `mist-dark` / `mist-light` / `mist-ansi`
+  （后三个是移植自 [dsh-TUI](https://github.com/ccch1mneyyy/dsh-TUI) 的「雾蓝」家族）。
+- 优先级：`--color` > `color` > 环境变量 `ACE_THEME` > `COLORFGBG` 推断 > `dark`。
+  **缺省不换色** —— 不写这个键就还是原来的 dark/light。
+- 自定义主题放 `~/.ace/themes/<name>.json`：`{"base": "mist-dark", "colors": {"accent": "#FF9EC7"}}`。
+  未知键与坏值逐键跳过，坏 JSON 只废掉那一个文件，不挡启动。
+- `--color` 的值会同时转交 Ink 前端与 Python 引擎（`ace.cmd` 把参数同时给两边），
+  保证一屏之内只有一套色。完整语义见 [`docs/design/DSH-TUI-PORT.md`](design/DSH-TUI-PORT.md)。
 
 ### 快照校验时机（`snapshot_verify`）
 

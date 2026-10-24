@@ -1,0 +1,121 @@
+import React, { useEffect, useRef, useState } from 'react'
+import { useTerminalSize } from '../ink/hooks/use-terminal-size.js'
+import { Box } from '../ui.js'
+import type { SpinnerMode } from './Spinner/spinnerMode.js'
+import { SpinnerAnimationRow } from './Spinner/SpinnerAnimationRow.js'
+import { SPINNER_VERBS } from '../terminal-utils/spinnerVerbs.js'
+import { tOr } from '../i18n.js'
+import { sample } from 'lodash-es'
+
+/**
+ * The working spinner block shown between the transcript and the prompt
+ * input while a turn is in flight. The channel feeds the mode, token count,
+ * and thinking status while this component owns the compact presentation.
+ *
+ * Random verb is picked once per turn (per mount of the spinner).
+ */
+export function WorkingSpinner({
+  mode,
+  hasActiveTools,
+  responseLengthRef,
+  uploadTokensRef,
+  loadingStartTimeRef,
+  totalPausedMsRef,
+  pauseStartTimeRef,
+  thinkingStatus,
+  suffix,
+}: {
+  mode: SpinnerMode
+  hasActiveTools: boolean
+  responseLengthRef: React.RefObject<number>
+  /** Most recent request's real upload tokens; 0 until the first usage event. */
+  uploadTokensRef: React.RefObject<number>
+  loadingStartTimeRef: React.RefObject<number>
+  totalPausedMsRef: React.RefObject<number>
+  pauseStartTimeRef: React.RefObject<number | null>
+  thinkingStatus: 'thinking' | number | null
+  /** Extra leading field (e.g. the auto-compaction badge) shown before the
+   *  timer/token counters; omitted for an ordinary turn. */
+  suffix?: string
+}): React.ReactNode {
+  const { columns } = useTerminalSize()
+
+  // Pick a random verb once per spinner mount (per turn).
+  const [randomVerb] = useState(() => sample(SPINNER_VERBS) ?? 'Working')
+  const message = `${tOr(`spinner-verb-${randomVerb.toLowerCase()}`, randomVerb)}…`
+
+  return (
+    <Box flexDirection="column" width="100%" alignItems="flex-start">
+      <SpinnerAnimationRow
+        mode={mode}
+        reducedMotion={false}
+        hasActiveTools={hasActiveTools}
+        responseLengthRef={responseLengthRef}
+        uploadTokensRef={uploadTokensRef}
+        message={message}
+        messageColor="accent"
+        shimmerColor="accentShimmer"
+        loadingStartTimeRef={loadingStartTimeRef}
+        totalPausedMsRef={totalPausedMsRef}
+        pauseStartTimeRef={pauseStartTimeRef}
+        spinnerSuffix={suffix === undefined ? null : suffix}
+        verbose
+        columns={columns}
+        thinkingStatus={thinkingStatus}
+      />
+    </Box>
+  )
+}
+
+/**
+ * Tracks thinking status: 'thinking' while the model is streaming reasoning,
+ * then the duration in ms for a minimum 2s display (avoids UI jank).
+ */
+export function useThinkingStatus(
+  isThinking: boolean,
+): 'thinking' | number | null {
+  const [thinkingStatus, setThinkingStatus] = useState<
+    'thinking' | number | null
+  >(null)
+  const thinkingStartRef = useRef<number | null>(null)
+
+  useEffect(() => {
+    let showDurationTimer: ReturnType<typeof setTimeout> | null = null
+    let clearStatusTimer: ReturnType<typeof setTimeout> | null = null
+
+    if (isThinking) {
+      // Started thinking
+      if (thinkingStartRef.current === null) {
+        thinkingStartRef.current = Date.now()
+        setThinkingStatus('thinking')
+      }
+    } else if (thinkingStartRef.current !== null) {
+      // Stopped thinking - calculate duration and ensure 2s minimum display
+      const duration = Date.now() - thinkingStartRef.current
+      const elapsed = Date.now() - thinkingStartRef.current
+      const remainingThinkingTime = Math.max(0, 2000 - elapsed)
+
+      thinkingStartRef.current = null
+
+      // Show "thinking..." for remaining time if < 2s elapsed, then show duration
+      const showDuration = (): void => {
+        setThinkingStatus(duration)
+        // Clear after 2s
+        clearStatusTimer = setTimeout(() => setThinkingStatus(null), 2000)
+      }
+
+      if (remainingThinkingTime > 0) {
+        showDurationTimer = setTimeout(showDuration, remainingThinkingTime)
+      } else {
+        showDuration()
+      }
+    }
+
+    return () => {
+      if (showDurationTimer) clearTimeout(showDurationTimer)
+      if (clearStatusTimer) clearTimeout(clearStatusTimer)
+    }
+  }, [isThinking])
+
+  return thinkingStatus
+}

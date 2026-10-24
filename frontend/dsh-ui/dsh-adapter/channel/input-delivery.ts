@@ -1,0 +1,392 @@
+import type { Context } from '@deepseek-ai/cordis'
+import type { Agent } from '@deepseek-ai/dsh-agent'
+import { createUserMessage, type UserMessage } from '@deepseek-ai/dsh-llm'
+import { t } from '../../i18n.js'
+import { logForDebugging } from '../../utils/debug.js'
+import { dispatchTuiDecision } from '../extension-events.js'
+import {
+  firstStaleComposerToken,
+  formatMissingReference,
+  orderedComposerImages,
+  type ComposerImages,
+} from './composer-images.js'
+import { expandComposerMentions } from './composer-mentions.js'
+import { appendAttachedContextBlocks } from './attached-context.js'
+import { normalizeInputDecision } from './decisions.js'
+import { attachIdeSelection } from './ide-selection.js'
+import { mentionAttachments, mentionFs } from './mentions.js'
+import type { ChannelOwner } from './owner.js'
+import type { AttachedContext, ChannelSelection, SelectionAttachment } from '../../adapter/ports/channel-view.js'
+import type {
+  ChannelImageBlock,
+  ChannelState,
+  ComposerImageRef,
+  MentionAttachments,
+  MentionFs,
+  PendingMessage,
+  StagedImageInput,
+} from './types.js'
+
+/** One submission's enqueue-time world: the session it was typed in, the
+ *  services that resolve its references, and the capabilities live then. */
+interface UserTextOrigin {
+  readonly agent: Agent
+  readonly agentId: string
+  readonly generation: number
+  readonly cwd: string
+  readonly fs: MentionFs | undefined
+  readonly attachments: MentionAttachments | undefined
+  readonly stagedImages: ReadonlyMap<string, ChannelImageBlock['attachment']>
+  /** Live editor selection AT ENQUEUE (undefined = none). Captured here so a
+   *  selection made while the FIFO or mention expansion parks the delivery
+   *  can never attach to this message. */
+  readonly selection: ChannelSelection | undefined
+  /** "Send to Chat" contexts AT ENQUEUE, already taken off the channel (see
+   *  `consumeAttachedContexts`): the same one-shot rule as the selection, and
+   *  the reason a chip can never ride along with a second submission. */
+  readonly attachedContexts: readonly AttachedContext[]
+}
+
+/** Input FIFO, staged attachments and decision notice timers share one lifetime. */
+export function createInputDelivery(
+ ctx: Context, owner: ChannelOwner, binding: { readonly agent: Agent },
+ state: () => Pick<ChannelState, 'cwd' | 'agentId' | 'agentBindingGeneration'>,
+ notify: ChannelState['notify'],
+ trackPending: (message: { id: string; text: string; images?: readonly ComposerImageRef[] }, placement: PendingMessage['placement']) => void,
+ untrackPending: (id: string) => void,
+ composer: ComposerImages,
+ selection: () => ChannelSelection | undefined,
+ rememberSelection: (messageId: string, info: SelectionAttachment) => void,
+ /**
+  * Take-and-clear the staged "Send to Chat" contexts for the submission being
+  * enqueued (side-panel §6.7). Optional so a bare embedder/fixture that owns
+  * only the decision seam stays constructible; with it absent the origin
+  * simply carries no contexts.
+  */
+ consumeAttachedContexts?: () => readonly AttachedContext[],
+) {
+  /**
+   * `@` file mentions (issue #15): expansion reads files asynchronously, so
+   * every user-text delivery (submit / steer / interrupt-requeue) funnels
+   * through this chain to keep the send order FIFO.
+   */
+  let inputChain: Promise<void> = Promise.resolve()
+
+  /**
+   * Attached-context registry (issue #842): `deliverUserText(..., attach)`
+   * records the model-facing companion message under the DELIVERED user
+   * message's id. The resident `agent/pre-step` listener below claims an entry
+   * exactly once — on the step that admits its user message — and appends it
+   * AFTER `next()`'s batch, the same shape and order as dsh-tool-skill's
+   * gesture boundary. The map is emptied on claim, on inbox discard and on
+   * channel release (owner.own below).
+   */
+  const attachedByMessageId = new Map<string, UserMessage>()
+
+  /** Claim the batch's registered attachments, deleting each entry so a later
+   *  step can never append it a second time. */
+  const claimAttachments = (messages: readonly UserMessage[]): UserMessage[] => {
+    if (attachedByMessageId.size === 0) return []
+    const attached: UserMessage[] = []
+    for (const message of messages) {
+      const context = attachedByMessageId.get(message.id)
+      if (context === undefined) continue
+      attachedByMessageId.delete(message.id)
+      attached.push(context)
+    }
+    return attached
+  }
+
+  /** Drop an attachment whose user message will never be claimed (inbox discard). */
+  const retireAttachment = (messageId: string): void => {
+    attachedByMessageId.delete(messageId)
+  }
+
+  /**
+   * Resident `agent/pre-step` listener (D3/D4): `await next()` lets every
+   * later transform run first; the waterfall applies AFTER-next transforms in
+   * registration order, so registering at channel construction keeps this
+   * append LAST (范例: presets/liangshen/instruction-hint.mjs). A rejected
+   * step never claims — no context message without its admitted user line —
+   * and a released owner returns the decision untouched. One `owner.own`
+   * lifetime covers both the subscription and the whole registry (D5).
+   */
+  const disposePreStep = ctx.on('agent/pre-step', async (_payload, next) => {
+    const decision = await next()
+    if (decision.kind === 'reject') return decision
+    if (!owner.current()) return decision
+    const attached = claimAttachments(decision.messages)
+    if (attached.length === 0) return decision
+    return { ...decision, messages: [...decision.messages, ...attached] }
+  })
+  owner.own(() => {
+    disposePreStep()
+    attachedByMessageId.clear()
+  })
+
+  /** D-6 fence: the submission belongs to the session it was typed in. */
+  const current = (origin: UserTextOrigin): boolean =>
+    owner.current() && binding.agent === origin.agent && state().agentBindingGeneration === origin.generation
+
+  /** D-6: bind the submission to the session it was typed in AT ENQUEUE
+   *  TIME. The FIFO chain may park this task behind a slow predecessor
+   *  while the user /new's away — capturing the agent at run time would
+   *  adopt the NEW session as this text's origin and deliver the old
+   *  conversation's words into it. */
+  const captureOrigin = (): UserTextOrigin => ({
+    agent: binding.agent,
+    agentId: state().agentId,
+    generation: state().agentBindingGeneration,
+    cwd: state().cwd,
+    fs: mentionFs(ctx),
+    attachments: mentionAttachments(ctx),
+    stagedImages: composer.snapshot(),
+    selection: selection(),
+    // Consumed (not merely read): the snapshot and the clear are one step, so
+    // the chips leave with the submission that owns them and a second,
+    // faster-typed message can never re-attach the same context.
+    attachedContexts: consumeAttachedContexts?.() ?? [],
+  })
+
+  /**
+   * Expand the text's `@` mentions and deliver ONE user message: the typed
+   * text stays the first content block (the transcript bubble renders it —
+   * never the file dump) and each resolved reference appends a model-facing
+   * attachment block. The pending preview tracks the typed text.
+   */
+  const deliverUserText = async (
+    text: string,
+    placement: PendingMessage['placement'],
+    images: readonly ComposerImageRef[],
+    origin: UserTextOrigin,
+    attach?: UserMessage,
+  ): Promise<void> => {
+    const orderedImages = orderedComposerImages(text, images, origin.stagedImages)
+    // A `[Image #N]` placeholder whose staging was evicted (FIFO cap) or
+    // whose draft capability was lost (history/rewind/session switch) would
+    // otherwise ship as plain text with no image attached — warn loudly,
+    // deliver unchanged (the text is the user's; rewriting is worse).
+    const stale = firstStaleComposerToken(text, orderedImages)
+    if (stale !== undefined) {
+      notify(t('input-image-token-stale', { token: stale }), { color: 'warning', timeoutMs: 5000 })
+    }
+    const expansion = await expandComposerMentions(
+      origin.fs,
+      origin.cwd,
+      text,
+      origin.attachments,
+      orderedImages,
+    )
+    // Mention reads can park for arbitrary I/O. A session switch during that
+    // await invalidates the whole submission; neither the old nor the new
+    // agent may receive a message assembled for a different conversation.
+    if (!current(origin)) {
+      notify(t('ext-stale-dropped'), { color: 'warning', timeoutMs: 4000 })
+      return
+    }
+    // IDE selection consumption: append the ENQUEUE-time selection as its own
+    // attached-file block — direct construction, never text parsing, failures
+    // silently skipped (an IDE-side extra must never block a send).
+    const selectionAttached = await attachIdeSelection(expansion.blocks, origin.cwd, origin.selection, origin.fs)
+    // "Send to Chat": append every context staged for THIS submission as its
+    // own `<attached-context …>` block, behind the typed text and the
+    // mention/selection attachments. Unlike the selection there is nothing to
+    // resolve and nothing that can fail — the body is already in hand.
+    appendAttachedContextBlocks(expansion.blocks, origin.attachedContexts)
+    const message = createUserMessage({
+      content: expansion.blocks,
+      source: { kind: 'user' },
+    })
+    if (selectionAttached !== undefined) rememberSelection(message.id, selectionAttached)
+    // The message is real from here on: remember its attached context BEFORE
+    // the agent call so the pre-step listener can find it (D6). A throwing
+    // followup/steer rolls both the pending preview and this entry back.
+    if (attach !== undefined) attachedByMessageId.set(message.id, attach)
+    // Track BEFORE the agent call: a synchronous throw inside
+    // followup/steer rolls the preview back; otherwise the inbox events
+    // retire it once the message is claimed or discarded.
+    trackPending({ id: message.id, text, images }, placement)
+    try {
+      if (placement === 'steer') origin.agent.steer(message)
+      else origin.agent.followup(message)
+    } catch (error) {
+      if (attach !== undefined) attachedByMessageId.delete(message.id)
+      untrackPending(message.id)
+      throw error
+    }
+    if (expansion.attached.length > 0) {
+      notify(t('mentions-attached', { count: expansion.attached.length }), { timeoutMs: 2500 })
+    }
+    if (expansion.missing.length > 0) {
+      notify(t('mentions-missing', { paths: expansion.missing.map(formatMissingReference).join(' ') }), {
+        color: 'warning',
+        timeoutMs: 4000,
+      })
+    }
+  }
+  /**
+   * RFC 0005 D-8: a flow parked on a plugin decision must be user-observable.
+   * Decisions normally resolve in milliseconds, so the notice only fires
+   * once the wait crosses a threshold — a slow plugin (e.g. one showing a
+   * managed dialog) then explains the pause instead of looking like the TUI
+   * ate the input.
+   */
+  const DECISION_PENDING_MS = 400
+  /**
+   * Session-scoped ledger of live pending-decision indicators. A session
+   * replacement must cancel the notice timer and dismiss an already-visible
+   * sticky notice even when the plugin's decision promise never settles; the
+   * owner-scoped release alone would keep it up until channel teardown, and a
+   * timer firing after the switch would raise the notice into the session that
+   * replaced the one which parked the input (review finding: stale decision
+   * notices were no longer dismissed or suppressed on session change).
+   */
+  const pendingDecisionCleanups = new Set<() => void>()
+  const withDecisionPending = <T>(name: string, pending: Promise<T>, origin?: UserTextOrigin): Promise<T> => {
+    let dismiss: (() => void) | undefined
+    let timer: ReturnType<typeof setTimeout> | undefined
+    const cleanup = (): void => {
+      if (timer !== undefined) { clearTimeout(timer); timer = undefined }
+      const raised = dismiss
+      dismiss = undefined
+      raised?.()
+      pendingDecisionCleanups.delete(cleanup)
+    }
+    timer = setTimeout(() => {
+      // Sticky (timeoutMs 0), D-8: the indicator must cover the WHOLE wait —
+      // an auto-expiring notice would vanish after ~4s while the decision,
+      // the delivery and every queued FIFO task behind them stay parked,
+      // leaving the user with no sign the flow is still waiting. It comes
+      // down only when the decision settles (finally below); a decision
+      // that never settles keeps its indicator up, which is the truthful
+      // state.
+      // A notice must never be raised for a session that has already been
+      // replaced: the switch drains this ledger, and the origin fence covers
+      // a timer that fires before that drain lands.
+      if (origin !== undefined && !current(origin)) { cleanup(); return }
+      if (!owner.current()) return
+      dismiss = notify(t('ext-decision-pending', { event: name }), { timeoutMs: 0 })
+    }, DECISION_PENDING_MS)
+    pendingDecisionCleanups.add(cleanup)
+    // Both exits are covered: a fast decision clears the timer before it
+    // fires; a slow one dismisses the indicator it raised. The owner release
+    // keeps the channel-teardown path working on top of the session drain.
+    const release = owner.own(cleanup)
+    return pending.finally(release)
+  }
+  /**
+   * The `tui/input` decision event (pi's `input` seam): the FIRST plugin
+   * returning a valid decision wins — transform the text, mark it handled,
+   * or cancel it. No listeners (or only crashing/malformed ones) means
+   * delivery proceeds unchanged, so a broken plugin can never wedge the
+   * input path — and can never skip a later veto listener either
+   * (dispatchTuiDecision isolates crashes and normalizes returns per
+   * listener instead of bailing on the first object).
+   *
+   * Decision AND delivery enter one FIFO chain in submission order: a slow
+   * listener on A parks A's delivery AND any later submissions behind it —
+   * without the chain, B's decision could resolve first and the model would
+   * receive B before A. Each submission binds its origin agent AT ENQUEUE,
+   * so a session switch landing before OR during its decision drops the
+   * stale text with a notice instead of sending the old conversation's
+   * words to the new session.
+   */
+  const runUserTextDecision = async (
+    text: string,
+    placement: PendingMessage['placement'],
+    images: readonly ComposerImageRef[],
+    origin: UserTextOrigin,
+    attach?: UserMessage,
+  ): Promise<void> => {
+    // Stale detection compares the AGENT REFERENCE, not the id: session ids
+    // are reusable (A → /new → /resume A lands back on the same id with a
+    // fresh agent), so an id check has an ABA hole. Both origin values are
+    // ENQUEUE-time captures (see dispatchUserText): a decision parked behind
+    // a slow predecessor must still be judged against the session its text
+    // was typed in, not whichever session is live when it finally runs.
+    const dropIfStale = (): boolean => {
+      if (current(origin)) return false
+      notify(t('ext-stale-dropped'), { color: 'warning', timeoutMs: 4000 })
+      return true
+    }
+    // A follower can wait behind an older slow decision while /new replaces
+    // the session. Do not even expose that stale text to plugins.
+    if (dropIfStale()) return
+    const decision = await withDecisionPending('tui/input', dispatchTuiDecision(ctx, 'tui/input', {
+      text,
+      delivery: placement === 'steer' ? 'steer' : 'followup',
+      sessionId: origin.agentId,
+      cwd: origin.cwd,
+    }, normalizeInputDecision), origin)
+    // Staleness wins over cancel/handled: an old plugin result must neither
+    // toast into nor claim input from the replacement session.
+    if (dropIfStale()) return
+    if (decision !== undefined) {
+      // Both intercepts toast — a bare {cancel}/{handled} must not make the
+      // typed line vanish silently (the host-localized fallback mirrors the
+      // other decision events' ext-action-cancelled handling).
+      if ('cancel' in decision) {
+        notify(decision.reason ?? t('ext-action-cancelled'), { color: 'warning', timeoutMs: 4000 })
+        return
+      }
+      if ('handled' in decision) {
+        notify(decision.notice ?? t('ext-action-handled'), { timeoutMs: 4000 })
+        return
+      }
+      text = decision.text.trim()
+    }
+    try {
+      await deliverUserText(text, placement, images, origin, attach)
+    } catch (error: unknown) {
+      // The FIFO must survive a failed expansion/send: surface it, then let
+      // the next input proceed through the settled inputChain.
+      const message = error instanceof Error ? error.message : String(error)
+      logForDebugging(`submit: delivery failed (${message})`)
+      notify(t('send-failed', { err: message }), { color: 'error' })
+    }
+  }
+  const dispatchUserText = (
+    text: string,
+    placement: PendingMessage['placement'],
+    images: readonly ComposerImageRef[] = [],
+    attach?: UserMessage,
+  ): void => {
+    const origin = captureOrigin()
+    const capturedImages = composer.captureDraftImages(text, images)
+    inputChain = inputChain.then(() => runUserTextDecision(text, placement, capturedImages, origin, attach)).catch((error: unknown) => {
+      // The chain must survive a failed decision: log, then continue with
+      // the next queued submission.
+      ctx.logger.warn('dsh-tui: tui/input dispatch failed: %o', error)
+    })
+  }
+  /** Public companion for callers that own a line but not a draft (skill
+   *  registrations): same decision pass and FIFO as a typed submit. The
+   *  optional `attach` is registered by `deliverUserText` only once its user
+   *  message is real, then appended at the end of that message's step batch. */
+  const deliverUserTextNow = (
+    text: string,
+    placement: PendingMessage['placement'],
+    images: readonly ComposerImageRef[] = [],
+    attach?: UserMessage,
+  ): void => dispatchUserText(text, placement, images, attach)
+  /** Main's `clearStagedImages`: revoke capabilities AND release the FIFO so
+   *  a task parked on the replaced session cannot wedge the new one, and drop
+   *  every pending-decision indicator owned by the session being replaced. */
+  const clearStagedImages = (): void => {
+    composer.clearStagedImages()
+    inputChain = Promise.resolve()
+    for (const cleanup of [...pendingDecisionCleanups]) cleanup()
+  }
+
+  return {
+    dispatchUserText,
+    deliverUserText: deliverUserTextNow,
+    claimAttachments,
+    retireAttachment,
+    withDecisionPending,
+    clearStagedImages,
+    stageImage: (input: StagedImageInput): Promise<string> => composer.stageImage(input),
+    stagedImages: (): ReadonlyMap<string, ChannelImageBlock['attachment']> => composer.snapshot(),
+    composer,
+  }
+}

@@ -4,6 +4,10 @@
   "private": true,
   "description": "HooH 的主前端（TypeScript + Ink）。与 Python 引擎通过 `ace --serve` 的 NDJSON 协议对话。",
   "type": "module",
+  "//": "`imports`：迁入的 dsh-ui 用包级别名 `#tui-profile/*`（上游 package.json 里定义的）。",
+  "imports": {
+    "#tui-profile/*": "./dsh-ui/tui-profile/protocols/*.js"
+  },
   "engines": {
     "node": ">=18"
   },
@@ -14,12 +18,30 @@
     "preview": "tsx tools/preview.tsx"
   },
   "dependencies": {
+    "@dsh-std/command": "file:dsh-ui/_vendor/dsh-std/command",
+    "@dsh-std/connection": "file:dsh-ui/_vendor/dsh-std/connection",
+    "@dsh-std/core": "file:dsh-ui/_vendor/dsh-std/core",
+    "@dsh-std/manifest": "file:dsh-ui/_vendor/dsh-std/manifest",
+    "@dsh-std/messages": "file:dsh-ui/_vendor/dsh-std/messages",
+    "@dsh-std/presentation": "file:dsh-ui/_vendor/dsh-std/presentation",
+    "@dsh-std/storage": "file:dsh-ui/_vendor/dsh-std/storage",
+    "bidi-js": "^1.1.0",
     "chalk": "^5.3.0",
+    "cli-highlight": "^2.1.11",
+    "diff": "^9.0.0",
+    "figures": "^6.1.0",
+    "highlight.js": "^11.12.0",
     "ink": "^5.0.1",
+    "lodash-es": "^4.18.1",
+    "marked": "^18.1.1",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "react-reconciler": "^0.34.0",
-    "usehooks-ts": "^3.1.0"
+    "semver": "^7.8.5",
+    "signal-exit": "^4.1.0",
+    "supports-hyperlinks": "^4.6.0",
+    "usehooks-ts": "^3.1.0",
+    "yaml": "^2.9.1"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",

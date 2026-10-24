@@ -1,0 +1,412 @@
+/**
+ * Query the terminal and await responses without timeouts.
+ *
+ * Terminal queries (DECRQM, DA1, OSC 11, etc.) share the stdin stream
+ * with keyboard input. Response sequences are syntactically
+ * distinguishable from key events, so the input parser recognizes them
+ * and dispatches them here.
+ *
+ * To avoid timeouts, each query batch is terminated by a DA1 sentinel
+ * (CSI c) — every terminal since VT100 responds to DA1, and terminals
+ * answer queries in order. So: if your query's response arrives before
+ * DA1's, the terminal supports it; if DA1 arrives first, it doesn't.
+ *
+ * Usage:
+ *   const [sync, grapheme] = await Promise.all([
+ *     querier.send(decrqm(2026)),
+ *     querier.send(decrqm(2027)),
+ *     querier.flush(),
+ *   ])
+ *   // sync and grapheme are DECRPM responses or undefined if unsupported
+ */
+
+import type { TerminalResponse } from './parse-keypress.js'
+import { csi } from './termio/csi.js'
+import { osc } from './termio/osc.js'
+
+/** A terminal query: an outbound request sequence paired with a matcher
+ *  that recognizes the expected inbound response. Built by `decrqm()`,
+ *  `oscColor()`, `kittyKeyboard()`, etc. */
+export type TerminalQuery<T extends TerminalResponse = TerminalResponse> = {
+  /** Escape sequence to write to stdout */
+  request: string
+  /** Recognizes the expected response in the inbound stream */
+  match: (r: TerminalResponse) => r is T
+  /** The response type this query can be answered by, declared separately
+   *  from `match` (a predicate cannot be introspected). The input parser
+   *  reads it through {@link TerminalQuerier.pendingResponseTypes} to bind
+   *  an ambiguous reply tail to the queries actually awaiting an answer. */
+  responseType: TerminalResponse['type']
+}
+
+type DecrpmResponse = Extract<TerminalResponse, { type: 'decrpm' }>
+type Da1Response = Extract<TerminalResponse, { type: 'da1' }>
+type Da2Response = Extract<TerminalResponse, { type: 'da2' }>
+type KittyResponse = Extract<TerminalResponse, { type: 'kittyKeyboard' }>
+type KittyGraphicsResponse = Extract<TerminalResponse, { type: 'kittyGraphics' }>
+type TerminalPixelSizeResponse = Extract<
+  TerminalResponse,
+  { type: 'terminalPixelSize' }
+>
+type CursorPosResponse = Extract<TerminalResponse, { type: 'cursorPosition' }>
+type OscResponse = Extract<TerminalResponse, { type: 'osc' }>
+type XtversionResponse = Extract<TerminalResponse, { type: 'xtversion' }>
+
+// -- Query builders --
+
+/**
+ * DECRQM: request DEC private mode status (CSI ? mode $ p).
+ * Terminal replies with DECRPM (CSI ? mode ; status $ y) or ignores.
+ * @param mode - the DEC private mode number to query.
+ * @returns a query whose response is the DECRPM reply for mode.
+ */
+export function decrqm(mode: number): TerminalQuery<DecrpmResponse> {
+  return {
+    request: csi(`?${mode}$p`),
+    match: (r): r is DecrpmResponse => r.type === 'decrpm' && r.mode === mode,
+    responseType: 'decrpm',
+  }
+}
+
+/**
+ * Primary Device Attributes query (CSI c). Every terminal answers this —
+ * used internally by flush() as a universal sentinel. Call directly if
+ * you want the DA1 params.
+ * @returns a query whose response is the DA1 reply.
+ */
+export function da1(): TerminalQuery<Da1Response> {
+  return {
+    request: csi('c'),
+    match: (r): r is Da1Response => r.type === 'da1',
+    responseType: 'da1',
+  }
+}
+
+/**
+ * Secondary Device Attributes query (CSI > c). Returns terminal version.
+ * @returns a query whose response is the DA2 reply.
+ */
+export function da2(): TerminalQuery<Da2Response> {
+  return {
+    request: csi('>c'),
+    match: (r): r is Da2Response => r.type === 'da2',
+    responseType: 'da2',
+  }
+}
+
+/**
+ * Query current Kitty keyboard protocol flags (CSI ? u).
+ * Terminal replies with CSI ? flags u or ignores.
+ * @returns a query whose response is the Kitty keyboard reply.
+ */
+export function kittyKeyboard(): TerminalQuery<KittyResponse> {
+  return {
+    request: csi('?u'),
+    match: (r): r is KittyResponse => r.type === 'kittyKeyboard',
+    responseType: 'kittyKeyboard',
+  }
+}
+
+/**
+ * Query direct-data and zlib support for the Kitty graphics protocol with one
+ * transparent 1×1 RGBA pixel. The terminal echoes the image id in its reply.
+ */
+export function kittyGraphics(
+  imageId: number,
+): TerminalQuery<KittyGraphicsResponse> {
+  const id = Number.isSafeInteger(imageId) && imageId > 0 ? imageId : 31
+  return {
+    // One transparent RGBA pixel compressed with RFC 1950 zlib. Probe the
+    // same direct-data + compression path used by real renderer uploads.
+    request: `\u001b_Gi=${id},s=1,v=1,a=q,t=d,f=32,o=z;eAFjYGBgAAAABAAB\u001b\\`,
+    match: (r): r is KittyGraphicsResponse =>
+      r.type === 'kittyGraphics' && r.imageId === id,
+    responseType: 'kittyGraphics',
+  }
+}
+
+/** XTWINOPS: query the physical pixel dimensions of one terminal cell. */
+export function terminalCellSizePixels(): TerminalQuery<TerminalPixelSizeResponse> {
+  return {
+    request: csi('16t'),
+    match: (r): r is TerminalPixelSizeResponse =>
+      r.type === 'terminalPixelSize' && r.scope === 'cell',
+    responseType: 'terminalPixelSize',
+  }
+}
+
+/** XTWINOPS: query the terminal text area's physical pixel dimensions. */
+export function terminalWindowSizePixels(): TerminalQuery<TerminalPixelSizeResponse> {
+  return {
+    request: csi('14t'),
+    match: (r): r is TerminalPixelSizeResponse =>
+      r.type === 'terminalPixelSize' && r.scope === 'window',
+    responseType: 'terminalPixelSize',
+  }
+}
+
+/**
+ * DECXCPR: request cursor position with DEC-private marker (CSI ? 6 n).
+ * Terminal replies with CSI ? row ; col R. The `?` marker is critical —
+ * the plain DSR form (CSI 6 n → CSI row;col R) is ambiguous with
+ * modified F3 keys (Shift+F3 = CSI 1;2 R, etc.).
+ * @returns a query whose response is the cursor-position reply.
+ */
+export function cursorPosition(): TerminalQuery<CursorPosResponse> {
+  return {
+    request: csi('?6n'),
+    match: (r): r is CursorPosResponse => r.type === 'cursorPosition',
+    responseType: 'cursorPosition',
+  }
+}
+
+/**
+ * OSC dynamic color query (e.g. OSC 11 for bg color, OSC 10 for fg).
+ * The `?` data slot asks the terminal to reply with the current value.
+ * @param code - the OSC color code to query (10 = fg, 11 = bg, etc.).
+ * @returns a query whose response is the OSC color reply.
+ */
+export function oscColor(code: number): TerminalQuery<OscResponse> {
+  return {
+    request: osc(code, '?'),
+    match: (r): r is OscResponse => r.type === 'osc' && r.code === code,
+    responseType: 'osc',
+  }
+}
+
+/**
+ * XTVERSION: request terminal name/version (CSI > 0 q).
+ * Terminal replies with DCS > | name ST (e.g. "xterm.js(5.5.0)") or ignores.
+ * This survives SSH — the query goes through the pty, not the environment,
+ * so it identifies the *client* terminal even when TERM_PROGRAM isn't
+ * forwarded. Used to detect xterm.js for wheel-scroll compensation.
+ * @returns a query whose response is the XTVERSION reply.
+ */
+export function xtversion(): TerminalQuery<XtversionResponse> {
+  return {
+    request: csi('>0q'),
+    match: (r): r is XtversionResponse => r.type === 'xtversion',
+    responseType: 'xtversion',
+  }
+}
+
+// -- Querier --
+
+/** Sentinel request sequence (DA1). Kept internal; flush() writes it. */
+const SENTINEL = csi('c')
+
+type Pending =
+  | {
+      kind: 'query'
+      match: (r: TerminalResponse) => boolean
+      responseType: TerminalResponse['type']
+      resolve: (r: TerminalResponse | undefined) => void
+      releaseRawMode: () => void
+    }
+  | { kind: 'sentinel'; resolve: (attributes?: Da1Response) => void; releaseRawMode: () => void }
+
+/**
+ * Sends terminal queries to stdout and resolves their responses, using a
+ * flush() sentinel barrier so queries never time out.
+ */
+export class TerminalQuerier {
+  /**
+   * Interleaved queue of queries and sentinels in send order. Terminals
+   * respond in order, so each flush() barrier only drains queries queued
+   * before it — concurrent batches from independent callers stay isolated.
+   */
+  private queue: Pending[] = []
+
+  /**
+   * Set by dispose(). Post-dispose send()/flush() must not touch the
+   * terminal: they would re-enable raw mode (holdRawMode) and emit query
+   * bytes after the exit funnel's cleanup has already restored cooked
+   * mode — the replies then leak into the shell (#507). Resolving as
+   * "no answer" keeps callers' .then() chains inert instead of pending.
+   */
+  private disposed = false
+  private suspended = false
+
+  constructor(
+    private stdout: NodeJS.WriteStream,
+    private setRawMode?: (enabled: boolean) => void,
+  ) {}
+
+  /** Whether terminal query I/O is paused for an external process handoff. */
+  get isSuspended(): boolean {
+    return this.suspended
+  }
+
+  /**
+   * In-flight evidence for the input parser (read-only observation): true
+   * while at least one query or flush sentinel is still waiting for its
+   * reply. Purely observational — queue semantics are untouched.
+   */
+  get hasPending(): boolean {
+    return this.queue.length > 0
+  }
+
+  /**
+   * In-flight evidence for the input parser (read-only observation): the
+   * response types of the queries still awaiting a reply, plus `da1` when a
+   * flush() sentinel is still open (DA1 is the reply that resolves it).
+   *
+   * This is bound to the query lifecycle on purpose. A boolean "something
+   * was sent recently" lets any recent query authorize a claim for bytes
+   * that may belong to no query at all, so the parser receives the expected
+   * types instead: a reply tail is only claimed when its shape can complete
+   * into one of them, and a query resolved by a sentinel stops counting the
+   * moment its promise settles. Purely observational — queue semantics are
+   * untouched.
+   */
+  get pendingResponseTypes(): ReadonlySet<TerminalResponse['type']> {
+    const types = new Set<TerminalResponse['type']>()
+    for (const pending of this.queue) {
+      if (pending.kind === 'query') types.add(pending.responseType)
+      else types.add('da1')
+    }
+    return types
+  }
+
+  private holdRawMode(): () => void {
+    this.setRawMode?.(true)
+    return () => this.setRawMode?.(false)
+  }
+
+  /**
+   * Send a query and wait for its response.
+   *
+   * Resolves with the response when `query.match` matches an incoming
+   * TerminalResponse, or with `undefined` when a flush() sentinel arrives
+   * before any matching response (meaning the terminal ignored the query).
+   *
+   * Never rejects; never times out on its own. If you never call flush()
+   * and the terminal doesn't respond, the promise remains pending.
+   * @param query - the query to send and await a response for.
+   * @returns the matched response, or undefined when the terminal did not
+   *   answer before the next flush() sentinel.
+   */
+  send<T extends TerminalResponse>(
+    query: TerminalQuery<T>,
+  ): Promise<T | undefined> {
+    if (this.disposed || this.suspended) return Promise.resolve(undefined)
+    return new Promise(resolve => {
+      this.queue.push({
+        kind: 'query',
+        match: query.match,
+        responseType: query.responseType,
+        resolve: r => resolve(r as T | undefined),
+        releaseRawMode: this.holdRawMode(),
+      })
+      this.stdout.write(query.request)
+    })
+  }
+
+  /**
+   * Send the DA1 sentinel. Resolves when DA1's response arrives.
+   *
+   * As a side effect, all queries still pending when DA1 arrives are
+   * resolved with `undefined` (terminal didn't respond → doesn't support
+   * the query). This is the barrier that makes send() timeout-free.
+   *
+   * Safe to call with no pending queries — still waits for a round-trip.
+   */
+  flush(): Promise<void>
+  flush(options: { attributes: true }): Promise<Da1Response | undefined>
+  flush(options?: { attributes: true }): Promise<void | Da1Response> {
+    if (this.disposed || this.suspended) return Promise.resolve()
+    return new Promise(resolve => {
+      this.queue.push({
+        kind: 'sentinel',
+        resolve: attributes => resolve(options?.attributes ? attributes : undefined),
+        releaseRawMode: this.holdRawMode(),
+      })
+      this.stdout.write(SENTINEL)
+    })
+  }
+
+  /** Resolve and release all pending queries when their owning app unmounts. */
+  dispose(): void {
+    this.disposed = true
+    this.suspended = true
+    this.drainPending()
+  }
+
+  /**
+   * Receives responses that answer no pending query — e.g. a Kitty graphics
+   * error for a placement command sent without suppressing failures.
+   */
+  onUnsolicited: ((r: TerminalResponse) => void) | undefined = undefined
+
+  /**
+   * Dispatch a response parsed from stdin. Called by App.tsx's
+   * processKeysInBatch for every `kind: 'response'` item.
+   *
+   * Matching strategy:
+   * - First, try to match a pending query (FIFO, first match wins).
+   *   This lets callers send(da1()) explicitly if they want the DA1
+   *   params — a separate DA1 write means the terminal sends TWO DA1
+   *   responses. The first matches the explicit query; the second
+   *   (unmatched) fires the sentinel.
+   * - Otherwise, if this is a DA1, fire the FIRST pending sentinel:
+   *   resolve any queries queued before that sentinel with undefined
+   *   (the terminal answered DA1 without answering them → unsupported)
+   *   and signal its flush() completion. Only draining up to the first
+   *   sentinel keeps later batches intact when multiple callers have
+   *   concurrent queries in flight.
+   * - Unsolicited responses (no match, no sentinel) go to
+   *   {@link onUnsolicited} when set, and are dropped otherwise.
+   * @param r - the response parsed from stdin.
+   */
+  onResponse(r: TerminalResponse): void {
+    if (this.suspended) return
+    const idx = this.queue.findIndex(p => p.kind === 'query' && p.match(r))
+    if (idx !== -1) {
+      const [q] = this.queue.splice(idx, 1)
+      if (q?.kind === 'query') {
+        q.resolve(r)
+        q.releaseRawMode()
+      }
+      return
+    }
+
+    if (r.type === 'da1') {
+      const s = this.queue.findIndex(p => p.kind === 'sentinel')
+      if (s === -1) {
+        this.onUnsolicited?.(r)
+        return
+      }
+      for (const p of this.queue.splice(0, s + 1)) {
+        if (p.kind === 'query') p.resolve(undefined)
+        else p.resolve(r)
+        p.releaseRawMode()
+      }
+      return
+    }
+    this.onUnsolicited?.(r)
+  }
+
+  /**
+   * Resolve outstanding queries before stdin is handed to another process.
+   * Their replies can no longer be routed reliably once the child owns the
+   * terminal; later queries remain available after the handoff.
+   */
+  suspend(): void {
+    if (this.disposed) return
+    this.suspended = true
+    this.drainPending()
+  }
+
+  /** Resume queries after the caller's terminal-reply quarantine has ended. */
+  resume(): void {
+    if (!this.disposed) this.suspended = false
+  }
+
+  private drainPending(): void {
+    for (const pending of this.queue.splice(0)) {
+      if (pending.kind === 'query') pending.resolve(undefined)
+      else pending.resolve()
+      pending.releaseRawMode()
+    }
+  }
+}

@@ -118,6 +118,50 @@ describe('引擎分段优先', () => {
   });
 });
 
+describe('★整宽反显条（照 dsh-TUI 的底栏）', () => {
+  const ui = (width: number): React.ReactElement =>
+    h(StatusLine, {
+      meta: metaWith({
+        permission: 'write',
+        statusSegments: [
+          seg('model', ' deepseek-v4-flash ', 10),
+          seg('permission', ' 权限:write ', 10, 'warn'),
+          seg('context', ' 上下文 12% ', 20),
+        ],
+      }),
+      busy: false,
+      color: noColor,
+      width,
+      t,
+    });
+
+  // 注意：`renderLines()` 会**去掉行尾空白**，所以"整宽"不能靠量行尾来断言
+  // （反显条尾巴就是一片空格）。改成量"右端那段的**最后一个字**落在第几列" ——
+  // 落在最后一列，就意味着左边一直被撑满，条子恰好等于内容宽。
+  const CTX = '上下文 12%';
+
+  it('右端恰好落在最后一列（条子撑满到页边距之外）', () => {
+    for (const w of [60, 88, 120]) {
+      const line = renderLines(ui(w), w + 4).lines[0] ?? '';
+      const col = displayWidth(line.slice(0, line.indexOf(CTX)));
+      expect(col + displayWidth(CTX) + 1).toBe(w); // +1 = 右组末尾那个空格
+    }
+  });
+
+  it('右边那一段是 context（位置固定才好扫）', () => {
+    const line = renderLines(ui(80), 84).lines[0] ?? '';
+    expect(line).toContain(CTX);
+    expect(line.indexOf('deepseek-v4-flash')).toBeLessThan(line.indexOf(CTX));
+  });
+
+  it('信息放不下时先丢/截断左边的，保住 context', () => {
+    const line = renderLines(ui(28), 32).lines[0] ?? '';
+    expect(line).toContain(CTX);                        // 右端完整
+    const col = displayWidth(line.slice(0, line.indexOf(CTX)));
+    expect(col + displayWidth(CTX) + 1).toBe(28);       // 且仍然撑满
+  });
+});
+
 describe('语义档 → 主题 token', () => {
   it('四档各落各的（danger 走 error，不是 perm_full）', () => {
     expect(levelToken('dim')).toBe('dim');

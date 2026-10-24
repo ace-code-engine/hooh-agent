@@ -17,7 +17,18 @@ export const DEFAULT_PHASE: Phase = 'reasoning';
 /** 帧序列 + 帧间隔（秒）。与 `ace_spinner._GLYPHS` 逐条一致。 */
 export const GLYPHS: Record<Phase, { frames: string[]; interval: number }> = {
   waiting: { frames: ['·', '˙', '•', '˙'], interval: 0.08 },
-  reasoning: { frames: ['◐', '◓', '◑', '◒'], interval: 0.24 },
+  // 推理：**噪声填充**（照 `circle-noise-fill.html` 缩到 5 格，填满后倒放）。
+  // 原来这里是月相 `◐◓◑◒`（上游 `moon` 预设）——被这个换掉。帧序列由
+  // `ui/ace_spinner.noise_frames()` 生成、**写成字面量**给一致性测试解析；
+  // 两者由 `test_all.py` 里那条 `noise_frames() == list(_GLYPHS["reasoning"][0])` 钉住。
+  reasoning: {
+    frames: [
+      '·····', '·····', '···██', '··███', '█████', '█████', '█████', '··███', '···██',
+      '·····', '·····',
+    ],
+    // 仍是"最慢"那一档（> tool_running 的 0.16）：速度即语义，换字形不改速度。
+    interval: 0.18,
+  },
   answering: { frames: ['◈', '◇', '◆', '◇'], interval: 0.12 },
   tool_args: { frames: ['▖', '▘', '▝', '▗'], interval: 0.1 },
   tool_running: { frames: ['▁', '▃', '▅', '▇', '▅', '▃'], interval: 0.16 },
@@ -40,8 +51,11 @@ export function phaseInterval(phase: string | undefined): number {
 /**
  * 当前该画哪一帧。
  *
- * `reducedMotion` 时**恒取第一帧** —— 不是"慢一点"，是完全不动。
+ * `reducedMotion` 时**恒取固定的一帧** —— 不是"慢一点"，是完全不动。
  * 对前庭敏感的用户，缓慢旋转同样难受；降级要降到底，不能只降一半。
+ *
+ * 例外：推理阶段那串噪声填充的**首帧是空格子**，静态时会像"没在干活"，
+ * 所以无动效时给它**填满**那一帧（与 `ui/ace_spinner.frame_at` 同口径）。
  */
 export function frameAt(
   phase: string | undefined,
@@ -49,7 +63,9 @@ export function frameAt(
   reducedMotion = false,
 ): string {
   const frames = framesFor(phase);
-  if (reducedMotion) return frames[0]!;
+  if (reducedMotion) {
+    return normPhase(phase) === 'reasoning' ? '█████' : frames[0]!;
+  }
   const idx = Math.floor(Math.max(0, elapsed) / phaseInterval(phase)) % frames.length;
   return frames[idx]!;
 }

@@ -39,6 +39,7 @@ from __future__ import annotations
 import sys
 from typing import Callable, List, Optional, Tuple, Union
 
+from ui import ace_theme
 from ui.ace_text import SEPARATORS
 
 __all__ = ["run_selector", "run_multiselect", "match_positions", "match_score",
@@ -490,23 +491,9 @@ def _interactive_select(title: str, items: List[str],
             _place_panel()   # 预览区出现/消失 → 重算面板高度并居中
 
     # ---------- 应用与运行 ----------
-    style = Style.from_dict({
-        # Frame 自带 class:frame.*（边框/标题）—— 字典 key 是裸类名
-        "frame.border": "#8a8a9a",
-        "frame.label": "bold #f6c453",
-        # 输入行
-        "sel.prompt": "bold #7ecb8f",
-        "sel.input": "#ffffff",
-        # 列表行
-        "sel.row": "#cccccc",
-        "sel.row.sel": "bg:#5f3dc4 #ffffff",
-        "sel.hl": "bold #f6c453",
-        "sel.hl.sel": "bg:#5f3dc4 #f6c453 bold",
-        "sel.empty": "#666666 italic",
-        # 底部提示条 / 预览区
-        "sel.footer": "bg:#2b2b3c #aaaaaa",
-        "sel.preview": "#9cdcfe",
-    })
+    # 外壳配色来自色板：类名（frame.* / sel.*）与这里引用的一一对应，
+    # dark/light 下与改造前逐字相同，选雾蓝时整块跟着走。
+    style = Style.from_dict(ace_theme.ptk_styles())
 
     app = Application(
         layout=Layout(root, focused_element=input_window),

@@ -1,0 +1,146 @@
+{
+  "name": "dsh-working-activity",
+  "description": "Live model working-status line: playful copy, running tool, turn elapsed 鈥?for TUI prompt and Web UI",
+  "version": "0.5.1",
+  "type": "module",
+  "main": "lib/types/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "default": "./lib/types/index.js"
+    },
+    "./client": {
+      "types": "./lib/types/client/index.d.ts",
+      "default": "./lib/client.js"
+    },
+    "./config": {
+      "types": "./lib/types/config.d.ts",
+      "default": "./lib/types/config.js"
+    },
+    "./events": {
+      "types": "./lib/types/events.d.ts",
+      "default": "./lib/types/events.js"
+    },
+    "./frames": {
+      "types": "./lib/types/frames.d.ts",
+      "default": "./lib/types/frames.js"
+    },
+    "./invariant": {
+      "types": "./lib/types/invariant.d.ts",
+      "default": "./lib/types/invariant.js"
+    },
+    "./status": {
+      "types": "./lib/types/status.d.ts",
+      "default": "./lib/types/status.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./src/*": "./src/*",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "src",
+    "cordis.patch.yml"
+  ],
+  "engines": {
+    "node": "^22.19 || >=24"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json && tsc -p tsconfig.client.json",
+    "build:client": "tsdown -c tsdown.config.ts",
+    "test": "vitest run",
+    "test:alpha2": "pnpm run build && pnpm --dir ../working-activity-alpha2-compat install --frozen-lockfile --strict-peer-dependencies && pnpm --dir ../working-activity-alpha2-compat test",
+    "test:rc2": "pnpm run build && pnpm --dir ../working-activity-rc2-compat install --frozen-lockfile --strict-peer-dependencies && pnpm --dir ../working-activity-rc2-compat test",
+    "verify:deps": "node scripts/verify-manifest-deps.mjs",
+    "verify:lockfiles": "node scripts/verify-lockfiles.mjs",
+    "verify:client-bundle": "pnpm run build:client && node scripts/verify-client-bundle.mjs",
+    "verify:host-vocabulary": "node scripts/verify-host-vocabulary.mjs",
+    "prepublishOnly": "npm run verify:deps && npm run verify:lockfiles && npm run verify:host-vocabulary && npm run build && npm run verify:client-bundle"
+  },
+  "license": "BSD-3-Clause",
+  "dependencies": {
+    "zod": "^4.4.3"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ccch1mneyyy/working-activity.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ccch1mneyyy/working-activity/issues"
+  },
+  "homepage": "https://github.com/ccch1mneyyy/working-activity#readme",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "inject": [
+        "@deepseek-ai/dsh-client-ui-conversation",
+        "@deepseek-ai/dsh-client-ui-renderer",
+        "@deepseek-ai/dsh-client-ui-session",
+        "@deepseek-ai/dsh-client-ui-slots"
+      ]
+    }
+  },
+  "peerDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-agent": "^0.1.0-rc.6 || ^0.1.1-rc.1 || ^0.1.2-alpha.2 || ^0.1.7-rc.2",
+    "@deepseek-ai/dsh-client-ui-conversation": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-client-ui-renderer": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-client-ui-session": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-client-ui-slots": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-invariants": "^0.1.0-rc.6 || ^0.1.1-rc.1 || ^0.1.2-alpha.2 || ^0.1.7-rc.2",
+    "@deepseek-ai/dsh-session": "^0.1.0-rc.6 || ^0.1.1-rc.1 || ^0.1.2-alpha.2 || ^0.1.7-rc.2",
+    "@deepseek-ai/dsh-session-projection": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-system-prompt": "^0.1.0-rc.6 || ^0.1.1-rc.1 || ^0.1.2-alpha.2 || ^0.1.7-rc.2",
+    "@deepseek-ai/schemastery": "^3.18.1",
+    "react": "^18.2.0"
+  },
+  "devDependencies": {
+    "@deepseek-ai/cordis": "^4.0.1",
+    "@deepseek-ai/dsh-agent": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-agent-loop": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-agent-loop-testkit": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-client-ui-conversation": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-client-ui-renderer": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-client-ui-session": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-client-ui-slots": "^0.1.7-rc.2",
+    "@deepseek-ai/dsh-invariants": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-llm": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-session": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-session-projection": "^0.1.7-rc.2",
+    "dsh-session-projection-rc6": "npm:@deepseek-ai/dsh-session-projection@0.1.0-rc.6",
+    "@deepseek-ai/dsh-system-prompt": "^0.1.0-rc.6",
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6",
+    "@deepseek-ai/schemastery": "^3.18.1",
+    "@types/node": "^22.0.0",
+    "@types/react": "~18.3.1",
+    "lightningcss": "^1.32.0",
+    "react": "^18.2.0",
+    "tsdown": "^0.22.2",
+    "typescript": "^6.0.3",
+    "vitest": "^3.2.4"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-client-ui-conversation": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-renderer": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-session": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-client-ui-slots": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-session-projection": {
+      "optional": true
+    },
+    "react": {
+      "optional": true
+    }
+  }
+}

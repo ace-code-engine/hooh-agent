@@ -18,22 +18,99 @@ r"""ace_spinner —— 等待指示器状态机：**扫光速度即语义**，�
 
 from __future__ import annotations
 
+import math
 from typing import Dict, List, Sequence, Tuple
 
 from ui.ace_text import truncate_width
 
 __all__ = ["PHASES", "frames_for", "frame_at", "phase_interval", "stall_level",
            "stall_color", "spinner_line", "DEFAULT_STALL_SECONDS",
-           "THEME_RGB", "WARN_RGB"]
+           "THEME_RGB", "WARN_RGB", "noise_frames", "NOISE_CELLS",
+           "NOISE_FILL", "NOISE_EMPTY"]
 
 # 阶段：等首字节（网络）→ 推理 → 正式回答 → 工具参数流入 → 工具执行
 PHASES: Tuple[str, ...] = ("waiting", "reasoning", "answering", "tool_args",
                            "tool_running")
 
-# 每个阶段一套字形与帧间隔（0.08s = 快、0.24s = 慢）。字符都是单宽、无 emoji。
+# ── 噪声填充指示器 ────────────────────────────────────────────────────────────
+# 照 `C:\Users\69215\Desktop\circle-noise-fill.html`（参考件）那套算法，把 646² 像素的
+# "圆圈被噪点填满"**缩到 5 格**（推理阶段的转轮位置）：
+#   ① 每格先算一个"出生阈值"，由**值噪声**排序归一化 ⇒ 阈值 == 已填比例（源片 :50）；
+#   ② 相邻格的噪声值接近 ⇒ **成团生长**；换成随机数就退化成散点雨（源片 :29-39）；
+#   ③ 缓动只作用在进度上（smoothstep，源片 :61）；
+#   ④ **填满之后倒放回来** —— 源片是一次性填充（`LOOP=false`），做成指示器得往回走，
+#      否则一旦填满就再也看不出"还在动"。
+# 圆本身不抄：源片那句 `if (Math.hypot(x,y) > R) continue` 是**范围**而不是绘制，
+# 这里 5 格就是范围（规范同 §4.7 的结论）。
+NOISE_CELLS = 5
+NOISE_STEP = 0.20               # 每帧推进多少进度（一轮 11 帧 ≈ 1s，太快成了闪烁）
+NOISE_FILL = "█"
+NOISE_EMPTY = "·"
+NOISE_SEED = 1.0                # 写死：开屏/转轮每次都不一样 = 每次启动都像另一个软件
+
+
+def _hash1(i: float, seed: float = NOISE_SEED) -> float:
+    """格点哈希 → [0,1)。同源片的 `hash()`，只是一维。"""
+    v = math.sin(i * 127.1 + seed * 74.7) * 43758.5453
+    return v - math.floor(v)
+
+
+def _noise1(x: float, seed: float = NOISE_SEED) -> float:
+    """一维**值噪声**：格点取值、格点之间平滑插值 —— 相邻格接近才有"成团生长"。"""
+    xi = math.floor(x)
+    xf = x - xi
+    u = xf * xf * (3 - 2 * xf)
+    return _hash1(xi, seed) * (1 - u) + _hash1(xi + 1, seed) * u
+
+
+def _smooth(p: float) -> float:
+    """缓动（smoothstep）：起步慢、中段成片翻、收尾慢。"""
+    p = max(0.0, min(1.0, float(p)))
+    return p * p * (3 - 2 * p)
+
+
+def noise_frames(cells: int = NOISE_CELLS, step: float = NOISE_STEP) -> List[str]:
+    """噪声填充的帧序列：**正向填满 → 倒放回空**。
+
+    纯函数（同一 `cells`/`step` 永远同一串帧）—— 所以能被单测逐帧比对，
+    也能被前端那份实现逐帧对齐。
+    """
+    n = max(1, int(cells))
+    vals = [_noise1(i * 0.55) for i in range(n)]
+    order = sorted(range(n), key=lambda i: vals[i])
+    th = [0.0] * n
+    for rank, i in enumerate(order):
+        # 阈值 = 排名归一化（源片 :50 是 `rank/(len-1)`）。这里刻意用 `(rank+1)/(n+1)`：
+        # 源片有几万像素，第一格在 p=0 就亮看不出来；只有 5 格时那一格非常扎眼
+        # （实测首帧是 `····█`，像"已经填了一半"）。空 → 满，两头都干净。
+        th[i] = (rank + 1) / (n + 1)
+
+    step = max(0.02, min(1.0, float(step)))
+    marks: List[float] = []
+    p = 0.0
+    while p < 1.0:
+        marks.append(p)
+        p += step
+    marks.append(1.0)
+    marks += marks[-2::-1]                     # 倒放（去掉重复的那个 1.0）
+    out: List[str] = []
+    for p in marks:
+        e = _smooth(p)
+        out.append("".join(NOISE_FILL if th[i] <= e + 1e-9 else NOISE_EMPTY
+                           for i in range(n)))
+    return out
+
+
+# 每个阶段一套字形与帧间隔（0.08s = 快、0.18s = 慢）。字符都是单宽、无 emoji。
+# 推理那串 = `noise_frames()` 的输出，**写成字面量**是因为前端一致性测试
+# （`frontend/test/spinner.test.ts`）按 `_GLYPHS` 里的引号字面量解析比对 —— 放函数调用
+# 它读不到。两者不许漂：`test_all.py` 有一条 `noise_frames() == list(_GLYPHS["reasoning"][0])`。
 _GLYPHS: Dict[str, Tuple[Tuple[str, ...], float]] = {
     "waiting": (("·", "˙", "•", "˙"), 0.08),          # 等首字节：快闪
-    "reasoning": (("◐", "◓", "◑", "◒"), 0.24),        # 推理：慢转
+    # 推理：**噪声填充**（原来这里是月相 `◐◓◑◒`——上游 `moon` 预设，被这个换掉）。
+    # 间隔仍是"最慢"那一档（0.18 > tool_running 的 0.16）：速度即语义，不因为换了字形就变。
+    "reasoning": (("·····", "·····", "···██", "··███", "█████", "█████", "█████",
+                   "··███", "···██", "·····", "·····"), 0.18),
     "answering": (("◈", "◇", "◆", "◇"), 0.12),        # 正式回答：中速旋转
     "tool_args": (("▖", "▘", "▝", "▗"), 0.10),        # 参数流入：四角推进
     "tool_running": (("▁", "▃", "▅", "▇", "▅", "▃"), 0.16),   # 执行：脉冲
@@ -63,9 +140,12 @@ def phase_interval(phase: str) -> float:
 
 
 def frame_at(phase: str, elapsed: float, reduced_motion: bool = False) -> str:
-    """当前该显示哪一帧；`reduced_motion` 时固定首帧（不动也能看出状态）。"""
+    """当前该显示哪一帧；`reduced_motion` 时固定**一个非空**的稳定字形。"""
     frames = frames_for(phase)
     if reduced_motion:
+        # 无动效 ≠ 什么都看不见：噪声填充的首帧是空格子，静态时会像"没在干活"。
+        if _norm_phase(phase) == "reasoning":
+            return NOISE_FILL * NOISE_CELLS
         return frames[0]
     idx = int(max(0.0, float(elapsed)) / phase_interval(phase)) % len(frames)
     return frames[idx]

@@ -26,6 +26,7 @@ import sys
 from typing import Any, Callable, Dict, List, Optional
 
 from ui import ace_chatscroll as chatscroll
+from ui import ace_theme
 from ui import ace_vim
 from ui.ace_text import truncate_width
 
@@ -399,17 +400,8 @@ def run_fullscreen(session: FullScreenSession,
         key_bindings=kb,
         full_screen=True,                 # 备用屏幕：退出后原终端画面原样恢复
         mouse_support=False,
-        style=Style.from_dict({
-            "fs.header": "bg:#2b2b3c #ffffff bold",
-            "fs.body": "#cccccc",
-            "fs.text": "#cccccc",
-            "fs.status": "bg:#2b2b3c #aaaaaa",
-            "fs.hint": "bg:#2b2b3c #888888",
-            "fs.notice": "bg:#2b2b3c #f6c453",
-            "fs.scroll": "bg:#2b2b3c #9cdcfe",
-            "fs.prompt": "bold #7ecb8f",
-            "fs.input": "#ffffff",
-        }),
+        # 外壳配色来自色板（dark/light 与改造前逐字相同；雾蓝跟着走）
+        style=Style.from_dict(ace_theme.ptk_styles()),
     )
     try:
         app.run()

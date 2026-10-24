@@ -99,10 +99,17 @@ def side_by_side(left: Sequence[str], right: Sequence[str], gap: int = 3,
     return out
 
 
-def section(title: str, width: int, fill: str = _H) -> str:
-    """分组标题：`── 会话 ──────────`（右侧补满，给菜单分组用）。"""
+def section(title: str, width: int, fill: str = _H, right: str = "") -> str:
+    """分组标题：`── 会话 ──────────`（右侧补满，给菜单分组用）。
+
+    给了 `right` 就把它右对齐贴到行尾 —— 面板头要靠它放版本号（原来是画在圆角框的
+    上边框里，现在首屏不用框了，同一个信息得有个新位置）。整行**恰好等于 width**。
+    """
+    w = max(0, int(width))
     head = f"{fill}{fill} {title} "
-    return head + fill * max(0, int(width) - display_width(head))
+    tail = f" {right} " if right else ""
+    body = fill * max(0, w - display_width(head) - display_width(tail))
+    return head + body + tail
 
 
 def menu_rows(entries: Sequence[Tuple[str, str]], width: int, selected: int = -1,
@@ -127,6 +134,24 @@ def menu_rows(entries: Sequence[Tuple[str, str]], width: int, selected: int = -1
             head = head + "   " + truncate_width(desc, room)
         out.append(head.rstrip())
     return out
+
+
+def list_row(left: str, right: str, sub: str, width: int) -> List[str]:
+    """**两行一条**的列表行：主行 = 左内容 + **右对齐**的计数，次行 = 降灰补充。
+
+    照 dsh-TUI 会话管理屏的行设计（`▯ 名称 ………… 11 个会话`，次行是暗色路径）：
+
+    - **计数右对齐**是为了竖着扫一眼就能比大小 —— 左对齐的计数彼此错开，比不了；
+    - **次行降灰**是为了主次分明（颜色由调用方加，本模块只管排版）；
+    - 次行缩进 2 格，落在主行文字的下方而不是标记列下。
+
+    `width` 传**分区宽**（`section()` 那个宽）；行内容按 `width - 2` 收（调用方会给每行加
+    2 格缩进，见 `_section_block`）。超宽按列截断，不劈双宽字符。
+    """
+    left, right, sub = str(left), str(right), str(sub)
+    room = max(1, int(width) - 2 - display_width(left) - display_width(right))
+    main = truncate_width(left + " " * room + right, max(1, int(width) - 2))
+    return [main, ("  " + sub) if sub else ""]
 
 
 def format_when(ts: float, now: float) -> str:

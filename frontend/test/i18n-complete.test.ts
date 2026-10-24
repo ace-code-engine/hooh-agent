@@ -24,6 +24,7 @@ import { describe, expect, it } from 'vitest';
 import { DRAFT_KEYS } from '../src/components/draft-editor/DraftEditor.js';
 import { PICKER_KEYS } from '../src/components/pickers/Picker.js';
 import { PANEL_KEYS } from '../src/components/settings/schema.js';
+import { SESSION_MANAGER_KEYS } from '../src/components/sessions/SessionManager.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 const LANGS = ['zh', 'en', 'ja'] as const;
@@ -70,6 +71,10 @@ const KEY_TABLES: Array<{ table: string; keys: readonly string[] }> = [
   { table: 'DRAFT_KEYS（draft-editor/DraftEditor.tsx）', keys: Object.values(DRAFT_KEYS) },
   { table: 'PICKER_KEYS（pickers/Picker.tsx）', keys: Object.values(PICKER_KEYS) },
   { table: 'PANEL_KEYS（settings/schema.ts）', keys: Object.values(PANEL_KEYS) },
+  {
+    table: 'SESSION_MANAGER_KEYS（sessions/SessionManager.tsx）',
+    keys: Object.values(SESSION_MANAGER_KEYS),
+  },
   {
     table: "session-tree 的 t('stree_*')（session-tree/）",
     keys: literalKeysIn(walk(join(ROOT, 'frontend', 'src', 'components', 'session-tree'))),
@@ -157,6 +162,7 @@ describe('i18n 完整性（中/英/日成套）', () => {
       const src = stripComments(readFileSync(file, 'utf-8'));
       for (const m of src.matchAll(/export const ([A-Za-z0-9_]*KEYS)\s*[=:]/g)) declared.add(m[1]!);
     }
-    expect([...declared].sort()).toEqual(['DRAFT_KEYS', 'PANEL_KEYS', 'PICKER_KEYS']);
+    expect([...declared].sort()).toEqual(
+      ['DRAFT_KEYS', 'PANEL_KEYS', 'PICKER_KEYS', 'SESSION_MANAGER_KEYS']);
   });
 });

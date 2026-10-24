@@ -27,8 +27,10 @@ import { Box, Text } from '../../vendor/dsh-ink/kernel.js';
 import React from 'react';
 
 import { gstr } from '../render/glyphs.js';
+import { DISC_COLS } from '../render/noise-circle.js';
 import { ACE_LOGO } from '../render/logo.js';
 import { displayWidth, truncateWidth } from '../render/text.js';
+import { NoiseDisc } from './NoiseDisc.js';
 
 export interface BannerProps {
   version?: string | undefined;
@@ -68,38 +70,49 @@ export function Banner({
   if (folder) right.push({ text: folder, token: 'accent' });
 
   const height = Math.max(ACE_LOGO.length, right.length);
+  // 左边那个**图形**（噪声圆盘）：上游首屏是"左图形 + 右大字标题"，我们此前只有块字。
+  // 窄终端不塞 —— 图形把标题挤没了的话，进来看不见自己是谁。
+  const showDisc = width >= DISC_COLS + GAP + lw + GAP + 12;
 
   return (
-    <Box flexDirection="column" marginBottom={1}>
-      {Array.from({ length: height }, (_, i) => {
-        const logoLine = ACE_LOGO[i] ?? '';
-        const r = right[i];
-        // 先补到 logo 最宽行，再加 gap —— 与 `side_by_side` 逐条一致
-        const pad = ' '.repeat(Math.max(0, lw - displayWidth(logoLine) + GAP));
-        // 右栏按剩余列宽截断：多一列就可能触发终端折行，一折整个面板就歪。
-        // 必须走 `truncateWidth`（按**列**算，中文两列）—— 曾经用 `[...text].slice()`
-        // 按码点截，folder 这类中文值一进右栏就超出预算，正是要防的那种折行。
-        // budget ≤ 0 时交给 `truncateWidth` 返回空串（它自己处理 limit<=0），
-        // 否则极端窄终端上"不截断"反而是最长的那一行。
-        const budget = Math.max(0, width - lw - GAP - 2);
-        const text = truncateWidth(r?.text ?? '', budget);
-        return (
-          <Text key={i}>
-            {/* logo 用 `cyan`（`info` 在深色主题下就是 cyan）—— 与 HooH 的 Python 首屏
-                一致（那边 `landing_lines` 里写的是 `c("cyan", ...)`）。
-                第一版我用的是 `accent`（= ansiyellow），渲染成橄榄绿 —— 那不是这里的颜色。 */}
-            {/* logo 是块状字符（`█╗╔╝╚═║`）—— 多数控制台画得出，但过一遍 `gstr` 不亏：
-                画不出的终端上，装饰变成一串方框比变成 ASCII 更难解释 */}
-            <Text color={color('info')}>{gstr(logoLine)}</Text>
-            <Text>{pad}</Text>
-            {r && text ? (
-              <Text color={color(r.token)} bold={r.bold}>
-                {text}
-              </Text>
-            ) : null}
-          </Text>
-        );
-      })}
+    <Box flexDirection="row" marginBottom={1}>
+      {showDisc ? (
+        <>
+          <NoiseDisc color={color} />
+          <Text>{' '.repeat(GAP)}</Text>
+        </>
+      ) : null}
+      <Box flexDirection="column">
+        {Array.from({ length: height }, (_, i) => {
+          const logoLine = ACE_LOGO[i] ?? '';
+          const r = right[i];
+          // 先补到 logo 最宽行，再加 gap —— 与 `side_by_side` 逐条一致
+          const pad = ' '.repeat(Math.max(0, lw - displayWidth(logoLine) + GAP));
+          // 右栏按剩余列宽截断：多一列就可能触发终端折行，一折整个面板就歪。
+          // 必须走 `truncateWidth`（按**列**算，中文两列）—— 曾经用 `[...text].slice()`
+          // 按码点截，folder 这类中文值一进右栏就超出预算，正是要防的那种折行。
+          // budget ≤ 0 时交给 `truncateWidth` 返回空串（它自己处理 limit<=0），
+          // 否则极端窄终端上"不截断"反而是最长的那一行。
+          const budget = Math.max(0, width - lw - GAP - 2 - (showDisc ? DISC_COLS + GAP : 0));
+          const text = truncateWidth(r?.text ?? '', budget);
+          return (
+            <Text key={i}>
+              {/* logo 用 `cyan`（`info` 在深色主题下就是 cyan）—— 与 HooH 的 Python 首屏
+                  一致（那边 `landing_lines` 里写的是 `c("cyan", ...)`）。
+                  第一版我用的是 `accent`（= ansiyellow），渲染成橄榄绿 —— 那不是这里的颜色。 */}
+              {/* logo 是块状字符（`█╗╔╝╚═║`）—— 多数控制台画得出，但过一遍 `gstr` 不亏：
+                  画不出的终端上，装饰变成一串方框比变成 ASCII 更难解释 */}
+              <Text color={color('info')}>{gstr(logoLine)}</Text>
+              <Text>{pad}</Text>
+              {r && text ? (
+                <Text color={color(r.token)} bold={r.bold}>
+                  {text}
+                </Text>
+              ) : null}
+            </Text>
+          );
+        })}
+      </Box>
     </Box>
   );
 }

@@ -26,6 +26,14 @@ export interface SpinnerProps {
   startedAt?: number;
   /** 引擎最后一次产出的时刻（秒，取事件 `ts`）。0 = 本轮还没产出。缺省不判卡住（R-7）。 */
   lastOutputAt?: number;
+  /**
+   * 正在跑的**工具名**（有就说具名的）。
+   *
+   * 为什么非要它：工具阶段的动词是笼统的「准备中」，用户看不出**在调哪个工具** ——
+   * 而"在调 file_write 还是 file_read"决定了该等还是该中断（写文件可能很久，读文件不该）。
+   * `calling_tool_named`（「正在调用 {tool}」）这个键本来就在，此前没人用。
+   */
+  tool?: string;
 }
 
 /** 阶段 → 动词序号（`spin_verb_1..5`）。一一对应，稳定可断言。 */
@@ -57,6 +65,7 @@ export function Spinner({
   reducedMotion = false,
   startedAt,
   lastOutputAt = 0,
+  tool = '',
 }: SpinnerProps): React.ReactElement {
   const [elapsed, setElapsed] = useState(0);
   const [idle, setIdle] = useState(0);
@@ -83,11 +92,14 @@ export function Spinner({
   // Ink 用**阶梯**（warn）而非平滑插值 —— 同一语义，各壳渲染（`THREE-LAYERS` N-1）。
   const stalled = phase !== 'tool_running' && stallLevel(idle) > 0;
   const stallColor = color('warn');
+  // 工具阶段且知道是哪个工具 → 说具名的（"正在调用 file_write"）；其余阶段仍用动词表。
+  const labelling = phase === 'tool_running' || phase === 'tool_args';
+  const activity = labelling && tool !== '' ? t('calling_tool_named', { tool }) : t(verbKeyFor(phase));
 
   return (
     <Box>
       <Text color={stalled && !reducedMotion ? stallColor : color('accent')}>{glyph} </Text>
-      <Text color={stalled && !reducedMotion ? stallColor : color('dim')}>{phaseMark(phase)}{t(verbKeyFor(phase))}</Text>
+      <Text color={stalled && !reducedMotion ? stallColor : color('dim')}>{phaseMark(phase)}{activity}</Text>
       {secs > 0 ? (
         <Text color={stalled && !reducedMotion ? stallColor : color('dim')}>
           {' '}

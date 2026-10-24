@@ -14,7 +14,7 @@ import { AceClient } from './protocol/client.js';
 import { Root } from './Root.js';
 import { setGlyphs } from './render/glyphs.js';
 import type { BuildMenuOptions } from './render/menu.js';
-import { colorFor, detectTheme, type Token } from './theme/tokens.js';
+import { colorFor, detectTheme, resolveColor, setColorOverrides, type Token } from './theme/tokens.js';
 
 interface Args {
   projectRoot?: string;
@@ -26,6 +26,8 @@ interface Args {
   help: boolean;
   /** 备用屏全屏模式（历史靠自带滚动视口，不靠终端回滚）。 */
   fullscreen: boolean;
+  /** `--color` 原值：色板名 / auto / `accent=#RRGGBB,warn=#RRGGBB` 覆盖式。 */
+  color?: string;
 }
 
 function parseArgs(argv: string[]): Args {  const out: Args = { mock: false, stream: true, help: false, fullscreen: false };
@@ -41,6 +43,12 @@ function parseArgs(argv: string[]): Args {  const out: Args = { mock: false, str
         break;
       case '--fullscreen':
         out.fullscreen = true;
+        break;
+      case '--color':
+        // 认这个开关是**必须的**：下面的 default 分支会对不认识的 `-` 参数直接
+        // exit 2，而 ace.cmd 把整串参数同时喂给前端与 Python —— 少了这条，
+        // `--color mist-dark` 会让主 UI 当场退出。
+        out.color = next();
         break;
       case '--lang': {
         const v = next();
@@ -129,6 +137,9 @@ const HELP = `HooH 前端（TypeScript + Ink）
   --python <path>       Python 解释器（默认自动探测；ACE_PYTHON 环境变量优先）
   --no-stream           不要流式增量（只收 final）
   --fullscreen          备用屏全屏：转录走自带滚动视口（PgUp/PgDn/↑↓/g/G 翻，退出还原主屏）
+  --color <值>          配色：色板名（auto / dark / light / mist-dark / mist-light /
+                        mist-ansi），或覆盖 token（accent=#FF9EC7,warn=#E0C08A）。
+                        同一个值也会转交给 Python 引擎，两边必须同一套色
   --help, -h            显示这段
 `;
 
@@ -140,7 +151,17 @@ async function main(): Promise<number> {
   }
 
   const i18n = new I18n(args.lang);
-  const theme = detectTheme();
+  // 配色：`--color` 优先，否则按 ACE_THEME / 终端背景检测（口径与 Python 侧同一个）。
+  // 认不出来**不静默忽略** —— 静默的症状是"这个开关怎么没生效"，用户会以为功能坏了。
+  const picked = resolveColor(args.color);
+  if (!picked.ok) {
+    process.stderr.write(
+      `未知配色：${args.color}（可用：auto、${['dark', 'light', 'mist-dark', 'mist-light', 'mist-ansi'].join('、')}，` +
+        `或 accent=#RRGGBB 形式的覆盖）\n`,
+    );
+  }
+  setColorOverrides(picked.overrides);
+  const theme = picked.ok ? picked.theme : detectTheme();
   const colorOf = (token: string): string | undefined => colorFor(token as Token, theme);
 
   // Ink 需要真终端（raw 模式）。不是 TTY 时它会**抛一段 React 堆栈** —— 用户看到的是
@@ -156,7 +177,12 @@ async function main(): Promise<number> {
   const client = new AceClient({
     ...(args.projectRoot !== undefined ? { projectRoot: args.projectRoot } : {}),
     ...(args.python !== undefined ? { pythonPath: args.python } : {}),
-    extraArgs: args.mock ? ['--mock'] : [],
+    extraArgs: [
+      ...(args.mock ? ['--mock'] : []),
+      // 把配色原样转交给引擎：前端与 Python 必须画同一套色，否则同一个终端里
+      // 上半屏雾蓝、下半屏旧色。引擎侧 `--color` 认的是同一套值。
+      ...(args.color !== undefined ? ['--color', args.color] : []),
+    ],
   });
 
   let caps;
