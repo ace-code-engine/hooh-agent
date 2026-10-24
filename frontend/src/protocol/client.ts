@@ -18,6 +18,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import { existsSync } from 'node:fs';
 import { createInterface, type Interface } from 'node:readline';
+import { fileURLToPath } from 'node:url';
 
 import {
   PROTOCOL_VERSION,
@@ -435,9 +436,10 @@ export class AceClient extends EventEmitter {
 }
 
 /** 默认项目根：本文件在 `<root>/frontend/src/protocol/`，往上三级就是 `<root>`。 */
-function defaultProjectRoot(): string {
-  const here = new URL(import.meta.url).pathname;
-  // Windows 上 pathname 形如 /C:/...，去掉前导斜杠
-  const norm = here.replace(/^\/([A-Za-z]:)/, '$1');
-  return norm.replace(/\/frontend\/src\/protocol\/client\.(ts|js)$/, '');
+export function defaultProjectRoot(): string {
+  // 必须走 `fileURLToPath`：非 ASCII 的仓库路径（本项目就住在 `G:\_归档\…`）在
+  // `URL.pathname` 里是**百分号编码**的，手拼出来的 cwd 不存在，引擎 spawn 当场
+  // ENOENT——ace TUI 从启动器上从来没能打开过，直到 2026-10-24 才被发现。
+  const here = fileURLToPath(import.meta.url);
+  return here.replace(/[\\/]frontend[\\/]src[\\/]protocol[\\/]client\.(ts|js)$/, '');
 }

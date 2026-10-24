@@ -127,6 +127,9 @@ if /i "%~1"=="ui" (
     )
     pushd "%~dp0frontend"
     node "node_modules\tsx\dist\cli.mjs" "dsh-ui\hooh\entry.tsx" %*
+    rem Double-click survival: a nonzero exit here used to close the window
+    rem instantly - the user saw a flash and could never read WHY. Hold it open.
+    if errorlevel 1 pause
     popd
     goto :eof
 )
@@ -161,6 +164,10 @@ rem render() dies with "React is not defined" -- while "npm start" keeps
 rem working, because there the cwd is frontend. So run it from frontend too.
 pushd "%~dp0frontend"
 node "node_modules\tsx\dist\cli.mjs" "src\index.tsx" %*
+rem Double-click survival: a nonzero exit here closed the window instantly -
+rem the user saw a flash and could never read the error (the 2026-10-24
+rem "double-click flash-exit" report). Hold the window open on failure.
+if errorlevel 1 pause
 popd
 goto :eof
 
