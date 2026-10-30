@@ -114,31 +114,22 @@ if /i "%~1"=="tui" (
 )
 
 rem ---------------------------------------------------------------------------
-rem Frontend dispatch (2026-10-24 user decision, final): plain `ace` runs the
-rem dsh-TUI shell VENDORED IN THIS REPO -- it is the MAIN UI (frontend/dsh-ui,
-rem upstream MIT -- see
-rem frontend/dsh-ui/LICENSE.upstream + MIGRATION.md for attribution). The
-rem global npm dsh-tui is NEVER invoked from this launcher. The previous
-rem Swiss-spec frontend stays reachable as `ace classic`.
-rem Force the Python path with:  set ACE_LEGACY_UI=1
+rem Frontend dispatch (2026-10-31 REVERTED to classic-default): the vendored
+rem dsh shell (frontend/dsh-ui, `ace ui`) self-exits its ink app ~370ms after
+rem mount -- it has never been fully alive in this repo (its baseline smoke
+rem was failing). Until that is fixed, the WORKING UI is frontend/src.
+rem The global npm dsh-tui is never invoked from this launcher.
 rem PARENS ARE BANNED inside if-blocks here - see the tui block above.
-rem Batch quirks: shift does NOT affect %*, and an undefined variable expands
-rem to its literal name - so _ACE_REST is always pre-set to empty.
+rem Batch quirks: shift does NOT affect %*, undefined vars expand literally.
 rem ---------------------------------------------------------------------------
 set "_ACE_REST="
-set "_ACE_CLASSIC="
 if /i "%~1"=="ui" (
     if not "%~2"=="" for /f "tokens=1,* delims= " %%a in ("%*") do set "_ACE_REST=%%b"
     goto :fe_shell
 )
-if /i "%~1"=="classic" (
-    if not "%~2"=="" for /f "tokens=1,* delims= " %%a in ("%*") do set "_ACE_REST=%%b"
-    set "_ACE_CLASSIC=1"
-    goto :fe_shell
-)
-goto :fe_shell
+goto :fe_frontend
 
-:fe_shell
+:fe_frontend
 if defined ACE_LEGACY_UI goto :ace_python
 where node >nul 2>nul
 if errorlevel 1 (
@@ -160,13 +151,29 @@ rem no tsconfig, falls back to the classic JSX transform, and the first
 rem render() dies with "React is not defined" -- while "npm start" keeps
 rem working, because there the cwd is frontend. So run it from frontend too.
 pushd "%~dp0frontend"
-if defined _ACE_CLASSIC (
-    node "node_modules\tsx\dist\cli.mjs" "src\index.tsx" %_ACE_REST%
-) else (
-    node "node_modules\tsx\dist\cli.mjs" "dsh-ui\hooh\entry.tsx" %_ACE_REST%
-)
+node "node_modules\tsx\dist\cli.mjs" "src\index.tsx" %*
 rem Double-click survival: a nonzero exit here closed the window instantly -
 rem the user saw a flash and could never read the error. Hold it open.
+if errorlevel 1 pause
+popd
+goto :eof
+
+:fe_shell
+if defined ACE_LEGACY_UI goto :ace_python
+where node >nul 2>nul
+if errorlevel 1 (
+    echo [HooH] Node was not found on PATH -- the Ink frontend needs Node 18+.
+    echo       Falling back to the Python REPL.
+    goto :ace_python
+)
+if not exist "frontend\node_modules\tsx\dist\cli.mjs" (
+    echo [HooH] frontend dependencies are not installed. Run: ace --install-ui
+    pause
+    exit /b 1
+)
+pushd "%~dp0frontend"
+node "node_modules\tsx\dist\cli.mjs" "dsh-ui\hooh\entry.tsx" %_ACE_REST%
+rem Double-click survival: hold the window open on failure.
 if errorlevel 1 pause
 popd
 goto :eof

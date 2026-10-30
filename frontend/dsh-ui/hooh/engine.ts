@@ -17,8 +17,17 @@
  */
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { appendFileSync, existsSync } from 'node:fs'
 import { join, resolve } from 'node:path'
+
+/** `ACE_SHELL_DEBUG=1` 时把收到的原始帧落盘（诊断「壳收没收到引擎帧」用）。 */
+function debugFrame(line: string): void {
+  if (process.env.ACE_SHELL_DEBUG !== '1') return
+  try {
+      appendFileSync(join(REPO, 'frontend', '.shell-debug.log'),
+        new Date().toISOString().slice(11, 23) + ' ' + line.slice(0, 200) + String.fromCharCode(10))
+  } catch { /* 诊断日志失败不碍事 */ }
+}
 
 import { resolvePython } from '../../src/protocol/client.js'
 
@@ -68,7 +77,7 @@ export async function runAceTurn(opts: EngineOptions): Promise<AceEvent[]> {
 
   const child = spawn(py, args, {
     cwd: resolve(opts.projectRoot),
-    env: { ...process.env, PYTHONIOENCODING: 'utf-8', ACE_NO_ANIM: '1' },
+    env: { ...process.env, PYTHONIOENCODING: 'utf-8', ACE_NO_ANIM: '1', PYTHONFAULTHANDLER: '1' },
     stdio: ['pipe', 'pipe', 'ignore'],
   })
 
@@ -286,17 +295,26 @@ export class AceEngine {
     // （frontend/frontend，不存在），spawn 异步 ENOENT，而引擎死了无人知晓，
     // 轮次干等 120s 超时、busy 锁死所有按键（2026-10-24「说话没回应」的根因）。
     const root = resolve(opts.projectRoot)
-    const args = [join(REPO, 'ai_code.py'), '--serve',
-                  '--project-root', root,
+    // 经 **Python 监督垫片** 起引擎（WP-DSH-SHELL）：node 直接子进程的引擎在
+    // 渲染层初始化时被外部 TerminateProcess（~400ms，code=null，faulthandler
+    // 静默 = 非 Python 崩溃）；垫片隔开这层关系——python 父进程下的引擎被
+    // 实测全程存活（rawframes 对照）。stdio 三根管道由垫片直通。
+    const shim = join(REPO, 'tools', 'ace_serve_shim.py')
+    const args = [shim, join(REPO, 'ai_code.py'), root,
+                  '--serve', '--project-root', root,
                   '--permission', opts.permission ?? 'write']
     if (opts.mock === true) args.push('--mock')        // 默认真模型；只有测试/离线演示才 mock
     this.child = spawn(py, args, {
       cwd: root,
-      env: { ...process.env, PYTHONIOENCODING: 'utf-8', ACE_NO_ANIM: '1' },
+      env: { ...process.env, PYTHONUTF8: '1', PYTHONIOENCODING: 'utf-8' },
       stdio: ['pipe', 'pipe', 'pipe'],
     }) as ChildProcessWithoutNullStreams
+    debugFrame('SPAWN root=' + root + ' script=' + join(REPO, 'ai_code.py') + ' exists=' + existsSync(join(REPO, 'ai_code.py')))
     this.child.stdout.setEncoding('utf-8')
     this.child.stdout.on('data', (chunk: string) => this.feed(chunk))
+    this.child.on('error', (e: Error) => debugFrame('CHILD_ERROR ' + e.message))
+    this.child.on('exit', (c: number | null) => debugFrame('CHILD_EXIT ' + String(c)))
+    this.child.stdout.on('close', () => debugFrame('STDOUT_CLOSE'))
     this.child.stderr.setEncoding('utf-8')
     this.child.stderr.on('data', (chunk: string) => { this.stderrText += chunk })
     // spawn 失败（解释器不存在 / cwd 无效）与引擎中途退出都必须**可见**：
@@ -328,6 +346,7 @@ export class AceEngine {
   }
 
   private feed(chunk: string): void {
+    debugFrame('FEED ' + JSON.stringify(chunk.slice(0, 150)))
     this.buf += chunk
     let nl = this.buf.indexOf('\n')
     while (nl >= 0) {
@@ -418,6 +437,7 @@ export class AceEngine {
    */
   async command(line: string,
                 onEvent?: (ev: AceEvent) => void): Promise<{ keepGoing: boolean }> {
+    debugFrame('CMD listener on: ' + line)
     const id = String(++this.seq)
     // **命令必须挂监听**：/help 这类命令的可见输出全部以 notice 事件回流——
     // 不挂监听的话输出进不了投影，界面原地不动（2026-10-24「卡死在首屏」）。
@@ -429,6 +449,7 @@ export class AceEngine {
     })
     this.write('command.exec', { line }, id)
     await done
+    debugFrame('CMD done: ' + line)
     // 尾部 notice（命令输出常在 resp 前后各来几条）——多收 300ms 再撤监听。
     await new Promise((r) => setTimeout(r, 300))
     this.listeners.delete(listener)
@@ -476,6 +497,7 @@ export class AceEngine {
   }
 
   close(): void {
+    debugFrame('CLOSE called' + String.fromCharCode(10) + (new Error().stack ?? '').split(String.fromCharCode(10)).slice(1, 5).join(String.fromCharCode(10)))
     try { this.child.kill() } catch { /* 已经退出 */ }
   }
 }

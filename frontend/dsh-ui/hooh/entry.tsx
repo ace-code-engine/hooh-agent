@@ -12,6 +12,7 @@
  */
 
 import React from 'react'
+import { appendFileSync } from 'node:fs'
 import { basename, join } from 'node:path'
 
 import { App } from './App.js'
@@ -56,6 +57,11 @@ export async function main(argv: readonly string[]): Promise<void> {
   // 自己进了哪个。stderr 一行说清楚 —— 走 stderr 而不是 stdout：stdout 是画面。
   console.error('[HooH × dsh-TUI 壳]（ace ui）正在启动引擎…')
   const prompt = argv.filter((a) => !a.startsWith('-')).join(' ').trim()
+  // 延迟起引擎：ink 初始化（raw mode 等）与引擎 spawn 叠在同一窗口时，
+  // 引擎会在 ~400ms 被外部终止（code=null，faulthandler 静默 = 非 Python 崩溃，
+  // 成因未明——WP-DSH-SHELL 在查）。先让 UI 稳定落一帧再起引擎，绕开这个
+  // 启动窗口；首屏本来就是「正在启动引擎…」的状态。
+  await new Promise((r) => setTimeout(r, 1200))
   const engine = await openEngine({
     projectRoot: snapshot().cwd,
     prompt,
@@ -72,11 +78,29 @@ export async function main(argv: readonly string[]): Promise<void> {
   // 孤儿防护：窗口被叉掉/进程被杀时，引擎子进程必须跟着死——否则一个挂着
   // 真模型轮次的引擎在后台继续烧钱，而没有人看得见它。正常退出走下面的
   // waitUntilExit → engine.close()；这里兜**非正常**退出。
-  const cleanup = (): void => engine.close()
+  const cleanup = (): void => {
+    if (process.env.ACE_SHELL_DEBUG === '1') {
+      try {
+        appendFileSync(
+          join(REPO, 'frontend', '.shell-debug.log'),
+          new Date().toISOString().slice(11, 23) + ' CLEANUP engine.close' + String.fromCharCode(10),
+        )
+      } catch { /* noop */ }
+    }
+    engine.close()
+  }
   process.on('exit', cleanup)
   process.on('SIGINT', () => { cleanup(); process.exit(0) })
   process.on('SIGTERM', () => { cleanup(); process.exit(0) })
   await app.waitUntilExit?.()
+  if (process.env.ACE_SHELL_DEBUG === '1') {
+    try {
+      appendFileSync(
+        join(REPO, 'frontend', '.shell-debug.log'),
+        new Date().toISOString().slice(11, 23) + ' INK_EXITED (waitUntilExit resolved)' + String.fromCharCode(10),
+      )
+    } catch { /* noop */ }
+  }
   engine.close()
 }
 
@@ -84,5 +108,8 @@ export async function main(argv: readonly string[]): Promise<void> {
 // 判据用 **basename 相等**：`endsWith('entry.tsx')` 会误匹配 `smoke-entry.tsx`
 // （那个脚本于是被挂两次，第二次用真 process.stdin，在管道里直接 raw-mode 报错）。
 if (process.argv[1] && basename(process.argv[1]) === 'entry.tsx') {
-  void main(process.argv.slice(2))
+  main(process.argv.slice(2)).catch((e) => {
+    console.error('[HooH 壳] 主流程异常退出：', e?.stack ?? String(e))
+    process.exit(1)
+  })
 }

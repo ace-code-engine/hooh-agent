@@ -240,7 +240,7 @@ Rust 可以承担核心计算，但**不得绕过权限层**：
 | M-25 | 会话与分支 | `cli/ace_sessions.py` 135 · `ace_sessionlog.py` 351 · `.ace_sessions/` | Py | 已有 → **WP-5** 树（G-10） |
 | | **平面 5 · 交互**（4 个前端） | | | |
 | M-26 | 事件协议 | `core/ace_serve.py` 389（`FrameEmitter` / `EventEmitter`）· `ace_events.py` 184 · `ace_commands.py` 161 | Py ↔ JSON | **已有** → **WP-0** 补齐 |
-| M-27 | 主前端 | `frontend/dsh-ui`（迁入的 dsh-TUI 壳，**主外壳**，2026-10-24 起）+ `frontend/src`（瑞士规范前端，**`ace classic`**） | **TS** | 已有（**唯一正式外壳 = dsh 壳**；经典前端降为显式备用，ui/+tui/ 仍为 fallback） |
+| M-27 | 主前端 | `frontend/src` 4487 + `test` 2749（**TS + Ink + React**） | **TS** | 已有（**唯一正式外壳**；迁入的 dsh 壳为显式备用入口 `ace ui`，WP-DSH-SHELL——其 ink 自退出缺陷修复后重评） |
 | M-28 | Python 终端 UI | `ui/` 24 文件 / 5050 | Py | 已有 → **降为 fallback** |
 | M-29 | TUI | `tui/app.py` 1609 + `bridge.py` 53 | Py | 已有 → **降为 fallback** |
 | M-30 | MCP 集成面 | `core/ace_mcp.py` 530 · `ace_mcp_server.py` 279 | Py | 已有（**保留，不参与收敛**） |
@@ -335,7 +335,7 @@ Rust 可以承担核心计算，但**不得绕过权限层**：
   + `frontend/src/protocol/` 已在跑。**WP-0 不是造协议，而是让 4 个前端都变成协议消费者。**
 - **范围**：
   1. 事件协议补齐到"权限请求/工具卡/状态/spinner/菜单"全覆盖（新增事件而非改旧语义）；
-  2. `frontend/dsh-ui`（迁入的 dsh-TUI 壳）定为**唯一正式外壳**（2026-10-24 用户裁决：渲染与工具表达以它为准）；`frontend/src` 降为**显式备用**（`ace classic`，瑞士规范件保留）；`ui/` + `tui/` 降级为**无 Node 环境时的 fallback**，只修 bug 不加功能；
+  2. `frontend/` 定为**唯一正式外壳**（2026-10-31 回归：dsh 壳存在 ink 自退出缺陷，修复前不转正）；`ui/` + `tui/` 降级为**无 Node 环境时的 fallback**，只修 bug 不加功能；
   3. `ace --mcp` 保留（它是**集成面**，不是外壳，不参与收敛）。
 - **前置项（打包）**：`packaging/ace.spec` 的 `datas` 增补 `frontend/` 构建产物，否则 exe 用户看不到 WP-0/WP-1 的前端部分。
 - **验收**：4 份权限对话框合一后，`test_all.py` 全绿；8 个跨语言守卫测试（theme/protocol/spinner/diff/tasktree/match/vim/launcher，读 Python 源码做 parity）全部改指协议层并仍绿。

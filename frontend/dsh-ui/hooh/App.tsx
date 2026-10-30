@@ -18,6 +18,34 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { Box, Text, useInput } from '../ui.js'
+
+/** 渲染异常边界：把渲染错误写到 stderr，而不是让 ink 静默退出（静默退出 =
+ *  冻结画面 = 用户看到「卡死」而没人知道为什么）。 */
+class ShellErrorBoundary extends React.Component<
+  { children: React.ReactNode },
+  { err: Error | null }
+> {
+  state = { err: null as Error | null }
+  static getDerivedStateFromError(err: Error): { err: Error } {
+    return { err }
+  }
+  componentDidCatch(err: Error): void {
+    try {
+      process.stderr.write('[HooH 壳] 渲染异常：' + (err.stack ?? String(err)) + String.fromCharCode(10))
+    } catch { /* noop */ }
+  }
+  render(): React.ReactNode {
+    if (this.state.err !== null) {
+      return React.createElement(
+        Box,
+        { flexDirection: 'column' },
+        React.createElement(Text, { color: 'red' }, '✗ 界面渲染异常（详见上方 stderr）'),
+        React.createElement(Text, { color: 'gray' }, String(this.state.err.message ?? this.state.err)),
+      )
+    }
+    return this.props.children
+  }
+}
 import { MessageList } from '../components/MessageList.js'
 import { Launchpad } from '../screens/Launchpad.js'
 import { launchpadData, type AceSnapshot } from './adapter.js'
@@ -275,6 +303,7 @@ export function App({ snapshot, engine, initialPrompt }: AppProps): React.ReactE
 
   if (rows.length === 0) {
     return (
+      <ShellErrorBoundary>
       <Launchpad
         {...data}
         query={query}
@@ -303,10 +332,12 @@ export function App({ snapshot, engine, initialPrompt }: AppProps): React.ReactE
         onEscape={() => process.exit(0)}
         onBlankClick={() => setFocusIndex(-1)}
       />
+      </ShellErrorBoundary>
     )
   }
 
   return (
+    <ShellErrorBoundary>
     <Box flexDirection="column">
       <MessageList
         rows={rows as never}
@@ -353,5 +384,6 @@ export function App({ snapshot, engine, initialPrompt }: AppProps): React.ReactE
         </Box>
       ) : null}
     </Box>
+    </ShellErrorBoundary>
   )
 }

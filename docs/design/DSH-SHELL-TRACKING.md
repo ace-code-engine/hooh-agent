@@ -88,6 +88,13 @@
   路由,空文本=取消落回默认值,secret 不回显)——/model /config 向导从此
   能用,「设置按不了」的根因(选择请求被自动取消)一并清除。winpty 真 TTY
   实测:按 / 进程存活、候选面板带描述正确渲染。
+- [x] 2026-10-31 **回退默认入口**：壳的 ink 应用在挂载后 ~370ms 自行退出
+      （waitUntilExit resolve，无渲染异常边界触发、无 stderr、无 process.exit——
+      原因在迁入树自身，非壳外因素；经典前端同环境全程存活），修复前不转正。
+      plain ace 回归 `frontend/src`（瑞士规范前端），`ace ui` 保留为显式入口。
+      上一轮的「dsh 壳转正」决定作废，等缺陷修复后重评。
+- [ ] **修壳的 ink 自退出缺陷**（~370ms，无错误信息——ErrorBoundary 未触发，
+      需要在 dsh-ui/ink 层面查 root.ts / instances.ts 的退出路径）
 - [ ] re-vendor 到上游 0.16.1
 - [ ] 工具表达第 1 项:ToolRow resultView 投影
 - [ ] questions/ 面板接入(choice_request 不再自动取消)
