@@ -13,7 +13,7 @@
 
 import React from 'react'
 
-import { Text } from '../ui.js'
+import { Box, Text } from '../ui.js'
 import { Pane } from '../components/design-system/Pane.js'
 import { HintLine } from '../components/design-system/HintLine.js'
 
@@ -48,7 +48,12 @@ export function PermissionDialog({
   reason,
   persistOk,
   cursor,
-}: PermissionDialogProps & { cursor: number }): React.ReactNode {
+  onPickIndex,
+}: PermissionDialogProps & {
+  cursor: number
+  /** 鼠标点选选项（fullscreen）：与键盘回车同一条 answer 路径。 */
+  onPickIndex?: (index: number) => void
+}): React.ReactNode {
   const opts = shellPermissionOptions(persistOk)
   const safe = Math.max(0, Math.min(cursor, opts.length - 1))
   return (
@@ -56,10 +61,13 @@ export function PermissionDialog({
       <Text color="remember" bold>⚠ {tool} 需要你确认</Text>
       {reason !== '' ? <Text>{reason.slice(0, 200)}</Text> : null}
       {opts.map((o, i) => (
-        <Text key={o.label} inverse={i === safe} bold={i === safe}
-              color={o.decision === 'deny' ? 'error' : undefined}>
-          {i === safe ? '❯ ' : '  '}{i + 1}. {o.label}
-        </Text>
+        <Box key={o.label}
+             onClick={onPickIndex !== undefined ? (event) => { event.stopImmediatePropagation(); onPickIndex(i) } : undefined}>
+          <Text inverse={i === safe} bold={i === safe}
+                color={o.decision === 'deny' ? 'error' : undefined}>
+            {i === safe ? '❯ ' : '  '}{i + 1}. {o.label}
+          </Text>
+        </Box>
       ))}
       <HintLine text="↑/↓ 选择 · 回车确认 · Esc 拒绝" />
     </Pane>

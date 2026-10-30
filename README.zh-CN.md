@@ -99,7 +99,7 @@ Windows 没装 Python：去 [Releases](https://github.com/ace-code-engine/hooh-a
 先写快照，`/undo` 才谈得上意义。每一次动作都有对等回应，而且可逆。
 
 仓库内**不含任何米哈游素材**——这句只说**命名与素材**，不等于本仓没有第三方代码：改编的源码
-与文案另见 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)。图标 [`assets/logo.svg`](assets/logo.svg) 是按本项目自身的
+与文案另见 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)。`frontend/dsh-ui/` 是按 MIT 迁入的 dsh-TUI 界面树（含上游 LICENSE.upstream 与迁入说明），作为主外壳随本仓分发，不依赖全局安装的 dsh-tui。图标 [`assets/logo.svg`](assets/logo.svg) 是按本项目自身的
 视觉语言从零画出来的「互」字几何构图（三横一竖），没有描摹、没有提取、没有二次分发。
 
 > 作者本人是米哈游长期玩家，这个名字是向《崩坏：星穹铁道》"均衡"星神致意。

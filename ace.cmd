@@ -114,24 +114,26 @@ if /i "%~1"=="tui" (
 )
 
 rem ---------------------------------------------------------------------------
-rem DEFAULT UI (plain `ace`, also `ace ui [args]`): the dsh-TUI interface tree
-rem migrated into this repo (frontend/dsh-ui), driven by ace's engine. This is
-rem the MAIN UI as of 2026-10-24 (user decision: its rendering and tool
-rem presentation are the product look). Nothing external is invoked: the tree,
-rem its renderer and its components live in-tree. The previous Swiss-spec
-rem frontend stays reachable as `ace classic`.
-rem PARENS ARE BANNED in the echos below - see the tui block above.
-rem Batch quirks honored here: shift does NOT affect %*, and an undefined
-rem variable expands to its literal name - so _ACE_REST is always pre-set to
-rem empty and only filled by stripping the first token off %*.
+rem Frontend dispatch (2026-10-24 user decision, final): plain `ace` runs the
+rem dsh-TUI shell VENDORED IN THIS REPO -- it is the MAIN UI (frontend/dsh-ui,
+rem upstream MIT -- see
+rem frontend/dsh-ui/LICENSE.upstream + MIGRATION.md for attribution). The
+rem global npm dsh-tui is NEVER invoked from this launcher. The previous
+rem Swiss-spec frontend stays reachable as `ace classic`.
+rem Force the Python path with:  set ACE_LEGACY_UI=1
+rem PARENS ARE BANNED inside if-blocks here - see the tui block above.
+rem Batch quirks: shift does NOT affect %*, and an undefined variable expands
+rem to its literal name - so _ACE_REST is always pre-set to empty.
 rem ---------------------------------------------------------------------------
 set "_ACE_REST="
+set "_ACE_CLASSIC="
 if /i "%~1"=="ui" (
     if not "%~2"=="" for /f "tokens=1,* delims= " %%a in ("%*") do set "_ACE_REST=%%b"
     goto :fe_shell
 )
 if /i "%~1"=="classic" (
     if not "%~2"=="" for /f "tokens=1,* delims= " %%a in ("%*") do set "_ACE_REST=%%b"
+    set "_ACE_CLASSIC=1"
     goto :fe_shell
 )
 goto :fe_shell
@@ -145,9 +147,12 @@ if errorlevel 1 (
     goto :ace_python
 )
 if not exist "frontend\node_modules\tsx\dist\cli.mjs" (
-    echo [HooH] frontend dependencies are not installed. Run: ace --install-ui
-    pause
-    exit /b 1
+    echo [HooH] frontend dependencies are not installed yet.
+    echo       Install them once with:
+    echo           cd frontend
+    echo           npm install
+    echo       Falling back to the Python REPL for now.
+    goto :ace_python
 )
 rem tsx discovers tsconfig.json from the CURRENT DIRECTORY, not from the
 rem location of the file it is given. Run it from the repo root and it finds
@@ -155,14 +160,13 @@ rem no tsconfig, falls back to the classic JSX transform, and the first
 rem render() dies with "React is not defined" -- while "npm start" keeps
 rem working, because there the cwd is frontend. So run it from frontend too.
 pushd "%~dp0frontend"
-if /i "%~1"=="classic" (
+if defined _ACE_CLASSIC (
     node "node_modules\tsx\dist\cli.mjs" "src\index.tsx" %_ACE_REST%
 ) else (
     node "node_modules\tsx\dist\cli.mjs" "dsh-ui\hooh\entry.tsx" %_ACE_REST%
 )
 rem Double-click survival: a nonzero exit here closed the window instantly -
-rem the user saw a flash and could never read the error (the 2026-10-24
-rem "double-click flash-exit" report). Hold the window open on failure.
+rem the user saw a flash and could never read the error. Hold it open.
 if errorlevel 1 pause
 popd
 goto :eof

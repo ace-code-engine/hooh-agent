@@ -13,7 +13,7 @@
 
 import React from 'react'
 
-import { Text } from '../ui.js'
+import { Box, Text } from '../ui.js'
 import { Pane } from '../components/design-system/Pane.js'
 import { HintLine } from '../components/design-system/HintLine.js'
 import type { PendingChoice } from './engine.js'
@@ -22,30 +22,39 @@ export function ChoiceDialog({
   req,
   cursor,
   value,
+  onPick,
 }: {
   req: PendingChoice
   cursor: number
   /** text 专用：已输入的文本（secret 时调用方传同长度的 • 串）。 */
   value?: string | undefined
+  /** 鼠标点选候选（fullscreen）：与键盘回车同一条 answer 路径。 */
+  onPick?: (index: number) => void
 }): React.ReactNode {
   return (
     <Pane color="permission">
       <Text color="remember" bold>{req.title}</Text>
       {req.kind === 'choose' && req.options !== undefined ? (
         req.options.map((o, i) => (
-          <Text key={o} inverse={i === cursor} bold={i === cursor}>
-            {i === cursor ? '❯ ' : '  '}{i + 1}. {o}
-          </Text>
+          <Box key={o} onClick={onPick !== undefined ? (event) => { event.stopImmediatePropagation(); onPick(i) } : undefined}>
+            <Text inverse={i === cursor} bold={i === cursor}>
+              {i === cursor ? '❯ ' : '  '}{i + 1}. {o}
+            </Text>
+          </Box>
         ))
       ) : null}
       {req.kind === 'confirm' ? (
         <>
-          <Text inverse={cursor === 0} bold={cursor === 0}>
-            {cursor === 0 ? '❯ ' : '  '}1. 是
-          </Text>
-          <Text inverse={cursor === 1} bold={cursor === 1} color={cursor === 1 ? 'red' : undefined}>
-            {cursor === 1 ? '❯ ' : '  '}2. 否
-          </Text>
+          <Box onClick={onPick !== undefined ? (event) => { event.stopImmediatePropagation(); onPick(0) } : undefined}>
+            <Text inverse={cursor === 0} bold={cursor === 0}>
+              {cursor === 0 ? '❯ ' : '  '}1. 是
+            </Text>
+          </Box>
+          <Box onClick={onPick !== undefined ? (event) => { event.stopImmediatePropagation(); onPick(1) } : undefined}>
+            <Text inverse={cursor === 1} bold={cursor === 1} color={cursor === 1 ? 'error' : undefined}>
+              {cursor === 1 ? '❯ ' : '  '}2. 否
+            </Text>
+          </Box>
         </>
       ) : null}
       {req.kind === 'text' ? (

@@ -60,6 +60,23 @@ export function App({ snapshot, engine, initialPrompt }: AppProps): React.ReactE
   const reproject = useCallback((): void => {
     setRows(rowsFromEvents(eventsRef.current))
   }, [])
+  // 流式节流：每条 model_delta 都全量重投影 + 全树重渲染是卡顿主因——
+  // 100ms 合帧；收尾（turn/command 完成）走 reproject 立即 flush。
+  const throttleRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const reprojectThrottled = useCallback((): void => {
+    if (throttleRef.current !== null) return
+    throttleRef.current = setTimeout(() => {
+      throttleRef.current = null
+      setRows(rowsFromEvents(eventsRef.current))
+    }, 100)
+  }, [])
+  const reprojectNow = useCallback((): void => {
+    if (throttleRef.current !== null) {
+      clearTimeout(throttleRef.current)
+      throttleRef.current = null
+    }
+    setRows(rowsFromEvents(eventsRef.current))
+  }, [])
 
   // 审批与选择都是轮次外的往返：注册在挂载期，不挂在某一次 turn 上。
   useEffect(() => {
@@ -98,7 +115,7 @@ export function App({ snapshot, engine, initialPrompt }: AppProps): React.ReactE
           reproject()
           const res = await engine.command(line, (ev) => {
             eventsRef.current = [...eventsRef.current, ev]
-            reproject()
+            reprojectThrottled()
           })
           // `/exit` 等命令以 keep_going=false 收工（引擎侧已保存会话）。
           if (!res.keepGoing) process.exit(0)
@@ -107,14 +124,14 @@ export function App({ snapshot, engine, initialPrompt }: AppProps): React.ReactE
           // 不做乐观插入，行状态保持单一来源（全量事件投影）。
           await engine.turn(line, (ev) => {
             eventsRef.current = [...eventsRef.current, ev]
-            reproject()
+            reprojectThrottled()
           })
         }
-        reproject()
+        reprojectNow()
       } catch (e) {
         const msg = e instanceof Error ? e.message : String(e)
         eventsRef.current = [...eventsRef.current, { type: 'notice', text: `✗ ${msg}` }]
-        reproject()
+        reprojectNow()
       } finally {
         setBusy(false)
       }
@@ -220,6 +237,17 @@ export function App({ snapshot, engine, initialPrompt }: AppProps): React.ReactE
       }
       return
     }
+    if (rows.length === 0) {
+      // 首屏（Launchpad）的打字/提交由**上游自己的输入处理**负责——它带剪贴板、
+      // 命令候选、焦点环整套；App 层在这里若再吃一遍按键就是双份输入
+      // （同一键两层各处理一次，2026-10-24「输不了任何东西」的根因之一）。
+      // App 层只保留：弹窗（上面）与挂起轮次的中断（下面）。
+      if (busy && (key.escape || (key.ctrl && input === 'c'))) {
+        engine?.interrupt()
+        setBusy(false)
+      }
+      return
+    }
     if (busy) {
       // 挂住的轮次必须能被放弃（钱在烧：杀窗重试=再烧一次）。Esc/Ctrl+C 请求
       // 引擎在轮边界停下；本地同时解除 busy 锁——引擎收尾事件晚到也照常投影。
@@ -296,10 +324,27 @@ export function App({ snapshot, engine, initialPrompt }: AppProps): React.ReactE
           reason={perm.reason}
           persistOk={perm.persistOk}
           cursor={permCursor}
+          onPickIndex={(i) => {
+            const o = shellPermissionOptions(perm.persistOk)[i]
+            if (o !== undefined) answer(o.decision, o.persist)
+          }}
         />
       ) : null}
       {choice !== null ? (
-        <ChoiceDialog req={choice} cursor={choiceCursor} value={choiceText} />
+        <ChoiceDialog
+          req={choice}
+          cursor={choiceCursor}
+          value={choiceText}
+          onPick={(i) => {
+            if (choice.kind === 'choose' && choice.options !== undefined) {
+              engine?.answerChoice('choose', { type: 'pick', value: choice.options[i] ?? '' })
+              setChoice(null)
+            } else if (choice.kind === 'confirm') {
+              engine?.answerChoice('confirm', i === 0 ? { type: 'accept' } : { type: 'deny' })
+              setChoice(null)
+            }
+          }}
+        />
       ) : null}
       {perm === null && choice === null ? (
         <Box marginTop={1}>

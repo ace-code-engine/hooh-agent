@@ -49,6 +49,7 @@ the adapted parts, and the attribution lands here **before** the first byte does
 | Project | Version | License | Obligations | Landed in this repo |
 |---|---|---|---|---|
 | dsh-TUI (`@deepseek-harness-tui/dsh-tui`) | 0.12.0 | MIT | Keep the upstream copyright + permission notice with every adapted or copied part | **Landed 2026-10-04** — render kernel vendored byte-for-byte, 135 files / 27,890 lines, at [`frontend/vendor/dsh-ink/`](frontend/vendor/dsh-ink/); per-file provenance in its [`MANIFEST.md`](frontend/vendor/dsh-ink/MANIFEST.md); per-part upstreams in [`third_party/dsh-tui/NOTICE.md`](third_party/dsh-tui/NOTICE.md) |
+| dsh-TUI (`@deepseek-harness-tui/dsh-tui`) | ~0.12.0 tree | MIT | Same notice requirement, carried by every copied file's header/provenance notes | **Landed 2026-10-24** — the full UI tree (screens/components/design-system/ink, ~900 files) migrated into [`frontend/dsh-ui/`](frontend/dsh-ui/) as the MAIN shell (`ace` / `ace ui`), with the HooH adapter layer at [`frontend/dsh-ui/hooh/`](frontend/dsh-ui/hooh/) (our code) and `LICENSE.upstream` + [`MIGRATION.md`](frontend/dsh-ui/MIGRATION.md) carrying attribution; this shell is the vendored upstream, not the globally-installed npm package |
 
 The dsh-TUI render kernel has landed: 135 upstream files, copied byte-for-byte into
 [`frontend/vendor/dsh-ink/`](frontend/vendor/dsh-ink/), carrying the upstream MIT text as

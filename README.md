@@ -107,7 +107,7 @@ can `/undo` mean anything. Every action gets a reciprocal, reversible answer.
 
 The project **contains no miHoYo material** — that claim is about names and artwork only;
 third-party code and text adapted by this project is listed separately in
-[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md). The icon ([`assets/logo.svg`](assets/logo.svg))
+[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md). `frontend/dsh-ui/` is the dsh-TUI UI tree migrated under MIT (upstream `LICENSE.upstream` + migration notes included), shipped in-repo as the main shell -- the globally-installed dsh-tui npm package is never used. The icon ([`assets/logo.svg`](assets/logo.svg))
 is original geometry in this repo's own visual language — two interlocking strokes crossed by
 one spine, the 互 glyph, drawn from scratch. Nothing is traced, copied, or extracted from any game.
 

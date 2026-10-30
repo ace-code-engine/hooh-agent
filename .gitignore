@@ -91,3 +91,8 @@ video_work/
 # 并行侦察/研读的中间产物（整合后按需入库或删除）
 .recon/
 
+# 工具私有的工作区目录（workbuddy/ZCode 的本地记忆与计划文件，不入库）
+.workbuddy/
+.workbuddy-ai/
+.zcode/
+.zcodeignore

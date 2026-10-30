@@ -56,6 +56,15 @@
   对应物的动作如实进 notice),参数段铭牌(模型/强度/预设/权限)点击打开
   对应命令,命令候选点击直接执行,工作区名牌如实告知未接入。已知残留:
   命令候选表还是 entry 里硬编码的六条,待接 initialize 握手的 commands。
+- 2026-10-24 第五批(用户澄清定位):壳的归属与调用源最终敲定——**壳源码整个
+  vendored 在本仓(frontend/dsh-ui,上游 MIT),plain ace = 调本仓这份壳,
+  绝不调全局 npm 的 dsh-tui**;归属在 THIRD-PARTY-NOTICES/双 README/
+  LICENSE.upstream/MIGRATION.md 四处说清。用户实测两问题当场修:
+  ①设置点不了 → 审批/选择弹窗选项接鼠标(内核 hit-test 本来就通,是弹窗
+  选项没挂 onClick);②贼卡 → 流式节流(每条 model_delta 全量重投影+全树
+  重渲染是主因,改 100ms 合帧、收尾 flush)。另有 App 层与上游首屏的
+  双份输入冲突已修(首屏打字权归还上游输入处理)。启动器恢复 dsh 壳默认
+  (上一轮的回退作废),classic = ace classic。
 - 2026-10-24 第四批(用户实测"卡死在 /help 首屏"):**命令路径没挂监听**——
   /help 等命令的可见输出全部以 notice 事件回流,而 engine.command() 不挂
   listener,输出进不了投影 → 行永不增长 → 永远停在首屏。修复:command 挂
