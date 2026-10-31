@@ -72,8 +72,8 @@ text{white-space:pre;dominant-baseline:middle}
 <rect y="40" width="1016" height="802" fill="#11141b"/>
 <circle cx="22" cy="20" r="5.5" fill="#ff5f57"/><circle cx="40" cy="20" r="5.5" fill="#febc2e"/><circle cx="58" cy="20" r="5.5" fill="#28c840"/>
 <text x="508.0" y="21" text-anchor="middle" font-size="12.5" fill="#7d879c">hooh-agent — python ai_code.py --mock</text>
-<text class="r0" x="22" y="52" xml:space="preserve"><tspan fill="#d7dce5">HooH</tspan><tspan fill="#7d879c"> 1.2.0 · 互</tspan></text>
-<text class="r1" x="22" y="76" xml:space="preserve"><tspan fill="#7d879c">── 当前会话 ──────────────────────────────────────────────────────────────────────────── v1.2.0 </tspan></text>
+<text class="r0" x="22" y="52" xml:space="preserve"><tspan fill="#d7dce5">HooH</tspan><tspan fill="#7d879c"> 1.2.1 · 互</tspan></text>
+<text class="r1" x="22" y="76" xml:space="preserve"><tspan fill="#7d879c">── 当前会话 ──────────────────────────────────────────────────────────────────────────── v1.2.1 </tspan></text>
 <text class="r2" x="22" y="100" xml:space="preserve"><tspan fill="#d7dce5">  模型    mock（离线演示，无需密钥）</tspan></text>
 <text class="r3" x="22" y="124" xml:space="preserve"><tspan fill="#d7dce5">  边界    权限 write · 沙箱 off · 联网 开 · 审批 on_request</tspan></text>
 <text class="r4" x="22" y="148" xml:space="preserve"><tspan fill="#d7dce5">  目录    …</tspan></text>
@@ -90,7 +90,7 @@ text{white-space:pre;dominant-baseline:middle}
 <text class="r15" x="22" y="412" xml:space="preserve"><tspan fill="#d7dce5">▅ 正在调用 datetime_now 0s</tspan></text>
 <text class="r16" x="22" y="436" xml:space="preserve">&#160;</text>
 <text class="r17" x="22" y="460" xml:space="preserve"><tspan fill="#d7dce5">█████ ∴ 思考中 ○ 0s   ◈</tspan></text>
-<text class="r18" x="22" y="484" xml:space="preserve"><tspan fill="#d7dce5">当前时间是 2026-10-31 17:33:37</tspan></text>
+<text class="r18" x="22" y="484" xml:space="preserve"><tspan fill="#d7dce5">当前时间是 2026-10-31 21:19:36</tspan></text>
 <text class="r19" x="22" y="508" xml:space="preserve">&#160;</text>
 <text class="r20" x="22" y="532" xml:space="preserve"><tspan fill="#5fd68a">  ✓ 完成（2 轮, 0.6s）</tspan></text>
 <text class="r21" x="22" y="556" xml:space="preserve"><tspan fill="#d7dce5">  会话: 2 轮 | 工具执行 1 次 | 违规 0 次 | 已运行 1s</tspan></text>

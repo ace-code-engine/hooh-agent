@@ -5,6 +5,21 @@
 > 条目分类：✨ 新增 · ⚙️ 改进 · 🐛 修复 · 🛡️ 安全。
 > 全量断言随平台浮动（Windows 比 Linux 多十余项），**以 `python test_all.py` 的实际输出为准，本文不写死数字**（历史条目里的数字是当时那次运行的记录）。
 
+## [v1.2.1] — 2026-10-31 —— 收口：CI 全绿 · 界面版本号回到单一源 · 只会在 Linux 炸的写法被拦住
+
+> 逐版人话说明见 [`UPDATES.md`](UPDATES.md)。v1.2.0 发布后 40 分钟内发现并修掉的问题，
+> 安装包已重打（`hooh-1.2.1-windows-amd64.msi` / `.zip`）。
+
+### 🐛 修复
+- **CI 红两条（v1.2.0 推送当次）**：
+  - `Frontend (tsc + vitest)` 的类型门禁把**迁入树**也算进了严尺度：`npm run build` 的 `tsconfig.json` 原先 `include` 了 `test/`，而测试要从 `../dsh-ui/hooh/` 取迁入壳的纯逻辑，那一条 import 会把含 ink 渲染器的整棵 vendored 树拉进编译程序 —— 57 条报错**全部**落在 `dsh-ui/`，我们自己的代码 0 条。现在门禁只查 `src` + `tools`（我们写的接线层），迁入树按它自己那套宽松尺度单独编译、不追类型等式（见 `dsh-ui/MIGRATION.md`）；测试的真实性交给 `npm test` 执行而不是靠 tsc。
+  - `Security / OpenSSF Scorecard` 在 2 秒内失败：`ossf/scorecard-action@v2` **没有浮动 v2 标签**（上游只发 `v2.x.y`），报 `unable to find version v2`。钉到 `@v2.5.0`，并补 `actions: read` 权限（评分要看 workflow 配置）。
+- **迁入的 ink 内核有 29 个文件名被压成了全小写**（`Box.js`→`box.js` …），而**内容与文件之间互相 import 的写法**是上游的大驼峰。Windows 大小写不敏感，所以本机 692 条测试全绿、装好的 app 也跑得好；Linux（CI）上是 `Failed to load url … Does the file exist?` —— 41 个测试文件连 collect 都过不去。这不是测试挑刺：**同一棵树拿到 Linux/macOS 上就是起不来**。文件名已逐个 `git mv` 回上游拼法（135 个文件仍与 `@deepseek-harness-tui/dsh-tui@0.12.0` 逐字节相同，见 `vendor/dsh-ink/MANIFEST.md`），并新增 `frontend/test/import-case.test.ts` —— 纯字符串比对，**Windows 上也能拦住只会在 Linux 炸的写法**（做过反向验证：故意写错一处即红）。
+- **界面语言不再跟着宿主 locale 漂**：`i18n.ts` 在**导入时**就解析界面语言（`DSH_TUI_LANG` → 持久化 `/lang` → OS locale → `zh`），CI 的 `LANG=C.UTF-8` 于是把界面切成英文，写死中文的四条 smoke 断言（`继续「` / `说点什么` / `首屏画了` / 铭牌）跟着失败。四个 smoke fixture 现在以 `hooh/smoke-lang.ts` 为**第一条 import**，用产品自己的第一优先级入口 `DSH_TUI_LANG=zh` 显式钉死；断言一条没放宽。
+- **界面版本号回到单一源**：右下角铭牌与内核版本此前在 `entry.tsx` 和三个 smoke 里各写死一份 `'1.1.0'`，产品升到 1.2.0 后**装好的 app 显示的仍是 1.1.0**（没有任何门禁会响，因为界面层不在 tsc 的 include 里）。现在 `frontend/dsh-ui/hooh/version.ts` 是唯一来源，`check_packaging.ps1` 新增机械校验要求它等于 `core/version.py`（反向验证过：故意改成 1.1.0 即 FAIL）。
+- **宽度守卫的"参照解释器"终于钉对了**：`test/text.test.ts` 拿 TS 的**静态**宽度表跟 Python 的**活表** `unicodedata.east_asian_width()` 逐码点比对，只有"参照解释器固定"时这条比对才有意义。前三次试着改 `setup-python` 的版本（3.12 → 3.13 → 3.13.14）全都没用 —— 因为 `resolvePython()`（`src/protocol/client.ts`）在非 Windows 上**先试 `/usr/bin/python3`**（判据只是文件存在），装了什么版本都轮不到它，跑的一直是镜像自带的系统 python3（Unicode 15.0）。现在 frontend job 用 `ACE_PYTHON=python3`（`resolvePython()` 的第一优先级，裸命令名走 PATH）把"装了哪个就是哪个"钉住，同时把 `python-version` 钉到补丁号 `3.13.14`（= 冻结发行实际打包的那一版，Unicode 15.1）。
+- **两条"Esc 能关"不再数拍子**：内核把孤立 `ESC` 压到 `NORMAL_TIMEOUT`（50 ms）才发（为了不把 `\u001b[A` 的前缀误判成 Esc），而用例等的是两个 `tick()` = 40 ms —— 本机有时刚好够、CI 不够，同一个用例在 Windows 绿、在 Ubuntu 红。改成 `waitFor(() => closed === 1)`（2 s 上限），等结果而不是猜定时器。
+
 ## [v1.2.0] — 2026-10-31 —— 整壳转正：dsh-TUI v0.17.0 多内核界面 + HooH 内核 + 自包含 MSI
 
 ### ✨ 新增
@@ -57,14 +72,6 @@
 ### 🐛 修复
 - **主页长值溢出糊串**：模型名（`deepseek-v4-flash`）、resume 标签（`继续上次：…`）超列宽时与提示词糊成一串（`deepseek-v4-flash换模型` / `0轮回车继续`）；`render_home` 超长保底空格。
 - **思考强度提示漏最高档**：主页提示只列四档，漏了第 5 档 `max` / `最高`（三语补齐）。
-- **CI 红两条（v1.2.0 推送当次）**：
-  - `Frontend (tsc + vitest)` 的类型门禁把**迁入树**也算进了严尺度：`npm run build` 的 `tsconfig.json` 原先 `include` 了 `test/`，而测试要从 `../dsh-ui/hooh/` 取迁入壳的纯逻辑，那一条 import 会把含 ink 渲染器的整棵 vendored 树拉进编译程序 —— 57 条报错**全部**落在 `dsh-ui/`，我们自己的代码 0 条。现在门禁只查 `src` + `tools`（我们写的接线层），迁入树按它自己那套宽松尺度单独编译、不追类型等式（见 `dsh-ui/MIGRATION.md`）；测试的真实性交给 `npm test` 执行而不是靠 tsc。
-  - `Security / OpenSSF Scorecard` 在 2 秒内失败：`ossf/scorecard-action@v2` **没有浮动 v2 标签**（上游只发 `v2.x.y`），报 `unable to find version v2`。钉到 `@v2.5.0`，并补 `actions: read` 权限（评分要看 workflow 配置）。
-- **迁入的 ink 内核有 29 个文件名被压成了全小写**（`Box.js`→`box.js` …），而**内容与文件之间互相 import 的写法**是上游的大驼峰。Windows 大小写不敏感，所以本机 692 条测试全绿、装好的 app 也跑得好；Linux（CI）上是 `Failed to load url … Does the file exist?` —— 41 个测试文件连 collect 都过不去。这不是测试挑刺：**同一棵树拿到 Linux/macOS 上就是起不来**。文件名已逐个 `git mv` 回上游拼法（135 个文件仍与 `@deepseek-harness-tui/dsh-tui@0.12.0` 逐字节相同，见 `vendor/dsh-ink/MANIFEST.md`），并新增 `frontend/test/import-case.test.ts` —— 纯字符串比对，**Windows 上也能拦住只会在 Linux 炸的写法**（做过反向验证：故意写错一处即红）。
-- **界面语言不再跟着宿主 locale 漂**：`i18n.ts` 在**导入时**就解析界面语言（`DSH_TUI_LANG` → 持久化 `/lang` → OS locale → `zh`），CI 的 `LANG=C.UTF-8` 于是把界面切成英文，写死中文的四条 smoke 断言（`继续「` / `说点什么` / `首屏画了` / 铭牌）跟着失败。四个 smoke fixture 现在以 `hooh/smoke-lang.ts` 为**第一条 import**，用产品自己的第一优先级入口 `DSH_TUI_LANG=zh` 显式钉死；断言一条没放宽。
-- **界面版本号回到单一源**：右下角铭牌与内核版本此前在 `entry.tsx` 和三个 smoke 里各写死一份 `'1.1.0'`，产品升到 1.2.0 后**装好的 app 显示的仍是 1.1.0**（没有任何门禁会响，因为界面层不在 tsc 的 include 里）。现在 `frontend/dsh-ui/hooh/version.ts` 是唯一来源，`check_packaging.ps1` 新增机械校验要求它等于 `core/version.py`（反向验证过：故意改成 1.1.0 即 FAIL）。
-- **宽度守卫的"参照解释器"终于钉对了**：`test/text.test.ts` 拿 TS 的**静态**宽度表跟 Python 的**活表** `unicodedata.east_asian_width()` 逐码点比对，只有"参照解释器固定"时这条比对才有意义。前三次试着改 `setup-python` 的版本（3.12 → 3.13 → 3.13.14）全都没用 —— 因为 `resolvePython()`（`src/protocol/client.ts`）在非 Windows 上**先试 `/usr/bin/python3`**（判据只是文件存在），装了什么版本都轮不到它，跑的一直是镜像自带的系统 python3（Unicode 15.0）。现在 frontend job 用 `ACE_PYTHON=python3`（`resolvePython()` 的第一优先级，裸命令名走 PATH）把"装了哪个就是哪个"钉住，同时把 `python-version` 钉到补丁号 `3.13.14`（= 冻结发行实际打包的那一版，Unicode 15.1）。
-- **两条"Esc 能关"不再数拍子**：内核把孤立 `ESC` 压到 `NORMAL_TIMEOUT`（50 ms）才发（为了不把 `\u001b[A` 的前缀误判成 Esc），而用例等的是两个 `tick()` = 40 ms —— 本机有时刚好够、CI 不够，同一个用例在 Windows 绿、在 Ubuntu 红。改成 `waitFor(() => closed === 1)`（2 s 上限），等结果而不是猜定时器。
 
 ## [v1.1.0] · 2026-10-04 —— 界面重做：一份规范、一个主面、三语成套
 

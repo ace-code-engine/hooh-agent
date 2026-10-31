@@ -11,4 +11,4 @@
  * 产品版本，不是两个可以各自走的号。`packaging/check_packaging.ps1` 里有一条
  * 机械校验守这个等式；发版时两处一起改（本来就该跟 CHANGELOG 一起动）。
  */
-export const HOOH_UI_VERSION = '1.2.0'
+export const HOOH_UI_VERSION = '1.2.1'

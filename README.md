@@ -13,7 +13,7 @@
 [![CI](https://github.com/ace-code-engine/hooh-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/ace-code-engine/hooh-agent/actions/workflows/ci.yml)
 [![Version](https://img.shields.io/badge/Version-1.2.0-7DA1DE)](https://github.com/ace-code-engine/hooh-agent/releases)
 [![Release](https://img.shields.io/github/v/release/ace-code-engine/hooh-agent?label=Download&color=7DA1DE)](https://github.com/ace-code-engine/hooh-agent/releases)
-<a href="CHANGELOG.md"><img alt="Latest" src="https://img.shields.io/badge/latest-v1.2.0%20(2026--10--31)-7DA1DE"></a>
+<a href="CHANGELOG.md"><img alt="Latest" src="https://img.shields.io/badge/latest-v1.2.1%20(2026--10--31)-7DA1DE"></a>
 [![License](https://img.shields.io/badge/License-MIT-7DA1DE)](LICENSE)
 [![Safety core](https://img.shields.io/badge/safety%20core-zero--dep-orange)](docs/security/SECURITY-MODEL.md)
 [![Model API](https://img.shields.io/badge/model%20API-requires%20requests-blue)](docs/CONFIGURATION.md)
