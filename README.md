@@ -11,7 +11,7 @@
 [English](README.md) · [简体中文](README.zh-CN.md) · [Release notes](UPDATES.md) · [Docs](docs/README.md) · [Contributing](CONTRIBUTING.md)
 
 [![CI](https://github.com/ace-code-engine/hooh-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/ace-code-engine/hooh-agent/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/Version-1.2.0-7DA1DE)](https://github.com/ace-code-engine/hooh-agent/releases)
+[![Version](https://img.shields.io/badge/Version-1.2.1-7DA1DE)](https://github.com/ace-code-engine/hooh-agent/releases)
 [![Release](https://img.shields.io/github/v/release/ace-code-engine/hooh-agent?label=Download&color=7DA1DE)](https://github.com/ace-code-engine/hooh-agent/releases)
 <a href="CHANGELOG.md"><img alt="Latest" src="https://img.shields.io/badge/latest-v1.2.1%20(2026--10--31)-7DA1DE"></a>
 [![License](https://img.shields.io/badge/License-MIT-7DA1DE)](LICENSE)
@@ -20,7 +20,6 @@
 [![UI](https://img.shields.io/badge/UI-en%20%C2%B7%20zh%20%C2%B7%20ja-7DA1DE)](#three-shells)
 [![Security](https://github.com/ace-code-engine/hooh-agent/actions/workflows/security.yml/badge.svg?label=Security%20scans)](https://github.com/ace-code-engine/hooh-agent/actions/workflows/security.yml)
 [![CodeQL](https://github.com/ace-code-engine/hooh-agent/actions/workflows/security.yml/badge.svg?event=push&label=CodeQL)](https://github.com/ace-code-engine/hooh-agent/actions/workflows/security.yml)
-[![OpenSSF Scorecard](https://api.securityscorecards.dev/badge/github/ace-code-engine/hooh-agent)](https://securityscorecards.dev/viewer?uri=github.com/ace-code-engine/hooh-agent)
 [![Bandit](https://img.shields.io/badge/Bandit-clean-4C1)](https://github.com/ace-code-engine/hooh-agent/actions/workflows/security.yml)
 [![pip-audit](https://img.shields.io/badge/pip--audit-clean-4C1)](https://github.com/ace-code-engine/hooh-agent/actions/workflows/security.yml)
 
@@ -134,6 +133,8 @@ CI runs a **Security workflow** separate from tests — four authoritative scann
 | **OpenSSF Scorecard** | Supply-chain maturity (branch protection / pinned deps / SAST presence / token permissions) | Published by OpenSSF infra, publicly queryable |
 
 Each one is a **standing CI gate**: any red blocks the PR — not a screenshot of a one-off run.
+
+> The OpenSSF Scorecard badge is **deliberately not displayed** for now: the project scores 2.1, and most of the deduction categories are repo-process items (branch protection, required code review, dependabot, keeping binaries out of the tree) rather than code. The scan still runs and posts to the Security tab; how to raise the score — and the current per-check breakdown — is written down as `WISH-01` in [docs/BACKLOG.md](docs/BACKLOG.md).
 
 ## Security
 

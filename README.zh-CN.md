@@ -11,7 +11,7 @@
 [简体中文](README.zh-CN.md) · [English](README.md) · [更新明细](UPDATES.md) · [文档索引](docs/README.md) · [参与贡献](CONTRIBUTING.md)
 
 [![CI](https://github.com/ace-code-engine/hooh-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/ace-code-engine/hooh-agent/actions/workflows/ci.yml)
-[![Version](https://img.shields.io/badge/Version-1.2.0-7DA1DE)](https://github.com/ace-code-engine/hooh-agent/releases)
+[![Version](https://img.shields.io/badge/Version-1.2.1-7DA1DE)](https://github.com/ace-code-engine/hooh-agent/releases)
 [![Release](https://img.shields.io/github/v/release/ace-code-engine/hooh-agent?label=Download&color=7DA1DE)](https://github.com/ace-code-engine/hooh-agent/releases)
 <a href="CHANGELOG.md"><img alt="Latest" src="https://img.shields.io/badge/latest-v1.2.1%20(2026--10--31)-7DA1DE"></a>
 [![License](https://img.shields.io/badge/License-MIT-7DA1DE)](LICENSE)
@@ -20,7 +20,6 @@
 [![界面](https://img.shields.io/badge/界面-中%20·%20英%20·%20日-7DA1DE)](#三种外壳)
 [![Security](https://github.com/ace-code-engine/hooh-agent/actions/workflows/security.yml/badge.svg?label=Security%20scans)](https://github.com/ace-code-engine/hooh-agent/actions/workflows/security.yml)
 [![CodeQL](https://github.com/ace-code-engine/hooh-agent/actions/workflows/security.yml/badge.svg?event=push&label=CodeQL)](https://github.com/ace-code-engine/hooh-agent/actions/workflows/security.yml)
-[![OpenSSF Scorecard](https://api.securityscorecards.dev/badge/github/ace-code-engine/hooh-agent)](https://securityscorecards.dev/viewer?uri=github.com/ace-code-engine/hooh-agent)
 [![Bandit](https://img.shields.io/badge/Bandit-clean-4C1)](https://github.com/ace-code-engine/hooh-agent/actions/workflows/security.yml)
 [![pip-audit](https://img.shields.io/badge/pip--audit-clean-4C1)](https://github.com/ace-code-engine/hooh-agent/actions/workflows/security.yml)
 
@@ -131,6 +130,8 @@ CI 里有独立于测试的 **Security 工作流**，四条权威扫描并行跑
 | **OpenSSF Scorecard** | 供应链成熟度（分支保护 / 依赖 pinned / SAST 存在 / 令牌权限） | OpenSSF 基础设施发布、公开可查 |
 
 每一条都**常驻 CI 门禁**：任何一条变红，PR 合不进去；不是"跑过一次贴个图"。
+
+> OpenSSF Scorecard 的徽章**暂时不挂**：当前 2.1 分，扣分的那些项基本是仓库流程问题（分支保护、必须评审、依赖更新机器人、仓库里不留二进制），不是代码问题。扫描照常跑、结果进 Security tab；分项现状和"要多少分得做哪些事"记在 [docs/BACKLOG.md](docs/BACKLOG.md) 的 `WISH-01`。
 
 ## 安全
 

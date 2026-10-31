@@ -12,7 +12,10 @@
 #   4. scorecard   -- OpenSSF Scorecard (supply-chain maturity: branch
 #                     protection, pinned deps, SAST presence, token perms).
 #                     Results are published by OSSF infra to
-#                     api.securityscorecards.dev -- the README badge reads that.
+#                     api.securityscorecards.dev. The README deliberately does
+#                     NOT show its badge yet (score 2.1; the per-check plan to
+#                     raise it lives in docs/BACKLOG.md WISH-01) -- the scan
+#                     still runs and posts to the Security tab.
 #
 # All scans are read-only and need no secrets. scorecard publish needs a public
 # repo (satisfied). Relationship to ci.yml: ci.yml answers "does it work", this

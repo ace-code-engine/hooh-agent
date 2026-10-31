@@ -68,6 +68,34 @@
 
 - ✅ REL-10 **改名 HooH（互）+ 仓库改名 `hooh-agent`**（2026-10-03）：产品改名见 `docs/NAMING.md`（含商标/版权口径与"不含任何游戏素材"的说明）。仓库 `github.com/ace-code-engine/ace-agent` → `github.com/ace-code-engine/hooh-agent`，GitHub 对旧地址 302，Issues/PR/Releases/tag/Actions 全部跟随（与 REL-05 过继时同样的性质）。仓库内**URL 意义上的硬编码**已一并换：`README.md`×2（徽章 + Releases）、`README.zh-CN.md`×2、`docs/BOOTSTRAP.md`×3、`docs/GETTING-STARTED.md`、`docs/design/EXECUTOR-RELEASE.md`、`packaging/make_wix.py`×2（WiX Comments / ARPURLINFOABOUT）、`ai_code.py` 的 `_EXECUTOR_REPO`（**不是装饰**，`ace --install-executor` 照它下载）、`demo/record_demo.py` 的图注。**按纪律刻意不换**：`core/guardian.py` 的 `%LOCALAPPDATA%\ace-agent\state`（那是**签名密钥锚目录**，属于磁盘兼容面，改了已装用户的快照链全部校验失败）、`docker/README-Docker.md` 的 `ace-agent:lite|standard|full`（**镜像名**，不是仓库名）、`docs/ARCHITECTURE.md` 目录树里的 `ace-agent/`（本地目录名）、`evidence-pack/**` 与 `docs/history/**`（历史留痕，改了等于篡改记录；里面的旧 URL 是**当时的事实**，不是待更新的引用）。仓库 description 与 social preview 卡图（`assets/repo-social-preview.png`，1280×640）同批换新
 
+## WISH — 未来许愿（不计入排期：先把「差什么、要付多少」如实记下来）
+
+### WISH-01 把 OpenSSF Scorecard 从 2.1 往上推（徽章因此先摘掉）
+
+2026-10-31 实测（记分卡 v5.6.0，`api.securityscorecards.dev/projects/github.com/ace-code-engine/hooh-agent`，commit `ac36522`）总分 **2.1**，所以 README 的徽章先撤了 —— 顺带发现原来挂的是个 404 地址（`/badge/github/<owner>/<repo>`；正确形式是 `/projects/<host>/<owner>/<repo>/badge`），图里一直是裂的。
+
+| 检查项 | 分 | 官方给的原因 | 要往上推得做什么 | 成本 |
+|---|---|---|---|---|
+| Dangerous-Workflow | 10 | 无危险工作流模式 | —— | —— |
+| SAST | 10 | 检出 CodeQL | —— | —— |
+| License | 10 | 检出许可证文件 | —— | —— |
+| Security-Policy | 4 | 有 `SECURITY.md` | 补齐 scorecard 认的全套（披露渠道 / 响应时限） | 小 |
+| Contributors | 3 | 1 家贡献组织 | 有更多贡献者自然涨 | —— |
+| Maintained | 0 | **仓库创建还在 90 天内** | **会自己好**：约 2026-11-17 之后这条不再扣 | 免费 |
+| Code-Review | 0 | 30 个变更集里 0 个经批准 | 以后走 PR + 至少一次 approve（自评也算） | 免费，改习惯 |
+| Token-Permissions | 0 | workflow token 权限过大 | 每个 workflow 顶层 `permissions: contents: read`，按 job 加最小必需项 | 免费，半小时 |
+| Branch-Protection | 0 | `main` 没开保护 | 开经典分支保护：要求 PR、要求 CI 绿、禁 force push | 免费，五分钟 |
+| Dependency-Update-Tool | 0 | 没配更新机器人 | 加 `.github/dependabot.yml`（pip / npm / actions 三套） | 免费，十分钟 |
+| Pinned-Dependencies | 0 | 有依赖没按 hash 钉住 | actions 全部 `@<sha>`、Dockerfile 钉 digest | 小但唠叨 |
+| Binary-Artifacts | 0 | 仓库里有二进制 | 二进制只走 Release；`vendor/*.whl` 这类要么移出去、要么确认 scorecard 是否把 wheel 当二进制 | 中 |
+| Vulnerabilities | 0 | **19 个已知漏洞** | 先 `npm audit` + `pip-audit` 拉清单（pip 侧现在是绿的，大头大概在 JS 依赖树 / vendor 里的旧 wheel 元数据），再决定升依赖还是把 vendor 移出扫描面 | 中-大 |
+| Signed-Releases | 0 | Release 无签名/无 provenance | 加 `actions/attest-build-provenance`（免费，要 `id-token: write` + `attestations: write`） | 小 |
+| CII-Best-Practices | 0 | 没申请 OpenSSF 最佳实践徽章 | 去 bestpractices.dev 填表 | 免费，费时间 |
+| Fuzzing | 0 | 没有 fuzz | 给解析面（simhash / 协议帧）加一小套 fuzz | 大 |
+| CI-Tests / Packaging | -1 | 没有 PR、没有 packaging workflow | 走 PR 流程；把 `build_release.ps1` 接进 CI 就分别有分 | 小 |
+
+**挂回徽章的判据**：总分 ≥ 5，且 `Dangerous-Workflow` 仍是 10 分（别为了分数把危险工作流放开）。徽章只挂 `securityscorecards.dev` 的官方图 —— 自己画一个好看的静态图是自欺。
+
 ## 建议顺序
 
 1. ✅ **P0 全批**（SEC-01→SEC-06）已完成 + 各自回归测试

@@ -63,6 +63,7 @@
 - **HL-04 收口**：三层脊柱 13 条全部落地 —— 上报物料可判定的机器早已接线（`MaterialIncomplete` + `build_material` + `[73]` 五种偷换），补 §9.14 实施记录。
 
 ### ⚙️ 改进
+- **README 摘掉 OpenSSF Scorecard 徽章**：当前 2.1 分，而且原来挂的地址本身是 404（`/badge/github/<owner>/<repo>`；正确形式是 `/projects/<host>/<owner>/<repo>/badge`）——图里一直是裂的。扫描作业保留（结果进 Security tab，也是往上推的度量）；"差哪些分、每项要什么成本、多少分才挂回去"如实记进 `docs/BACKLOG.md` 的 `WISH-01`。顺带把 README 的 Version 徽章从 1.2.0 同步到 1.2.1（这个徽章没有门禁盯着，自己漂了）。
 - **macOS 进 CI** 测试矩阵（此前 `test_all.py` 从未在 mac 上跑过）。
 - **冻结发行启动明示**：不含 Ink 主外壳时打 stderr 提示（三语），README "四外壳" 口径修正为"Python 外壳"。
 - **冒烟上 CI**：Textual 那几段从"跳过"变"真跑"（CI 装 `textual`）；darwin/amd64 执行器原生冒烟补 `macos-13` Intel runner。
