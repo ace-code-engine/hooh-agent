@@ -147,3 +147,25 @@ export class FakeClient implements AceClientLike {
 
 /** 等一拍，让 Ink 把重渲染冲刷到 `lastFrame`。 */
 export const tick = (): Promise<void> => new Promise((r) => setTimeout(r, 20));
+
+/**
+ * 等到 `cond()` 成立（或超时），用于**内核自己有定时器**的交互。
+ *
+ * 为什么不能只数 `tick()`：孤立的 `Esc` 在内核里不是"按键即发" —— `App.js` 要等
+ * `NORMAL_TIMEOUT = 50ms` 才把它当成独立 Esc（为了不把 `\u001b[A` 这类 CSI 序列的
+ * 前缀误判成 Esc）。两个 `tick()` 只有 40ms：本机有时刚好够，CI 上不够 —— 同一个
+ * 用例在 Windows 绿、在 Ubuntu 红（2026-10-31 CI 上 `prefs` / `session-extra` 两条
+ * "Esc 能关"就是这么红的）。数拍子本来就是在猜内核的定时器，改成"等结果、有上限"。
+ */
+export const waitFor = async (
+  cond: () => boolean,
+  timeoutMs = 2000,
+  stepMs = 10,
+): Promise<void> => {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (cond()) return;
+    await new Promise((r) => setTimeout(r, stepMs));
+  }
+};
+

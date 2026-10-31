@@ -8,7 +8,7 @@ import { AccentPicker, EffortDial, LangPicker, PrefRow, ThemePickerLite } from "
 import { PREFS_KEYS, PREFS_LOCALES } from "../src/components/prefs/i18n.js";
 import { displayWidth } from "../src/render/text.js";
 import { renderLines } from "./helpers/screen.js";
-import { tick } from "./fake-engine.js";
+import { tick, waitFor } from "./fake-engine.js";
 import { mountTree } from "./mount.js";
 
 const pickZh = (k: string) => k;
@@ -73,8 +73,9 @@ describe("prefs/ 偏好选择器", () => {
     );
     await tick();
     tree.stdin.write("\u001b");
-    await tick();
-    await tick();          // 内核的 Esc 要再等一拍才被当'独立 Esc'（CSI 序列防呆）
+    // 内核把孤立 ESC 压到 NORMAL_TIMEOUT(50ms) 才发（CSI 序列防呆）——等结果，不数拍子：
+    // 两个 tick(40ms) 本机够、CI 不够，2026-10-31 就是这么红的。
+    await waitFor(() => closed === 1);
     expect(closed).toBe(1);
     tree.unmount();
   });

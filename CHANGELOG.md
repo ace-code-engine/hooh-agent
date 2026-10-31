@@ -63,7 +63,8 @@
 - **迁入的 ink 内核有 29 个文件名被压成了全小写**（`Box.js`→`box.js` …），而**内容与文件之间互相 import 的写法**是上游的大驼峰。Windows 大小写不敏感，所以本机 692 条测试全绿、装好的 app 也跑得好；Linux（CI）上是 `Failed to load url … Does the file exist?` —— 41 个测试文件连 collect 都过不去。这不是测试挑刺：**同一棵树拿到 Linux/macOS 上就是起不来**。文件名已逐个 `git mv` 回上游拼法（135 个文件仍与 `@deepseek-harness-tui/dsh-tui@0.12.0` 逐字节相同，见 `vendor/dsh-ink/MANIFEST.md`），并新增 `frontend/test/import-case.test.ts` —— 纯字符串比对，**Windows 上也能拦住只会在 Linux 炸的写法**（做过反向验证：故意写错一处即红）。
 - **界面语言不再跟着宿主 locale 漂**：`i18n.ts` 在**导入时**就解析界面语言（`DSH_TUI_LANG` → 持久化 `/lang` → OS locale → `zh`），CI 的 `LANG=C.UTF-8` 于是把界面切成英文，写死中文的四条 smoke 断言（`继续「` / `说点什么` / `首屏画了` / 铭牌）跟着失败。四个 smoke fixture 现在以 `hooh/smoke-lang.ts` 为**第一条 import**，用产品自己的第一优先级入口 `DSH_TUI_LANG=zh` 显式钉死；断言一条没放宽。
 - **界面版本号回到单一源**：右下角铭牌与内核版本此前在 `entry.tsx` 和三个 smoke 里各写死一份 `'1.1.0'`，产品升到 1.2.0 后**装好的 app 显示的仍是 1.1.0**（没有任何门禁会响，因为界面层不在 tsc 的 include 里）。现在 `frontend/dsh-ui/hooh/version.ts` 是唯一来源，`check_packaging.ps1` 新增机械校验要求它等于 `core/version.py`（反向验证过：故意改成 1.1.0 即 FAIL）。
-- **宽度守卫钉住对齐的那版 Python**：`test/text.test.ts` 拿 TS 的**静态**宽度表跟 Python 的**活表** `unicodedata.east_asian_width()` 逐码点比对，两边 Unicode 版本必须一致；CI 的 frontend job 用 3.12（Unicode 15.0），U+2630 一类的东亚宽度类别与 3.13（15.1，也是冻结发行实际运行的那版）不同，于是同一张表在 CI 上"差一堆宽字符"。该 job 的 `setup-python` 改钉 `3.13`，注释写明这不是随手挑新版本。
+- **宽度守卫钉住对齐的那版 Python**：`test/text.test.ts` 拿 TS 的**静态**宽度表跟 Python 的**活表** `unicodedata.east_asian_width()` 逐码点比对，两边 Unicode 版本必须一致才有意义。两个坑都踩了：CI 的 frontend job 原先用 3.12（Unicode 15.0，U+2630 一类的东亚宽度类别与 15.1 不同）→ 差一堆宽字符；改成 `3.13` 之后 runner 实际给了 **3.13.17**，它的 Unicode 库又变了 → 同一个用例在 3.13.14（本机）绿、在 runner 红。现在钉到**补丁号** `3.13.14`（= 冻结发行实际打包的那一版），并在测试里写清"红了先看这条钉版还在不在"。
+- **两条"Esc 能关"不再数拍子**：内核把孤立 `ESC` 压到 `NORMAL_TIMEOUT`（50 ms）才发（为了不把 `\u001b[A` 的前缀误判成 Esc），而用例等的是两个 `tick()` = 40 ms —— 本机有时刚好够、CI 不够，同一个用例在 Windows 绿、在 Ubuntu 红。改成 `waitFor(() => closed === 1)`（2 s 上限），等结果而不是猜定时器。
 
 ## [v1.1.0] · 2026-10-04 —— 界面重做：一份规范、一个主面、三语成套
 

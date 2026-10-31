@@ -4,7 +4,7 @@ import { describe, expect, it } from "vitest";
 import { SessionExtra, SESSX_LOCALES } from "../src/components/session-extra/index.js";
 import { displayWidth } from "../src/render/text.js";
 import { renderLines } from "./helpers/screen.js";
-import { tick } from "./fake-engine.js";
+import { tick, waitFor } from "./fake-engine.js";
 import { mountTree } from "./mount.js";
 
 const t = (k: string) => SESSX_LOCALES.zh[k as keyof typeof SESSX_LOCALES.zh] ?? k;
@@ -65,8 +65,9 @@ describe("session-extra/", () => {
     );
     await tick();
     tree.stdin.write("\u001b");
-    await tick();
-    await tick();
+    // 内核把孤立 ESC 压到 NORMAL_TIMEOUT(50ms) 才发（CSI 序列防呆）——等结果，不数拍子：
+    // 两个 tick(40ms) 本机够、CI 不够，2026-10-31 就是这么红的。
+    await waitFor(() => closed === 1);
     expect(closed).toBe(1);
     tree.unmount();
   });
