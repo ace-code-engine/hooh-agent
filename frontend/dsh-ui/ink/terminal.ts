@@ -1,10 +1,11 @@
-import { coerce } from 'semver'
+import coerce from 'semver/functions/coerce.js'
 import type { Writable } from 'stream'
 import { appendFileSync } from 'node:fs'
 import { env } from '../utils/env.js'
 import { gte } from '../utils/semver.js'
 import { getClearTerminalSequence } from './clearTerminal.js'
 import type { Diff } from './frame.js'
+import type { NotificationMethod } from './terminal-notification.js'
 import {
   CURSOR_HOME,
   cursorMove,
@@ -104,6 +105,24 @@ export function isZellij(): boolean {
 }
 
 /**
+ * Whether DECSCUSR 0 restores the configured shape and blinking. XTerm and
+ * older xterm.js instead select a blinking block, so keep their style intact.
+ * Multiplexers interpret this sequence themselves; outer-terminal identity
+ * is insufficient to opt them in.
+ */
+export function supportsCursorStyleReset(): boolean {
+  if (process.env.TMUX || isZellij()) return false
+  const program = process.env.TERM_PROGRAM
+  const term = process.env.TERM
+  if (program === 'WezTerm' || program === 'ghostty') return true
+  if (term === 'xterm-kitty' || term === 'xterm-ghostty' || process.env.KITTY_WINDOW_ID) return true
+  // Some embedded hosts advertise the xterm.js engine version as vscode's
+  // version. Native VS Code's 1.x version does not identify the engine.
+  const version = coerce(process.env.TERM_PROGRAM_VERSION)
+  return program === 'vscode' && version !== null && version.major >= 6
+}
+
+/**
  * Checks if the terminal supports DEC mode 2026 (synchronized output).
  * When supported, BSU/ESU sequences prevent visible flicker during redraws.
  * @returns true when the terminal supports DEC 2026.
@@ -185,6 +204,43 @@ let xtversionName: string | undefined
  */
 export function setXtversionName(name: string): void {
   if (xtversionName === undefined) xtversionName = name
+}
+
+/** Notification protocol, using the existing SSH-capable terminal probe. */
+export function getNotificationProtocol(): 'osc777' | 'osc99' | 'osc9' | 'bel' {
+  const program = process.env.TERM_PROGRAM?.toLowerCase()
+  const term = process.env.TERM
+  const probed = xtversionName ?? ''
+  if (program === 'ghostty' || program === 'wezterm' || term === 'xterm-ghostty' || /^(ghostty|wezterm)\b/i.test(probed)) return 'osc777'
+  if (program === 'kitty' || term === 'xterm-kitty' || /^kitty\b/i.test(probed)) return 'osc99'
+  if (program === 'iterm.app' || program === 'warpterminal' || /^(iterm2?|warp(?:terminal)?)\b/i.test(probed)) return 'osc9'
+  return 'bel'
+}
+
+/**
+ * The transport a configured `notificationMethod` resolves to on `platform`.
+ *
+ * `auto` asks the platform: local Windows shows a native toast, every other platform
+ * keeps whatever {@link getNotificationProtocol} probes for, so delivery there
+ * is unchanged. An explicit `windows` is a platform capability rather than a
+ * terminal sequence, so off Windows it falls back to that same probed protocol;
+ * `osc9` and `bel` stay explicit overrides everywhere.
+ *
+ * `platform` is a parameter, like {@link supportsWin32InputMode}'s, so callers
+ * and regressions can resolve for a host that is not this process.
+ * @param method - the configured notification method.
+ * @param platform - the host platform to resolve for.
+ * @param env - SSH sessions keep notifying the attached terminal.
+ * @returns the transport to deliver the notification through.
+ */
+export function resolveNotificationMethod(
+  method: NotificationMethod,
+  platform: NodeJS.Platform = process.platform,
+  env: NodeJS.ProcessEnv = process.env,
+): 'windows' | 'osc777' | 'osc99' | 'osc9' | 'bel' {
+  if (method === 'osc9' || method === 'bel') return method
+  if (method === 'auto' && (env.SSH_CONNECTION || env.SSH_CLIENT || env.SSH_TTY)) return getNotificationProtocol()
+  return platform === 'win32' ? 'windows' : getNotificationProtocol()
 }
 
 /**
@@ -283,14 +339,21 @@ export function supportsExtendedKeys(): boolean {
  * 9001 can reduce arrows/mouse sequences to their trailing A-D/M bytes and
  * interfere with IME commits (issue #215). Native VS Code reports its own
  * 1.x application version and retains win32-input-mode support.
- * @returns true on native Windows (never in WSL — platform is linux there).
+ * NVIM/VIM_TERMINAL identify nested VT hosts; the dedicated opt-out also
+ * preserves classic input when an unrecognized embedding rejects mode 9001.
+ * @param environment - optional capability environment, defaults to the process.
+ * @returns true on supported native Windows hosts (never in WSL).
  */
 export function supportsWin32InputMode(
   platform: NodeJS.Platform = process.platform,
   termProgram: string | undefined = process.env.TERM_PROGRAM,
   termProgramVersion: string | undefined = process.env.TERM_PROGRAM_VERSION,
+  environment: NodeJS.ProcessEnv = process.env,
 ): boolean {
   if (platform !== 'win32') return false
+  // Nested VT hosts do not expose the outer ConPTY input-record contract.
+  // 请核: Windows Neovim/Vim child environments and post-resume arrow/F-key input.
+  if (environment.NVIM || environment.VIM_TERMINAL || environment.DSH_TUI_DISABLE_WIN32_INPUT_MODE === '1') return false
 
   const version = coerce(termProgramVersion)
   const isEmbeddedXtermJs =

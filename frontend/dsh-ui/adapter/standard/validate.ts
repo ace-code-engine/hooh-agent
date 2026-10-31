@@ -1,7 +1,7 @@
-// HooH 迁移：`@dsh-std/*`（插件标准）**只迁类型**，不迁运行时 ——
-// 这里改指 `hooh/stubs/dsh-std.js` 的空实现（我们不分发 DSH 插件）。
 /** Semantic validation layered on the official manifest parser/projection. */
 
+// HooH 迁移：`@dsh-std/*`（插件标准）**只迁类型**，不迁运行时 ——
+// 这里改指 `hooh/stubs/dsh-std.js` 的空实现（我们不分发 DSH 插件）。
 import { projectManifest } from '../../hooh/stubs/dsh-std.js'
 import { getAdmissionCatalog } from './tui-extension.js'
 import { registryEntries } from './registry.js'

@@ -111,6 +111,28 @@ export interface ConfiguredProvider {
    * wizard never learned about (`input`, `compat`, …) survive the edit.
    */
   readonly modelEntries?: readonly Record<string, unknown>[]
+  /** Per-model overrides on a route that still serves its whole catalog. */
+  readonly modelOverrides?: Readonly<Record<string, Record<string, unknown>>>
+}
+
+/** The capability fields exposed by the local /provider model editor. */
+export interface ProviderModelCapabilities {
+  readonly contextWindow?: number
+  readonly maxTokens?: number
+  readonly reasoningEfforts?: false | Readonly<Record<string, string | null>>
+  readonly input?: readonly ('text' | 'image')[]
+}
+
+/** In-process, draft-only option editor; never part of a model-facing ask. */
+export interface ProviderModelEditor {
+  readonly reasoningEditable: boolean
+  read(id: string): {
+    readonly values: ProviderModelCapabilities
+    readonly defaults: ProviderModelCapabilities
+  }
+  /** Replace the four editable overrides in the draft, preserving other fields. */
+  save(id: string, values: ProviderModelCapabilities): void
+  edited(id: string): boolean
 }
 
 /** One path op inside a provider profile, relative to the profile object. */
@@ -161,9 +183,14 @@ export interface SettingsHost {
   write(ns: string, ops: readonly SettingsPathOp[], expectedRevision?: number): Promise<void>
   /** Whether any layer supplies a credential under `ref`. */
   credentialConfigured(ref: string): Promise<boolean>
-  /** Persist a credential; rejects when env-shadowed or the store is read-only. */
-  writeCredential(ref: string, value: string): Promise<void>
+  /** Persist a credential; opaque host authorization is checked by identity. */
+  writeCredential(ref: string, value: string, authorization?: object): Promise<void>
 }
+
+/** A recoverable fault in a namespace's persisted document (shown as a badge). */
+export type SettingsNamespaceWarning =
+  | { readonly id: 'unreadable' }
+  | { readonly id: 'recovered'; readonly backup: string }
 
 /** One settings namespace as the screen reads it (secrets redacted). */
 export interface SettingsNamespaceView {
@@ -176,6 +203,8 @@ export interface SettingsNamespaceView {
   readonly value: unknown
   /** Raw user layer; a path present here is a user override. */
   readonly user: unknown
+  /** A fault in the namespace's own document, when there is one. */
+  readonly warning?: SettingsNamespaceWarning
 }
 
 export type SettingsPathOp =
@@ -194,10 +223,28 @@ export interface TuiSettingsSection {
   title: string
   /** Provider-owned translations for the title. */
   descriptions?: LocalizedDescriptions
+  /**
+   * Top-level page (tab) of the settings screen this section renders on.
+   * Sections declaring the same `id` share one page; the first declaration
+   * names it. Absent: the section joins the screen's default "general" page
+   * together with every other paged-less section, and the tab strip only
+   * appears once at least one section declares a page of its own.
+   */
+  page?: TuiSettingsPage
   /** Optional navigation groups, in display order. */
   groups?: readonly TuiSettingsGroup[]
   /** Editable fields, in display order. */
   fields: readonly TuiSettingsField[]
+}
+
+/** One top-level page (tab) of the settings screen. */
+export interface TuiSettingsPage {
+  /** Stable identifier; sections declaring the same id share the page. */
+  id: string
+  /** Page title (English; also the fallback). */
+  title: string
+  /** Provider-owned translations for the title. */
+  descriptions?: LocalizedDescriptions
 }
 
 /** Optional navigation group inside one settings section. */
@@ -243,6 +290,9 @@ export interface TuiSettingsField {
    * text opens the editor for a custom value).
    */
   options?: readonly TuiSettingsFieldOption[]
+  /** Resolve select choices from the current route's read-only effort catalog.
+   * Omitted fields keep their declared static options. */
+  optionsSource?: 'effort'
   /** Input placeholder for `kind: 'text' | 'number'`. */
   placeholder?: string
   /**
@@ -250,9 +300,10 @@ export interface TuiSettingsField {
    * never rides the settings document — the draft starts blank on every
    * open, a blank draft writes nothing, and a typed draft writes through the
    * credentials seam under `ref`. The screen shows only whether a value is
-   * configured.
+   * configured. Optional authorization belongs to host controls and is omitted
+   * from plugin-visible projections.
    */
-  secret?: { ref: string }
+  secret?: { ref: string; authorization?: object }
   /**
    * Render a stored value as draft text. Defaults to the kind's conversion
    * (strings verbatim, numbers via `String`, booleans/selects by value).

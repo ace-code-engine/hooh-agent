@@ -1,7 +1,7 @@
-// HooH 迁移：`@dsh-std/*`（插件标准）**只迁类型**，不迁运行时 ——
-// 这里改指 `hooh/stubs/dsh-std.js` 的空实现（我们不分发 DSH 插件）。
 /** Types shared by the dsh-std admission adapter and the TUI runtime. */
 
+// HooH 迁移：`@dsh-std/*`（插件标准）**只迁类型**，不迁运行时 ——
+// 这里改指 `hooh/stubs/dsh-std.js` 的空实现（我们不分发 DSH 插件）。
 import type { PluginManifest as StandardPluginManifest } from '../../hooh/stubs/dsh-std.js'
 import type { ContractCoordinate, ContractRef } from '../kernel/driver-types.js'
 
@@ -87,7 +87,9 @@ export interface PermissionRegistry {
 interface RegistryEntryBase {
   name: string
   coordinates: ContractCoordinate
-  kind: 'capability' | 'event'
+  /** What the entry registers: a contract capability, an event point, or a
+   *  manifest extension definition (`SettingsSection` / `Scene` / `Backend` …). */
+  kind: 'capability' | 'event' | 'extension'
   permissions: string[]
   eventEnvelope?: string
 }
@@ -113,5 +115,12 @@ export interface ContractRegistry {
   }
   imports: ImportedRegistryEntry[]
   definitions: PrivateRegistryEntry[]
+  /**
+   * Manifest extension definitions, both imported and TUI-owned (W-2). The
+   * section is what a contribution family is *published* from: `Backend` lives
+   * here, which is why the registry reader, the descriptor's supported-contract
+   * derivation and the admission gates all read it (`src/adapter/standard/registry.ts`).
+   */
+  extensions: RegistryEntry[]
   facetApiVersions: string[]
 }

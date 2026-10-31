@@ -7,6 +7,8 @@ import { isMouseClicksDisabled } from "../../utils/fullscreen.js";
 import { isInputSuppressed } from "../input-suppression.js";
 import { logMouseDebug } from "../../utils/debug.js";
 import { logError } from "../../utils/log.js";
+import { appendCrashLog, serializeCrashDetail } from "../../utils/crashDetail.js";
+import { isNestedUpdateOverflow, noteBoundaryRecoveryRemount, shouldRecoverBoundaryOverflow } from "../update-overflow-guard.js";
 import { EventEmitter } from "../events/emitter.js";
 import { InputEvent } from "../events/input-event.js";
 import instances from "../instances.js";
@@ -59,6 +61,7 @@ import {
 import AppContext from "./AppContext.js";
 import { ClockProvider } from "./ClockContext.js";
 import CursorDeclarationContext, {
+	NativeCursorContext,
 	type CursorDeclarationSetter,
 } from "./CursorDeclarationContext.js";
 import ErrorOverview from "./ErrorOverview.js";
@@ -77,6 +80,7 @@ const STDIN_RESUME_GAP_MS = 5000;
 type Props = {
 	readonly children: ReactNode;
 	readonly stdin: NodeJS.ReadStream;
+  readonly ownsStdin?: () => boolean
 	readonly stdout: NodeJS.WriteStream;
 	readonly stderr: NodeJS.WriteStream;
 	readonly exitOnCtrlC: boolean;
@@ -237,6 +241,11 @@ export default class App extends PureComponent<Props, State> {
 	// Count how many components enabled raw mode to avoid disabling
 	// raw mode until all components don't need it anymore
 	rawModeEnabledCount = 0;
+	// Latched by detachForShutdown: the exit funnel has written its cleanup,
+	// so a late React commit (a useInput mounting while the funnel settles)
+	// must not re-enter raw mode and re-enable bracketed paste and focus
+	// reporting on the shell's terminal.
+	shutdownDetached = false;
 	internal_eventEmitter = new EventEmitter();
 	keyParseState: KeyParseState = {
 		...INITIAL_STATE,
@@ -394,6 +403,22 @@ export default class App extends PureComponent<Props, State> {
 	// Initialized to now so startup doesn't false-trigger.
 	lastStdinTime = Date.now();
 
+	// TerminalSizeContext value, renewed only when the dimensions change.
+	// A fresh object per App render would re-render every width-aware
+	// consumer (MarkdownTable, CodeBlockFrame, panel geometry) on each
+	// streaming frame.
+	private terminalSizeValue: { columns: number; rows: number } | null = null
+	private terminalSizeFor(columns: number, rows: number): { columns: number; rows: number } {
+		if (
+			this.terminalSizeValue === null ||
+			this.terminalSizeValue.columns !== columns ||
+			this.terminalSizeValue.rows !== rows
+		) {
+			this.terminalSizeValue = { columns, rows }
+		}
+		return this.terminalSizeValue
+	}
+
 	// Raw stdout writer for control sequences that must bypass the frame
 	// pipeline (alt-screen enter/exit, mouse-tracking toggles, notifications).
 	// A class property (not a render-local closure) so the context value keeps
@@ -401,6 +426,8 @@ export default class App extends PureComponent<Props, State> {
 	// <AlternateScreen>'s insertion effect every frame, flapping the alt
 	// screen on/off.
 	writeRaw = (data: string): void => {
+		// Same latch as Ink.writeRaw: the exit funnel owns the terminal now.
+		if (this.shutdownDetached) return;
 		if (data.includes("\x1b[?1049")) {
 			logMouseDebug("stdout:1049", { len: data.length, head: data.slice(0, 60) });
 		}
@@ -415,10 +442,7 @@ export default class App extends PureComponent<Props, State> {
 		return (
 			<TerminalWriteProvider value={this.writeRaw}>
 			<TerminalSizeContext.Provider
-				value={{
-					columns: this.props.terminalColumns,
-					rows: this.props.terminalRows,
-				}}
+				value={this.terminalSizeFor(this.props.terminalColumns, this.props.terminalRows)}
 			>
 				<AppContext.Provider
 					value={{
@@ -438,15 +462,19 @@ export default class App extends PureComponent<Props, State> {
 					>
 						<TerminalFocusProvider>
 							<ClockProvider>
-								<CursorDeclarationContext.Provider
-									value={this.props.onCursorDeclaration ?? (() => {})}
+								<NativeCursorContext.Provider
+									value={Boolean(this.props.stdout.isTTY && this.props.onCursorDeclaration)}
 								>
-									{this.state.error ? (
-										<ErrorOverview error={this.state.error} />
-									) : (
-										this.props.children
-									)}
-								</CursorDeclarationContext.Provider>
+									<CursorDeclarationContext.Provider
+										value={this.props.onCursorDeclaration ?? (() => {})}
+									>
+										{this.state.error ? (
+											<ErrorOverview error={this.state.error} />
+										) : (
+											this.props.children
+										)}
+									</CursorDeclarationContext.Provider>
+								</NativeCursorContext.Provider>
 							</ClockProvider>
 						</TerminalFocusProvider>
 					</StdinContext.Provider>
@@ -465,7 +493,7 @@ export default class App extends PureComponent<Props, State> {
 		}
 	}
 	override componentWillUnmount() {
-		if (this.props.stdout.isTTY) {
+		if (this.props.stdout.isTTY && this.props.ownsStdin?.() !== false) {
 			this.props.stdout.write(SHOW_CURSOR);
 		}
 		this.detachForShutdown();
@@ -491,8 +519,48 @@ export default class App extends PureComponent<Props, State> {
 		if (this.isRawModeSupported()) {
 			while (this.rawModeEnabledCount > 0) this.handleSetRawMode(false);
 		}
+		this.shutdownDetached = true;
 	}
-	override componentDidCatch(error: Error) {
+	override componentDidCatch(error: Error, errorInfo: { componentStack?: string }) {
+		// A #185 that reaches the root boundary escaped every enqueue-site
+		// guard and was thrown inside React's own commit (e.g. updates
+		// chained through an effect); the process-level guard never sees it
+		// because the boundary consumes the error. react-reconciler resets
+		// its nested-update counter before throwing, so clearing the error
+		// remounts the tree from a clean counter and the session survives;
+		// the detail goes to crash.log. Recoveries are capped per window;
+		// past the cap the error goes to handleExit instead of remounting in
+		// a loop.
+		if (isNestedUpdateOverflow(error)) {
+			if (
+				typeof errorInfo?.componentStack === "string" &&
+				(error as Error & { componentStack?: string }).componentStack === undefined
+			) {
+				try {
+					(error as Error & { componentStack?: string }).componentStack = errorInfo.componentStack;
+				} catch {
+					// Frozen error object — the boundary stack is best-effort.
+				}
+			}
+			if (shouldRecoverBoundaryOverflow()) {
+				logError(
+					new Error(
+						"Recovered from React nested-update overflow (#185) at the root boundary — the UI remounts (widget state resets; session data is intact). Full detail in crash.log.",
+					),
+				);
+				try {
+					appendCrashLog(serializeCrashDetail(error));
+				} catch {
+					// Diagnostics must never break the recovery itself.
+				}
+				// The remount this triggers is a RECOVERY, not a boot: the screen
+				// layer reads the mark to keep boot-only surfaces (launchpad,
+				// onboarding) closed, so the user lands back in the conversation.
+				noteBoundaryRecoveryRemount();
+				this.setState({ error: undefined });
+				return;
+			}
+		}
 		this.handleExit(error);
 	}
 	scheduleXtversionProbe = (): void => {
@@ -520,6 +588,11 @@ export default class App extends PureComponent<Props, State> {
 
 	handleSetRawMode = (isEnabled: boolean): void => {
 		const { stdin } = this.props;
+    if (this.props.ownsStdin?.() === false) {
+      this.rawModeEnabledCount = 0
+      stdin.removeListener('readable', this.handleReadable)
+      return
+    }
 		if (!this.isRawModeSupported()) {
 			if (stdin === process.stdin) {
 				throw new Error(
@@ -535,6 +608,8 @@ export default class App extends PureComponent<Props, State> {
 		// the half of a CJK char still buffered from the last chunk (#1227).
 		if (stdin.readableEncoding !== "utf8") stdin.setEncoding("utf8");
 		if (isEnabled) {
+			// The borrower's later disable finds the count at 0 and returns.
+			if (this.shutdownDetached) return;
 			// Ensure raw mode is enabled only once
 			if (this.rawModeEnabledCount === 0) {
 				// Stop early input capture right before we add our own readable handler.
@@ -720,6 +795,7 @@ export default class App extends PureComponent<Props, State> {
 		}
 	};
 	handleReadable = (): void => {
+    if (this.props.ownsStdin?.() === false) return
 		// Detect long stdin gaps (tmux attach, ssh reconnect, laptop wake).
 		// The terminal may have reset DEC private modes; re-assert mouse
 		// tracking. One Date.now() covers all chunks in this readable event.
@@ -786,7 +862,7 @@ export default class App extends PureComponent<Props, State> {
 		setTerminalFocused(isFocused);
 	};
 	/**
-	 * Re-assert raw mode after an EXTERNAL stop+continue (SIGCONT). While the
+	 * Re-assert owned raw mode after an external reset or SIGCONT. While the
 	 * job is stopped the shell owns the tty and leaves it in its own cooked
 	 * modes; the job is expected to restore its termios when it continues.
 	 * The readable listener survives the stop, so only the termios flag comes
@@ -798,7 +874,7 @@ export default class App extends PureComponent<Props, State> {
 	 * back. `setRawMode(true)` is an idempotent ioctl.
 	 */
 	reassertRawMode = (): void => {
-		if (this.rawModeEnabledCount === 0 || !this.isRawModeSupported()) {
+		if (this.props.ownsStdin?.() === false || this.shutdownDetached || this.rawModeEnabledCount === 0 || !this.isRawModeSupported()) {
 			return;
 		}
 		this.props.stdin.setRawMode(true);
@@ -1116,12 +1192,12 @@ export function handleMouseEvent(app: App, m: ParsedMouse): void {
 			const session = app.dragSession;
 			if (session) {
 				// Anchor-cell exemption (parity with selection.ts): motion
-				// landing on the press cell is hand jitter, not a drag —
+				// at the press cell before the drag starts is hand jitter —
 				// keep the session dormant so release resolves to the plain
 				// click path (and the input's double-click detector sees
 				// the press). Without it, trackpads/1002 terminals turn a
 				// wobbly click into a 1-cell drag selection.
-				if (col === session.startCol && row === session.startRow) {
+				if (!session.started && col === session.startCol && row === session.startRow) {
 					return;
 				}
 				session.lastCol = col;

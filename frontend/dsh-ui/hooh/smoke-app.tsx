@@ -43,7 +43,10 @@ async function main(): Promise<void> {
   const engine = await openEngine({ projectRoot: root, prompt: '', mock: true })
   const snap: AceSnapshot = {
     version: '1.1.0', model: 'deepseek-v4-flash', permission: 'readonly', cwd: root,
-    effort: 'max', preset: 'code', commands: ['/help', '/model'],
+    effort: 'max', preset: 'code',
+    commands: ['/help', '/model'].map((name) => ({
+      name: name.slice(1), description: name, replacement: name, commandLine: name,
+    })),
   }
 
   const stdout = new FakeOut()

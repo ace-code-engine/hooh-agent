@@ -249,13 +249,13 @@ function Invoke-Smoke {
 # no matter how correct the package was.
 
 # 1) --version: proves the exe starts at all (no resource access yet).
-#    Mark is 'ACE ' and not 'v3.': ai_code.py prints "ACE 3.41.0" -- the version
+#    Mark is 'HooH ' (brand rename 2026-10-31: the banner prints HooH x.y.z).
 #    number carries no "v" prefix, and the earlier mark never matched.
-Invoke-Smoke -Name 'version' -ExeArgs @('--version') -Mark 'ACE '
+Invoke-Smoke -Name 'version' -ExeArgs @('--version') -Mark 'HooH '
 
 # 2) --preview: draws the landing screen. This is the one that catches MISSING
 #    RESOURCES - it reads locales/ for every label and assets/ for the logo.
-Invoke-Smoke -Name 'preview' -ExeArgs @('--preview', '--preview-width', '80') -Mark 'ACE '
+Invoke-Smoke -Name 'preview' -ExeArgs @('--preview', '--preview-width', '80') -Mark 'HooH '
 
 # 3) offline end-to-end with the scripted model: a real tool round trip, and a
 #    real answer rendered from the bundled prompts/locales.
@@ -276,7 +276,10 @@ $currentTime = [string]([char]0x5F53 + [char]0x524D + [char]0x65F6 + [char]0x95F
 #    in Chinese, to prove non-ASCII input survives the pipeline.
 $promptZh = [string]([char]0x73B0 + [char]0x5728 + [char]0x51E0 + [char]0x70B9 + [char]0x4E86)
 
-$ws = Join-Path $evidence 'agent_ws'
+# Smoke workspace lives in TEMP, not under the repo: a repo-relative path
+# can sit inside an editor/sandbox ACL scope that denies the frozen exe the
+# .guardian snapshot dir it must create (observed WinError 5 on 2026-10-31).
+$ws = Join-Path ([System.IO.Path]::GetTempPath()) ('hooh-smoke-ws-' + [guid]::NewGuid().ToString('N').Substring(0,8))
 New-Item -ItemType Directory -Force -Path $ws | Out-Null
 Invoke-Smoke -Name 'mock_turn' -ExeArgs @('--mock', '--no-tui', '--permission', 'readonly',
                                           '--project-root', $ws, '--input', 'what time is it') `

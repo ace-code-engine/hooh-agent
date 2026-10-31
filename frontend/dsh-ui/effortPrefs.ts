@@ -34,9 +34,12 @@ export function readEffortPref(dir: string = PREFS_DIR): string | undefined {
  * Default reasoning-effort precedence for sessions that do not carry their
  * own choice: the /settings 默认推理强度 user layer (`settings.yaml
  * dsh-tui.effortDefault`; the plugin folds the `auto` option to undefined
- * before calling), then the cordis.yml `effort` pin, then this persisted
- * `/effort` file, then the adapter/model default (undefined). Mirrors the
- * lang chain (settings user layer > cordis.yml > lang.json).
+ * before calling), then this persisted `/effort` file — the level the last
+ * session actually ran on — then the cordis.yml `effort` value, which is the
+ * deployment DEFAULT beneath the user's standing choice, then the
+ * adapter/model default (undefined). Mirrors the lang chain for its first
+ * two layers (settings user layer > lang.json) and the last-used rule the
+ * model route follows.
  * @param settingsDefault - settings user-layer level (undefined = auto).
  * @param configured - cordis.yml `effort` value, if any.
  * @param persisted - The /effort choice, if any.
@@ -47,11 +50,21 @@ export function resolveEffortDefault(
   configured: string | undefined,
   persisted: string | undefined,
 ): string | undefined {
-  return settingsDefault ?? configured ?? persisted
+  return settingsDefault ?? persisted ?? configured
 }
 
-/** Standard effort-tier order, weakest to strongest. */
-const EFFORT_TIER_ORDER = ['off', 'low', 'medium', 'high', 'max'] as const
+/** Standard effort-tier order, weakest to strongest (`xhigh` sits between
+ * `high` and `max`, matching the ladder the kernels accept — see
+ * STANDARD_EFFORT_LADDER). */
+const EFFORT_TIER_ORDER = ['off', 'low', 'medium', 'high', 'xhigh', 'max'] as const
+
+/** The standard reasoning-effort ladder, weakest to strongest. Served as the
+ * compatibility offer when a model catalog row declares reasoning support
+ * without listing its own tiers (pi-ai 0.87.x zai rows for glm-5.3* ship only
+ * `reasoning: true`): the kernel accepts the standard effort ids and is the
+ * set-time authority, so the ladder is an honest offer, not a guess. Mirrors
+ * the Claude backend's EFFORT_FALLBACK_TIERS (backends/claude/controls.ts). */
+export const STANDARD_EFFORT_LADDER: readonly string[] = ['low', 'medium', 'high', 'xhigh', 'max']
 
 /**
  * Resolve a preferred effort tier against a route's available tiers when the

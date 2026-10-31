@@ -143,6 +143,7 @@ ace-agent/
 
 ├── tools/                      # 工具执行器包（清单与权限以 tools/registry.py 为准）
 │   ├── __init__.py             #   包入口：组合各域 mixin 的 ToolExecutor（__all__ 导出）
+│   ├── ace_serve_shim.py       #   引擎服务进程的监督垫片（WP-DSH-SHELL）：node→垫片→引擎，双向转发 + 跟随生死
 │   ├── registry.py             #   工具唯一声明处（name / schema / 权限组 / handler）
 │   ├── result.py               #   ExecutionResult 结果类型
 │   ├── status.py               #   错误码/状态码唯一目录（Q-10 契约，散落字面量由守卫拒绝）
@@ -257,6 +258,7 @@ ace-agent/
 
 ├── README.md                   # 项目名片与上手入口（**英文为主**；架构级短树，权威树见本文档）
 ├── README.zh-CN.md             # 中文版 README（与英文版同源，顶部互相切换）
+├── UPDATES.md                  # 大版本更新明细（用户视角：每个版本带来什么、怎么用；技术明细在 CHANGELOG）
 ├── CONTRIBUTING.md             # 贡献指南（环境 / 测试 / 风格 / PR 流程）
 ├── LICENSE                     # MIT
 ├── CHANGELOG.md                # 逐版本更新日志（Keep a Changelog 风格）
@@ -276,6 +278,7 @@ ace-agent/
 ├── packaging/                  # 发行打包：ace.spec + build_exe.ps1（PyInstaller 单目录 + 冒烟门禁）/ make_wix.py + build_installer.ps1（WiX MSI 安装包 + 便携 zip）/ make_icon.py（logo.svg → ace.ico，纯标准库光栅化）/ check_packaging.ps1（提交前脚本自检）
 ├── ace.cmd                     # Windows 启动器（向 setup_env 问路挑解释器，防商店占位）
 ├── hooh.cmd                    # 同一入口的新名字转发器（cmd /c 起子进程；call 会让 Ink 前端 0xC0000409 退出）
+├── hooh-debug.cmd              # hooh 的调试入口：只设 ACE_SHELL_DEBUG=1 再转发 hooh.cmd（壳的接线日志落 frontend/.shell-debug.log）
 ├── Dockerfile                  # 整体镜像入口（三档细目在 docker/）
 ├── docker-compose.yml          # 整体镜像一键起停编排
 ├── .gitignore                  # 忽略规则：生成物 / 缓存 / 密钥

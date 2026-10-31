@@ -244,8 +244,11 @@ def run_hook(spec: HookSpec, payload: Dict[str, Any], cwd: str = ".",
         env.update({str(k): str(v) for k, v in env_extra.items()})
     t0 = _t.monotonic()
     try:
+        # nosec B602 —— 钩子命令来自**用户自己写的** hooks.json（H-17：该文件不入
+        # 版本库、信任工作区后才生效），shell=True 是功能语义（用户可写管道/&&），
+        # 非模型可控输入。同口径已有 noqa: S602。
         proc = subprocess.run(                       # noqa: S602 —— 用户自己的命令
-            spec.command, shell=True, cwd=cwd, env=env,
+            spec.command, shell=True, cwd=cwd, env=env,  # nosec B602
             input=json.dumps(payload, ensure_ascii=False),
             capture_output=True, text=True, encoding="utf-8", errors="replace",
             timeout=spec.timeout)

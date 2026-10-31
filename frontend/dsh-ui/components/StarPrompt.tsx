@@ -4,7 +4,8 @@ import { getLang, subscribeLang, t } from '../i18n.js'
 import { Divider } from './design-system/Divider.js'
 import { HintLine } from './design-system/HintLine.js'
 import { ListItem } from './design-system/ListItem.js'
-import { MaidPortrait, useMaidPortraits } from './maidPortrait.js'
+import { CLAUDE_GIRL_ASSETS, MAID_ASSETS, MaidPortrait, useMaidPortraits } from './maidPortrait.js'
+import { getActiveBrand } from '../branding.js'
 import { WhaleGirlHappyArt } from './WhaleGirl.js'
 import { useTerminalBackground } from './design-system/ThemeProvider.js'
 import { STANDARD_FRAME_INDEX, WhaleArt } from './Whale.js'
@@ -86,7 +87,8 @@ export function StarPrompt({
   React.useSyncExternalStore(subscribeLang, getLang)
   const { columns, rows } = useTerminalSize()
   const imagesAvailable = useTerminalImages()
-  const portraits = useMaidPortraits(imagesAvailable)
+  // 立绘跟品牌档走（branding.ts）：claude 内核的橙界面里放鲸鱼娘会跳戏。
+  const portraits = useMaidPortraits(imagesAvailable, getActiveBrand() === 'claude' ? CLAUDE_GIRL_ASSETS : MAID_ASSETS)
   const maidSource = portraits?.normal
   // 卡片底色用**终端真底色**（OSC 11）而不是主题的卡片色：后者是一整块
   // 与终端背景无关的实色板，压在带背景图的终端上很僵硬；用真底色时卡片
@@ -343,7 +345,7 @@ export function WhaleCouponPrompt({
   const lang = React.useSyncExternalStore(subscribeLang, getLang)
   const { columns, rows } = useTerminalSize()
   const imagesAvailable = useTerminalImages()
-  const portraits = useMaidPortraits(true)
+  const portraits = useMaidPortraits(true, getActiveBrand() === 'claude' ? CLAUDE_GIRL_ASSETS : MAID_ASSETS)
   const background = useTerminalBackground()
   const withArt = columns >= MIN_ART_COLUMNS && rows >= MIN_ART_ROWS
   const textColumns = withArt ? TEXT_COLUMNS : Math.max(1, Math.min(TEXT_COLUMNS, columns - 6))

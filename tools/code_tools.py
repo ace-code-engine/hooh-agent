@@ -304,7 +304,7 @@ class CodeTools:
         if denied:
             return ExecutionResult(status="error", error_code="403", message=denied)
         try:
-            result = eval(expression, {"__builtins__": {}}, {})
+            result = eval(expression, {"__builtins__": {}}, {})  # nosec B307 —— 上一行 _scan_math_expression 已过 AST 白名单（仅纯算术节点）+ 空内建 + 200 字符上限；三层防线后剩余面是纯算术。
             return ExecutionResult(status="success", data={"result": result, "expression": expression})
         except Exception as e:
             return ExecutionResult(status="error", error_code="400", message=str(e))

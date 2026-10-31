@@ -39,8 +39,9 @@ class ShellErrorBoundary extends React.Component<
       return React.createElement(
         Box,
         { flexDirection: 'column' },
-        React.createElement(Text, { color: 'red' }, '✗ 界面渲染异常（详见上方 stderr）'),
-        React.createElement(Text, { color: 'gray' }, String(this.state.err.message ?? this.state.err)),
+        // 0.17.0：ThemedText 的 color 只认主题键（红=error、灰=inactive）。
+        React.createElement(Text, { color: 'error' }, '✗ 界面渲染异常（详见上方 stderr）'),
+        React.createElement(Text, { color: 'inactive' }, String(this.state.err.message ?? this.state.err)),
       )
     }
     return this.props.children

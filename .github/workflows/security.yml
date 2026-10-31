@@ -1,0 +1,136 @@
+# Authoritative security scanning line: four independent jobs, one badge row.
+#
+#   1. codeql      -- GitHub native SAST (python + javascript-typescript); results
+#                     land in the Security tab.
+#   2. bandit      -- Python SAST. Medium+medium confidence fails the build; low
+#                     severity only reports. The engine intentionally builds
+#                     command strings behind allowlist gates -- a looser threshold
+#                     would drown real signal (every allowed exception carries a
+#                     `# nosec Bxxx` + compensating-control note in the source).
+#   3. pip-audit   -- dependency CVEs for the locked runtime (requests) and for
+#                     every package installed in the build environment.
+#   4. scorecard   -- OpenSSF Scorecard (supply-chain maturity: branch
+#                     protection, pinned deps, SAST presence, token perms).
+#                     Results are published by OSSF infra to
+#                     api.securityscorecards.dev -- the README badge reads that.
+#
+# All scans are read-only and need no secrets. scorecard publish needs a public
+# repo (satisfied). Relationship to ci.yml: ci.yml answers "does it work", this
+# line answers "is it safe" -- independent, run in parallel.
+# ASCII-ONLY ON PURPOSE (same discipline as the other workflows).
+
+name: Security
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  schedule:
+    # Weekly, Monday 03:07 UTC (off the hour, away from runner peaks).
+    - cron: "7 3 * * 1"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: security-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  codeql:
+    name: CodeQL (SAST)
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      security-events: write
+    strategy:
+      fail-fast: false
+      matrix:
+        language: [python, javascript-typescript]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: github/codeql-action/init@v3
+        with:
+          languages: ${{ matrix.language }}
+          queries: security-extended
+          config: |
+            paths-ignore:
+              - frontend/dsh-ui/_vendor
+              - frontend/vendor
+              - dist
+              - vendor
+      - uses: github/codeql-action/analyze@v3
+        with:
+          category: "/language:${{ matrix.language }}"
+
+  bandit:
+    name: Bandit (Python SAST)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install bandit
+        run: pip install bandit
+      - name: Scan (medium+medium fails; low only reports)
+        run: |
+          set -e
+          # Excluded: tests (attack samples are their job) and vendored upstream.
+          TARGETS="ai_code.py agent_runner.py execution_layer.py setup_env.py core tools ui cli gateway_v2 e2e"
+          bandit -r $TARGETS --severity-level medium --confidence-level medium \
+                 --skip B101,B404,B603 -f txt -o bandit.txt || true
+          cat bandit.txt
+          if grep -q "Issue:" bandit.txt; then
+            echo "::error::bandit found medium+ issues"
+            exit 1
+          fi
+
+  pip-audit:
+    name: pip-audit (dependency CVEs)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install audit target deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests pip-audit
+      - name: Audit the locked runtime deps
+        run: |
+          # --strict: missing metadata is a failure, never a silent skip.
+          pip-audit --strict -r requirements.txt --desc on
+          pip-audit --strict --desc on
+
+  scorecard:
+    name: OpenSSF Scorecard
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      security-events: write
+      id-token: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: ossf/scorecard-action@v2
+        with:
+          results_file: results.sarif
+          results_format: sarif
+          publish_results: true
+      - name: Upload to code scanning
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: results.sarif

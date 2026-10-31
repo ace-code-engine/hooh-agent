@@ -1,78 +1,99 @@
-<p align="center">
-  <a href="https://github.com/ace-code-engine/hooh-agent/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/ace-code-engine/hooh-agent/actions/workflows/ci.yml/badge.svg"></a>
-  <img alt="Python" src="https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue">
-  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-blue"></a>
-  <img alt="发布状态" src="https://img.shields.io/badge/release-v1.1.0-brightgreen">
-  <img alt="安全核心" src="https://img.shields.io/badge/safety%20core-zero--dep-orange">
-  <img alt="模型调用" src="https://img.shields.io/badge/model%20API-requires%20requests-blue">
-  <a href="CHANGELOG.md"><img alt="Latest" src="https://img.shields.io/badge/latest-v1.1.0%20(2026--10--04)-brightgreen"></a>
-</p>
+# HooH · 互
 
-<h1 align="center">HooH · 互</h1>
+<div align="center">
 
-<p align="center">
-  简体中文 · <a href="README.md">English</a> · <a href="CHANGELOG.md">更新日志</a> · <a href="docs/README.md">文档索引</a>
-</p>
+<img src="assets/logo.svg" width="96" alt="HooH · 互" />
 
-<p align="center">
-  <strong>把安全边界放在模型<b>之下</b>的执行层。<br>
-  模型提出动作，权限、隔离、快照与回滚由它无法辩解的代码裁决。</strong>
-</p>
+### 把安全边界放在模型**之下**的执行层。
+
+**模型提出动作，代码裁决。**
+
+[简体中文](README.zh-CN.md) · [English](README.md) · [更新明细](UPDATES.md) · [文档索引](docs/README.md) · [参与贡献](CONTRIBUTING.md)
+
+[![CI](https://github.com/ace-code-engine/hooh-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/ace-code-engine/hooh-agent/actions/workflows/ci.yml)
+[![Version](https://img.shields.io/badge/Version-1.2.0-7DA1DE)](https://github.com/ace-code-engine/hooh-agent/releases)
+[![Release](https://img.shields.io/github/v/release/ace-code-engine/hooh-agent?label=Download&color=7DA1DE)](https://github.com/ace-code-engine/hooh-agent/releases)
+<a href="CHANGELOG.md"><img alt="Latest" src="https://img.shields.io/badge/latest-v1.2.0%20(2026--10--31)-7DA1DE"></a>
+[![License](https://img.shields.io/badge/License-MIT-7DA1DE)](LICENSE)
+[![安全核心](https://img.shields.io/badge/safety%20core-zero--dep-orange)](docs/security/SECURITY-MODEL.md)
+[![模型调用](https://img.shields.io/badge/model%20API-requires%20requests-blue)](docs/CONFIGURATION.md)
+[![界面](https://img.shields.io/badge/界面-中%20·%20英%20·%20日-7DA1DE)](#三种外壳)
+[![Security](https://github.com/ace-code-engine/hooh-agent/actions/workflows/security.yml/badge.svg?label=Security%20scans)](https://github.com/ace-code-engine/hooh-agent/actions/workflows/security.yml)
+[![CodeQL](https://github.com/ace-code-engine/hooh-agent/actions/workflows/security.yml/badge.svg?event=push&label=CodeQL)](https://github.com/ace-code-engine/hooh-agent/actions/workflows/security.yml)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/badge/github/ace-code-engine/hooh-agent)](https://securityscorecards.dev/viewer?uri=github.com/ace-code-engine/hooh-agent)
+[![Bandit](https://img.shields.io/badge/Bandit-clean-4C1)](https://github.com/ace-code-engine/hooh-agent/actions/workflows/security.yml)
+[![pip-audit](https://img.shields.io/badge/pip--audit-clean-4C1)](https://github.com/ace-code-engine/hooh-agent/actions/workflows/security.yml)
+
+</div>
 
 ---
 
-HooH 是面向编码代理的**执行层**。每一次工具调用 —— 文件、命令、出网、MCP —— 都要经过同一个裁决点：
-权限闸门、路径与敏感目标边界、写前快照、HMAC 链式审计。安全核心为**纯标准库**；提示词失效时这道
-边界仍然成立（越狱、注入内容、被篡改的工具输出都改变不了它）。
+## 它是什么
 
-> **互（HooH）** —— 模型提出、代码裁决；先写快照，`/undo` 才谈得上意义。
-> 名字是致意，不是素材占用，见下方「名称与致意」。
+每一次工具调用 —— 文件、命令、出网、MCP —— 都要经过同一个裁决点：
+**权限闸门 → 路径与敏感目标边界 → 写前物理快照 → HMAC 链式审计**。
+安全核心是**纯标准库**：提示词失效时这道边界仍然成立（越狱、注入内容、被篡改的工具输出都改变不了它）。
+
+> **互（HooH）** —— 两根横骨被一竖贯穿扣住：每一次动作都有对等回应，而且可逆。
+> 先写快照，`/undo` 才谈得上意义。名字是致意，不是素材占用，见[下方说明](#名称与致意)。
 
 ## 和别的 Agent 差在哪
 
 - **安全在模型之下、不在提示词里。** 权限、路径、沙箱、回滚都是 harness 代码。
 - **默认只读。** 提权是人的动作（`/permission write`）。
 - **每次写前物理快照 + `/undo`**，HMAC 签名，快照目录 Agent 自己不可写。
-- **自我驱动。** 持久目标、子代理、一行命令切换 **9 家厂商 · 10 入口**。
+- **自我驱动。** 持久目标、子代理、知识库，一行命令切换 **9 家厂商 · 10 入口**。
+- **三种外壳，一套引擎。** 完整的 dsh-TUI 多内核界面 / 经典瑞士规范前端 / 纯 Python 兜底，裁决链只有一个。
 
-## 拿到手
+## 拿到手：双击就用
 
-每个版本发布四种产物，是**并列的四条路**，不是要叠加的层：
+**不用看报错、不用装 Python、不用装 Node。** 下载安装包，双击装完，开始菜单点 **HooH**：
 
-| 形态 | 产物 | 什么时候选它 |
+| 你的情况 | 下载 | 怎么用 |
 |---|---|---|
-| **① 直接用 HooH 当你的 agent** | `hooh-<版本>-windows-amd64.msi` · `.zip` | 你需要一个能自己干活的终端 agent |
-| **② 把 HooH 当 MCP 服务（自带环境）** | `hooh-mcp-<版本>-<平台>.zip` | 你已经在用 Cline / Claude Desktop / Cursor，只想加边界、不改它。**自包含，不需要 Python** |
-| **③ MCP 包（源码版）** | `hooh-mcp-server-<版本>.zip` | 同 ②，但你想读/改源码；需要 Python 3.10+ |
-| **④ MCP + 沙箱底座（一体包）** | `hooh-sandbox-bundle-<版本>.zip` | 你既要裁决边界，也要执行边界（KVM microVM） |
+| Windows，想直接用 | **`hooh-<版本>-windows-amd64.msi`** | 双击安装 → 开始菜单点 **HooH**（自带 Python 运行时 + 完整界面 + Node） |
+| 便携党（解压即用，不装系统） | **`hooh-<版本>-windows-amd64.zip`** | 解压 → 双击 `ace.cmd` |
+| 把 HooH 接进别的 agent（Cline / Claude Desktop / Cursor） | **`hooh-mcp-<版本>-<平台>.zip`** | 按 [docs/MCP-SERVER.md](docs/MCP-SERVER.md) 配置，只加边界、不改你的 agent |
+| 源码党 | `git clone` 本仓库 | `hooh.cmd --mock` 离线体验 / `hooh.cmd` 接真模型 |
 
-## 快速开始
+**只发这几个文件**；MSI 自包含（引擎 + 整壳界面 + Node 运行时全在里面），装完离线也能跑 `--mock`。
 
-```bash
-python ai_code.py --mock    # 离线演示 —— 不需要密钥、不需要网络
-python ai_code.py           # 接入真实模型（向导引导）
+**[下载最新版](https://github.com/ace-code-engine/hooh-agent/releases)** · [更新明细](UPDATES.md) · [提 issue](https://github.com/ace-code-engine/hooh-agent/issues/new/choose)
+
+## 30 秒上手
+
+```text
+双击 HooH（或终端里敲 ace）
+  ↓
+首屏输入一句话，回车
+  ↓
+要写文件/跑命令时，HooH 会先弹审批 → 同意后先拍快照 → 再动手
+  ↓
+不满意？/undo 回滚到动手前
 ```
 
-在仓库里也可以直接用启动器，它会自己找一个能用的 Python：
-`hooh.cmd --mock`（Windows）—— `ace.cmd` 作为同一个入口的别名保留。
+源码运行：`hooh.cmd --mock`（离线演示，不需要密钥不需要网络）· `hooh.cmd`（接真模型，向导引导）。
+终端里的斜杠命令全集见 **[docs/COMMANDS.md](docs/COMMANDS.md)**。
 
-Windows 没装 Python：去 [Releases](https://github.com/ace-code-engine/hooh-agent/releases) 拿 zip，
-跑 `ace\ace.exe --mock`。安装与构建：[docs/PACKAGING-EXE.md](docs/PACKAGING-EXE.md)。
+## 它到底能干什么
 
-<p align="center">
-  <img src="demo/demo.svg" alt="一次录下来的离线 HooH 会话" width="820">
-</p>
+- **干**：文件、命令、代码、出网检索、文档解析（Word/Excel/PPT/PDF）、SQLite、浏览器——每一项都过裁决链；
+- **守**：默认只读，提权需人确认；每次写前快照（HMAC 链式审计），`/undo` 一键回滚；
+- **驱动**：持久目标（断电续跑）、子代理、任务树、知识库、计划模式；
+- **接**：MCP 服务端（把裁决边界借给别的 agent）、事件钩子、自定义命令与技能；
+- **换**：9 家模型厂商 · 10 入口一行切换；中/英/日三语界面。
 
-## 1.1.0 更新了什么
+**HooH 能挡什么 / 挡不住什么？** 看 **[docs/security/SECURITY-FAQ.md](docs/security/SECURITY-FAQ.md)**——11 问逐条说清。
 
-- **界面按一份规范重做**：不画边框（改用整宽细线）、一屏一个强调色、左对齐；小零件（分隔线、
-  六态状态图标、八分之一块进度条、byline、快捷键提示）**与终端渲染器逐值对拍**，不许两种长相。
-- **中 / 英 / 日 三套齐全**：`/lang` 切的是**界面**语言 —— 斜杠菜单、对话框、报错、底栏一起换
-  （不再顺手改"回答用什么语言"）。
-- **上下文窗口跟着模型走**：DeepSeek → 1M，GLM-4.6/4.7 → 200K，表里条目带官方出处；表外模型走
-  安全兜底**并明确提示**。新增 `/window 1m` 一条命令校正。
-- **全屏真的能用**：`--fullscreen` 给转录一个自己的滚动视口（`PgUp/PgDn/↑↓/g/G` + 滚动条）；
-  另加**同步输出**（`\u001b[?2026`）治频闪、`<Static>` 让主屏保住真实回滚缓冲。
+## 三种外壳
+
+| 外壳 | 入口 | 长什么样 | 适合 |
+|---|---|---|---|
+| **整壳应用**（默认） | 双击 HooH / `ace` | dsh-TUI 多内核界面：落地页、流式 Markdown、工具卡片、状态栏、命令面板 | 日常使用 |
+| **经典前端** | `ace classic` | 瑞士规范界面：主屏两车道、一屏一个强调色 | 备用（功能冻结，只修 bug） |
+| **纯 Python 兜底** | `ace --no-tui` | 传统 REPL，无任何 UI 依赖 | 脚本/CI/老旧终端 |
+
+三种外壳背后是**同一个引擎、同一条裁决链**——界面可以换，安全边界不跟着换。
 
 ## 文档
 
@@ -85,46 +106,50 @@ Windows 没装 Python：去 [Releases](https://github.com/ace-code-engine/hooh-a
 | 全部配置项 | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) |
 | 为什么是 HooH · 对比提示词护栏 | [docs/WHY.md](docs/WHY.md) |
 | 能力清单 | [docs/CAPABILITIES.md](docs/CAPABILITIES.md) |
+| 打包与发行（MSI / zip / MCP / 沙箱） | [docs/PACKAGING-EXE.md](docs/PACKAGING-EXE.md) |
 | 测试 · CI · 承诺守卫 | [docs/TESTING.md](docs/TESTING.md) |
 | 工程债 · 交接 | [docs/HANDOFF.md](docs/HANDOFF.md) |
 | 全部文档索引 | [docs/README.md](docs/README.md) |
 
-## 开发与贡献
+## 参与贡献
 
-读 [CONTRIBUTING.md](CONTRIBUTING.md) → [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)（标准流程 / 加工具 / 加功能）→ [docs/BACKLOG.md](docs/BACKLOG.md)。
+踩到坑、有想法、想加功能——都在 **[CONTRIBUTING.md](CONTRIBUTING.md)**：
+环境搭建 → 标准流程 → 加工具八步清单 → 提 PR。
+大版本的用户可见变化汇总在 **[UPDATES.md](UPDATES.md)**；技术明细在 [CHANGELOG.md](CHANGELOG.md)。
+
+> 作者是学生：工作日要上课，issue / PR 一般集中在周末处理，消息看到了都会记下，不用急。
+
+## 安全扫描（权威线）
+
+CI 里有独立于测试的 **Security 工作流**，四条权威扫描并行跑、结果进 GitHub Security tab：
+
+| 扫描器 | 扫什么 | 权威性 |
+|---|---|---|
+| **CodeQL**（GitHub 官方） | Python + TypeScript 的静态污点/注入分析（security-extended 规则集） | GitHub 原生 SAST，结果可复核 |
+| **Bandit** | Python 专项 SAST；中危+中置信即红线（每条例外都带 `# nosec` + 补偿控制说明，人工 triage） | 行业标准 Python SAST |
+| **pip-audit** | 依赖 CVE（requirements 锁定的运行时 + 构建环境逐包） | PyPA 官方审计工具，`--strict` |
+| **OpenSSF Scorecard** | 供应链成熟度（分支保护 / 依赖 pinned / SAST 存在 / 令牌权限） | OpenSSF 基础设施发布、公开可查 |
+
+每一条都**常驻 CI 门禁**：任何一条变红，PR 合不进去；不是"跑过一次贴个图"。
+
+## 安全
+
+- 默认只读；每次写前物理快照，失败可回滚，快照目录 Agent 自己不可写；
+- 权限闸门、路径与敏感目标边界、HMAC 链式审计——全部在 harness 代码里，不在提示词里；
+- 出网只走单一闸门（pin-to-IP + 逐跳复检）；命令三值判定（allow / prompt / forbidden）；
+- 完整安全模型见 **[docs/security/SECURITY-MODEL.md](docs/security/SECURITY-MODEL.md)**，发行包承诺见 **[SECURITY.md](SECURITY.md)**。
 
 ## 名称与致意
 
-**HooH（互）** 是**致意，不是素材占用**。`互` 就是这套系统的形状：模型提出、代码裁决；
-先写快照，`/undo` 才谈得上意义。每一次动作都有对等回应，而且可逆。
-
-仓库内**不含任何米哈游素材**——这句只说**命名与素材**，不等于本仓没有第三方代码：改编的源码
-与文案另见 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)。`frontend/dsh-ui/` 是按 MIT 迁入的 dsh-TUI 界面树（含上游 LICENSE.upstream 与迁入说明），作为主外壳随本仓分发，不依赖全局安装的 dsh-tui。图标 [`assets/logo.svg`](assets/logo.svg) 是按本项目自身的
-视觉语言从零画出来的「互」字几何构图（三横一竖），没有描摹、没有提取、没有二次分发。
+**HooH（互）** 是**致意，不是素材占用**。「互」就是这套系统的形状：模型提出、代码裁决；
+先写快照，`/undo` 才谈得上意义。仓库内**不含任何米哈游素材**——这句只说**命名与素材**，
+不等于本仓没有第三方代码：改编的源码与文案另见 [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)。
+视觉语言（「互」字几何构图，三横一竖）从零画出，没有描摹、没有提取、没有二次分发。
 
 > 作者本人是米哈游长期玩家，这个名字是向《崩坏：星穹铁道》"均衡"星神致意。
 > 如果米哈游（或任何权利人）认为这个命名不妥，**提一个 issue 就会改**——不争辩、不拖延。
 
-## 我们用到了什么第三方
-
-**引入的代码（MIT）。** `frontend/vendor/dsh-ink/` 是 `@deepseek-harness-tui/dsh-tui` v0.12.0 的 Ink
-分支（MIT，Copyright (c) 2026, chimney），逐字节拷贝：135 文件 / 27,755 行，与上游 SHA256 全等。它带来
-cell 缓冲、damage 矩形、脏节点 blit、硬件滚动，以及自带的 `DEC2026` 同步输出；配套 React 19。逐文件
-来源见 [MANIFEST.md](frontend/vendor/dsh-ink/MANIFEST.md)；上游自己漏声明的两处（Ink、Meta Yoga）许可
-全文由我们补全，见 [`third_party/dsh-tui/`](third_party/dsh-tui/) 与
-[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md)。
-
-**借鉴的设计（未拷文件）。** 读它的实现，在我们自己的组件里重写：版式几何（内容内缩、结构线出血）、
-代码块版式、diff 用**状态槽替代行号**（不编造行号）、语法色的防泄漏映射、键位注册表（声明 /
-平台别名 / 用户重映射 / 固定保留集 / 冲突检测）、`Ctrl+R` 历史搜索、大粘贴折叠、选择器与设置面板
-（声明式 schema + 分组 + 即时生效 + 设置内搜索）、会话树、全屏草稿编辑器 + `$EDITOR`。
-
-- 73 个语义色键不抄 → 我们只有 17 个 token，一屏一个强调色。
-- `─` 分隔线不抄 → 我们要走字形降级层，cp936 上得能降级。
-- 80ms 转轮不要 → 违我们「动画 ≤5Hz」；`highlight.js` 语法高亮不要 → 本仓零依赖。
-- 品牌 / 吉祥物 / 彩蛋一律不出现 → 界面文案全部是我们的，且三语齐备。
-
-## 许可
+## License
 
 [MIT](LICENSE) © 2026 jincheng3870682453-hash
 

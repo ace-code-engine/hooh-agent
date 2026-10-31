@@ -1,4 +1,5 @@
 import { randomUUID } from 'node:crypto'
+import { join } from 'node:path'
 import React from 'react'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Agent, AgentHandle } from '@deepseek-ai/dsh-agent'
@@ -10,38 +11,64 @@ import Schema from '@deepseek-ai/schemastery'
 import { Config } from './index.js'
 import { configValues, createSettingsScope, resolveSettingsNamespace, type RuntimeConfig } from './compat/settings.js'
 import { createChannel } from './channel.js'
+import { channelOwnerCurrent } from './channel/owner.js'
+import { createDshSession } from './backend/session.js'
+import { createTuiSettingsService, type DelegateSettings } from './tui-settings.js'
+import { EDITABLE_CONFIG_KEYS } from '../settings/definitions.js'
+import { kernelEntriesOf } from '../components/kernelCatalog.js'
+import { openBackendStartup, prepareBackendStartup, probeKernels, installSurfaceFor } from './backends.js'
+import { backendLabel, isBackendIdSyntax, isRegisteredBackend, listBackends, listOfferedBackends, loadBackend, parseBackendChoice, unloadBackends } from './backend-registry.js'
+import { createPluginInstallEntry } from './plugin-install.js'
+import { createPluginManageEntry } from './plugin-manage.js'
+import { formatSessionRef } from '../agent/refs.js'
+import type { AgentEvent } from '../agent/events.js'
+import type { AgentSession } from '../agent/session.js'
+import { createStartingSession } from '../agent/starting-session.js'
+import { mountFailureText } from '../sessions/resumeFailure.js'
 import { createChannelSceneOutlet } from './channel-scene-outlet.js'
 import { mountChannelUi } from './channel-ui.js'
 import { bindChannelCommands } from './channel/commands.js'
 import { registerTuiChannel } from '../adapter/channel/host-registry.js'
 import { createChildStderrReporter, installChildStderrGuard } from './childStderr.js'
 import { removeClipboardImageDir } from '../utils/clipboard.js'
+import { appendCrashLog, serializeCrashDetail, unserializableCrashDetail, type CrashDetail } from '../utils/crashDetail.js'
+import { pluginManagerOf, type PluginManagerView } from './plugin-manager.js'
 import { logForDebugging } from '../utils/debug.js'
+import { createTerminalNotifier, type NotificationMethod, type TaskNotifications } from '../ink/terminal-notification.js'
+import type { WindowsToastInput, WindowsToastResult } from '../ink/terminal-notification-windows.js'
+import { getTerminalFocused } from '../ink/terminal-focus-state.js'
+import { resolveNotificationMethod } from '../ink/terminal.js'
 import { isEnvTruthy } from '../utils/envUtils.js'
 import { QuestionStore, bindQuestionStore } from './questions.js'
 import { prepareQuestionAnswerer } from './questions-answerer.js'
 import { adapterRuntimeFor } from '../adapter/kernel/runtime-context.js'
 import { ApprovalStore, bindApprovalStore } from './approvals.js'
+import { PermissionStore } from '../channel/permissions.js'
 import { registerPromptDebug } from './promptDebug.js'
 import { readActivityFrames } from '../activityPrefs.js'
 import { commitFullscreenFactoryMigration, planFullscreenFactoryMigration, readAppliedMigrations } from '../migrationPrefs.js'
 import { readModelPref } from '../modelPrefs.js'
 import { explicitModelRoute, recordedModelRoute, resolveModelRoute, validateModelRoute } from '../modelRoute.js'
 import type { ModelRoute } from '../modelRoute.js'
-import { migratePresetPref, readPresetPref } from '../presetPrefs.js'
+import { migratePresetPref, presetOverrideFromEnv, readPresetPref } from '../presetPrefs.js'
 import { readEffortPref } from '../effortPrefs.js'
 import { composePreset, filterMinimalPresetTools, resolvePersistedPreset, resolvePersistedRoute, runningPresetOf } from './presets.js'
+import { createFreshAgent, isUnstoredFreshSession } from './fresh-agent.js'
 import { ensurePackagedPresets } from './packaged-presets.js'
 import { registerBundledPresets } from './bundled-presets.js'
 import { ensureLegacySessionEventTypes, snapshotLiveSessionEvents } from './compat/index.js'
-import { clearResumeTarget, resumeTargetFromArgv, writeResumeTarget } from '../sessionHistory.js'
-import { initialPromptFromCmdlineArgs } from './startup-args.js'
+import { clearResumeTarget, resumeTargetFromArgv, stripResumeArgs, writeResumeTarget } from '../sessionHistory.js'
+import { cmdlineArgsOf, initialPromptFromCmdlineArgs } from './startup-args.js'
 import { readHomePrefs } from '../homePrefs.js'
+import { handoffEventTag, formatHandoffNotice } from '../handoffEvents.js'
+import { adoptHeldInputs, heldInputsResumeCommand, takeHeldInputs, writeHeldInputs } from '../heldInputs.js'
+import { armFirstFrameAck, beginHandoffAck, handoffAttemptId, ownsAltScreenExit } from '../handoffAck.js'
+import { DSH_BACKEND_ID, HOST_NOTICE_ENV, KERNEL_SWITCH_HANDOFF_ENV, RESUME_BACKEND_ENV, RESUME_RETRY_ENV, parseBackendId, readKernelPrefs, resolveRememberedBackend, resolveResumeTarget, writeKernelPrefs, type KernelBackendId } from '../kernelPrefs.js'
 import { shouldOfferOnboarding } from '../onboardingPrefs.js'
 import { resolveSessionCwd } from '../utils/workspaceRoot.js'
-import { beginRestartAttempt, checkForTuiUpdate, installedTuiVersion, isBootDeadlockTarget, isStandaloneRuntime, isVersionNewer, logRestartEvent, resolveDshProfileName, resolveTuiUpdateTarget, restartTui, updateTuiAndRestart, writeHandoffNotice } from '../update.js'
+import { LAUNCH_PROMPT_SENT_ENV, beginRestartAttempt, checkForTuiUpdate, installedTuiVersion, isBootDeadlockTarget, isStandaloneRuntime, isVersionNewer, logRestartEvent, resolveDshProfileName, resolveTuiUpdateTarget, restartTui, updateTuiAndRestart, writeHandoffNotice, writeLastRunRecord, type TuiRestartOptions } from '../update.js'
 import { getLang, isLang, resolveStartupLang, setLang, t, writeLangPref } from '../i18n.js'
-import { DEFAULT_PAGE_MARGIN, DEFAULT_SIDE_PANEL_IDS, DEFAULT_STATUS_BAR, SIDE_PANEL_ID_PATTERN, applyCompanionSkin, applyImageBacking, applyMathImageBacking, applyMathImageScale, applyMathRendering, applyMermaidDiagrams, type ImageBacking, type MathImageBacking, type MathImageScale, type MathRendering, applyPageMargin, applySidePanelOpen, applySidePanelPanels, applySidePanelRatio, applySidePanelSplitEnabled, isPageMarginMode, normalizeJobGroupFold, normalizePageMargin, normalizeScrollGutter, normalizeSidePanelPanels, normalizeSidePanelRatio, normalizeStatusBar, normalizeToolBackground, parsePageMarginSpec, resolveMathRendering, type PageMarginSetting, type ScrollGutterMode, type StatusBarConfig, type ToolBackground } from '../tuiDisplayPrefs.js'
+import { applyBtwContextBudget, applyBtwContextTurns, applyCodeFrameStyle, applyCompanionSkin, applyImageBacking, applyMathImageBacking, applyMathImageScale, applyMathRendering, applyMermaidDiagrams, applyPageMargin, applySidePanelOpen, applySidePanelPanels, applySidePanelRatio, applySidePanelSplitEnabled, ALL_SIDE_PANELS, BTW_CONTEXT_BUDGET_MAX, BTW_CONTEXT_BUDGET_MIN, BTW_CONTEXT_TURNS_MAX, BTW_CONTEXT_TURNS_MIN, DEFAULT_PAGE_MARGIN, DEFAULT_STATUS_BAR, isPageMarginMode, normalizeJobGroupFold, normalizePageMargin, normalizeScrollGutter, normalizeSidePanelPanels, normalizeSidePanelRatio, normalizePluginFieldsOrder, normalizeStatusBar, normalizeToolBackground, parsePageMarginSpec, parsePluginFieldsOrder, parseSidePanelPanels, resolveMathRendering, type CodeFrameStyle, type ImageBacking, type MathImageBacking, type MathImageScale, type MathRendering, type PageMarginSetting, type ScrollGutterMode, type StatusBarConfig, type ToolBackground } from '../tuiDisplayPrefs.js'
 import {
   draftComboConflicts,
   effectiveComboString,
@@ -53,30 +80,44 @@ import {
 import { attachHerdrIntegration } from '../herdr.js'
 import { logMouseDebug } from '../utils/debug.js'
 import { Chat } from '../screens/Chat.js'
-import { openInjectChannel, type InjectController } from './inject-channel.js'
+import { openInjectChannel, type InjectChannel, type InjectController } from './inject-channel.js'
 import { startSessionMountHeartbeat } from './session-mount-heartbeat.js'
-import { reserveMount } from '../sessionMounts.js'
+import { reserveMount, reserveNewSession } from '../sessionMounts.js'
 import { getHostDialogStore, type TuiDialogRuntime } from './dialogs.js'
 import { getHostStatusStore, type TuiStatusRuntime } from './status.js'
+import { attachSessionListMetadata } from './session-list-metadata.js'
 import { createActivityStore } from './activity-store.js'
 import { createContextOccupancyStore } from './context-occupancy.js'
+import { createTeamRosterStore } from './team-roster.js'
+import { createTeamCommandEntry, filterTeamReplacedTools } from './team-mode.js'
 import { getHostToastStore, type TuiToastRuntime } from './toast.js'
 import { getHostShortcuts, type TuiShortcutRuntime } from './shortcuts.js'
-import { getHostThemes, type TuiThemeRuntime } from './themes.js'
+import { getHostThemes, type TuiThemeHost, type TuiThemeRuntime } from './themes.js'
 import type { DshAuthService } from './oauth/service.js'
 import { attachSessionToWorkspace } from './workspace.js'
 import { createLocalWorkspaceRuntime, getHostWorkspaceRuntime } from './workspaces.js'
-import { getHostSettingsSections, getLocalSettingsSectionsHost, type TuiSettingsField, type TuiSettingsSectionsRuntime } from './settings-sections.js'
-import { compositionRoot, withHostRootCapability } from './host-access.js'
+import { trackHostSettingsSection, type TuiSettingsField, type TuiSettingsFieldWrite, type TuiSettingsSection } from './settings-sections.js'
+import { compositionRoot, outsideActivation, withHostRootCapability } from './host-access.js'
+import { createRowAttachment } from './row-attachment.js'
+import { armAdmissionLoader } from './admission-loader.js'
+import { assembleBackendsFromProfile } from './backend-assembly.js'
+import { disposeRootSettled } from './root-dispose.js'
 import { render, ThemeProvider, AlternateScreen } from '../ui.js'
 import { PageMargin } from '../components/PageMargin.js'
 import { normalizeSplashFont } from '../components/splashFonts.js'
+import { normalizeBrandSetting, resolveBrand, setActiveBrand } from '../branding.js'
 import { SETTING_GROUPS, SHORTCUT_FIELD_META, settingField } from '../settings/definitions.js'
 import instances from '../ink/instances.js'
+import { getShutdownInput, type ShutdownInput } from '../ink/shutdown-input.js'
 import { cursorMove, DISABLE_KITTY_KEYBOARD, DISABLE_MODIFY_OTHER_KEYS, DISABLE_WIN32_INPUT_MODE } from '../ink/termio/csi.js'
-import { DBP, DFE, DISABLE_MOUSE_TRACKING, EXIT_ALT_SCREEN, SHOW_CURSOR } from '../ink/termio/dec.js'
+import { DBP, DFE, DISABLE_MOUSE_TRACKING, ESU, EXIT_ALT_SCREEN, SHOW_CURSOR } from '../ink/termio/dec.js'
 import { CLEAR_ITERM2_PROGRESS, CLEAR_TAB_STATUS, supportsTabStatus, wrapForMultiplexer } from '../ink/termio/osc.js'
-import { fatalReasonForExit, registerProcessGuardFatalSink } from '../ink/update-overflow-guard.js'
+import { addProcessErrorAbsorber, fatalReasonForExit, registerProcessGuardFatalSink } from '../ink/update-overflow-guard.js'
+import { CHANNEL_UI_LIFETIME_ENDED } from '../adapter/channel/ui.js'
+import { markBoot } from '../utils/bootTrace.js'
+import type { EntrySlot } from './entry-slot.js'
+import { TERMINATION_SIGNALS, dieBySignal, type ExitRequest, type ExitRequestAnswer, type ProcessExitSeam, type TerminationSignal } from './process-exit.js'
+import { StartupOpenError, type ChannelStartup } from './channel/state.js'
 
 /**
  * Interactive TUI front door for DeepSeek Harness agents.
@@ -102,6 +143,11 @@ import { fatalReasonForExit, registerProcessGuardFatalSink } from '../ink/update
 let lastBootedFullscreen: boolean | undefined
 // Image preferences also stay fixed across host recomposes until /restart.
 let lastBootedTerminalImages: boolean | undefined
+// A replacement's first process already sent the launch prompt. Read once per
+// process (a recompose must not resend it) and dropped from the environment,
+// so a `dsh-tui "prompt"` run from inside the session keeps its own prompt.
+const launchPromptSent = process.env[LAUNCH_PROMPT_SENT_ENV] === '1'
+delete process.env[LAUNCH_PROMPT_SENT_ENV]
 
 // Kept importable from here: the startup parser moved to its own dependency-free
 // module so argv probes can load it without the whole plugin graph.
@@ -158,8 +204,218 @@ export function resolveTuiHostMode(
   return explicitTuiLaunch ? 'invalid-explicit-launch' : 'headless-host'
 }
 
-export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, configOwner: Context = ctx): Promise<void> {
+/** How a host other than the dsh-tui Config row starts the runtime. */
+export interface RuntimeApplyOptions {
+  /**
+   * Mount before the non-DSH startup session opens and adopt it once open
+   * (standalone entry only; the profile path's DSH fallback needs the open to
+   * settle before the mount).
+   */
+  readonly deferBackendOpen?: boolean
+  /** The DSH profile for a host whose argv has no `--profile`: `/update` and the settings import use it. */
+  readonly profile?: string
+  /**
+   * The standalone entry composes after the mount. On the DSH kernel: mount on
+   * a placeholder session; the profile's dsh-tui row later calls `attachDsh`.
+   */
+  readonly entrySlot?: EntrySlot
+  /** The entry's rebuilt Config lacks the patch's Config row: do not re-resolve the kernel. */
+  readonly entryKernel?: KernelBackendId
+  /** Filled with this runtime's exit funnel once mounted, cleared on teardown. */
+  readonly exitSeam?: ProcessExitSeam
+}
+
+/** Where a Windows task-completion announcement delivers, and where it falls back to. */
+export interface TaskCompletionDelivery {
+  /** Live inventory from the running profile; installed packages alone do not own events. */
+  pluginManager?: Pick<PluginManagerView, 'listPlugins'>
+  /** Live owner/settings permission for pending native dispatch and fallback. */
+  canDispatch?: () => boolean
+  /** Hand the completion to the native toast transport (D8 keeps the dedup inside it). */
+  toast(input: WindowsToastInput): Promise<WindowsToastResult>
+  /** The terminal bell, used when the native transport is unavailable. */
+  terminal(title: string, message: string): void
+}
+
+/** The two live task-notification settings both delivery paths read. */
+export interface TaskNotificationSettings {
+  /** When a completion is announced at all: `off` suppresses it entirely. */
+  condition: TaskNotifications
+  /** How it is delivered: the native toast here, a terminal sequence or the bell there. */
+  method: NotificationMethod
+}
+
+/** The terminal notifier the host configures, as `createTerminalNotifier` returns it. */
+export type TerminalNotifier = ReturnType<typeof createTerminalNotifier>
+
+/** The live task-notification settings and their one writer. */
+export interface TaskNotificationSettingsHandle {
+  /** The current values; the toast branch and the terminal fallback read these. */
+  readonly settings: TaskNotificationSettings
+  /**
+   * Adopt a new condition/method: the terminal notifier and the toast branch
+   * both read these, so one writer keeps them in step.
+   * @param condition - The new condition, or undefined for the default.
+   * @param method - The new method, or undefined for the default.
+   */
+  configure(condition: TaskNotifications | undefined, method: NotificationMethod | undefined): void
+}
+
+/**
+ * Create the live task-notification settings around a notifier.
+ *
+ * The notifier holds the values for the terminal path, and the Windows branch
+ * needs the same two before it can decide whether to spawn anything. One writer
+ * keeps them in step - `applyDisplay` is the second caller, for a live /settings
+ * edit.
+ * @param notifier - The terminal notifier to configure.
+ * @param initial - The values this launch starts with.
+ * @returns The settings and the single function that changes them.
+ */
+export function createTaskNotificationSettings(
+  notifier: TerminalNotifier,
+  initial: TaskNotificationSettings,
+): TaskNotificationSettingsHandle {
+  const settings: TaskNotificationSettings = { ...initial }
+  return {
+    settings,
+    configure(condition, method) {
+      settings.condition = condition ?? 'unfocused'
+      settings.method = method ?? 'auto'
+      notifier.configure(condition, method)
+    },
+  }
+}
+
+/**
+ * Ring the terminal for a completion the host's gate already approved.
+ *
+ * The gate asks whether the terminal is focused; this port runs after the toast's
+ * await, which is up to 30 s of PowerShell. Asking the focus question a second
+ * time here would drop the bell for a user who came back to the terminal in that
+ * window - while the log had already reported it rung (AC-5). The decision
+ * travels in instead. `notify()` is synchronous, so the override covers exactly
+ * this call.
+ * @param notifier - The terminal notifier the host configured.
+ * @param settings - The live settings the decision was taken from.
+ * @param title - The localized title.
+ * @param message - The single-line summary; empty rings for the title alone.
+ */
+export function ringTaskCompletion(notifier: TerminalNotifier, settings: TaskNotificationSettings, title: string, message: string): void {
+  // A later explicit off still cancels sound; merely regaining focus does not.
+  notifier.configure(settings.condition === 'unfocused' ? 'always' : settings.condition, 'bel')
+  try {
+    notifier.notify(title, message)
+  } finally {
+    notifier.configure(settings.condition, settings.method)
+  }
+}
+
+/**
+ * Show one task-completion toast and answer for what it did.
+ *
+ * Exactly one answer reaches the terminal path: `unavailable` rings the bell
+ * (AC-5), because the alternative is a notification the user never learns
+ * about. `shown` is already delivered and `yielded` belongs to the external
+ * notifier (D8/AC-6) — ringing after either would remind the user twice.
+ *
+ * The transport is a parameter so the regression can drive all three answers
+ * without a toast, a registry write or a child process.
+ * @param title - The localized title.
+ * @param message - The single-line summary; empty shows the title alone.
+ * @param backendId - The session that completed; a DSH plugin only covers DSH events.
+ * @param delivery - The toast port, and the terminal path to fall back to.
+ */
+export async function deliverTaskCompletionOnWindows(
+  title: string,
+  message: string,
+  backendId: string,
+  delivery: TaskCompletionDelivery,
+): Promise<void> {
+  let externalNotifierActive = false
+  if (backendId === 'dsh' && delivery.pluginManager !== undefined) {
+    try {
+      const plugins = await delivery.pluginManager.listPlugins()
+      externalNotifierActive = plugins.some(plugin => plugin.enabled && plugin.fiberPhase === 'active'
+        && ['@baobaolaodie/cc-dsh-notifier', 'cc-dsh-notifier'].includes(plugin.moduleName))
+    } catch {
+      logForDebugging('external notifier inventory unavailable; using the built-in Windows notification')
+    }
+  }
+  const result = await delivery.toast({
+    title,
+    message,
+    externalNotifierActive,
+    canDispatch: delivery.canDispatch,
+  })
+  if (result.status !== 'unavailable' || delivery.canDispatch?.() === false) return
+  // AC-5 wants the bell, not a silent loss - and the reason is what makes the
+  // pair "toast missing + bell rang" explainable afterwards. Ring first, then
+  // report: the port rings for a completion the gate already approved, and a line
+  // written ahead of the action is how the fallback came to log a bell that a
+  // second look at the focus had eaten.
+  const cause = result.detail === undefined ? result.reason : `${result.reason}: ${result.detail}`
+  delivery.terminal(title, message)
+  logForDebugging(`windows toast unavailable (${cause}); using the terminal fallback`)
+}
+
+/**
+ * The production toast port. The Windows module is imported on first use and
+ * never at load time, so this path does not pull it in on a host that never
+ * delivers a toast. A load that fails answers like any other unavailable
+ * transport instead of throwing: this path is fire-and-forget, and the caller
+ * still has the bell.
+ */
+async function showWindowsToast(input: WindowsToastInput): Promise<WindowsToastResult> {
+  try {
+    const { notifyWindowsToast } = await import('../ink/terminal-notification-windows.js')
+    return await notifyWindowsToast(input)
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    logForDebugging(`windows toast transport failed to load (${detail})`)
+    return { status: 'unavailable', reason: 'unexpected', detail }
+  }
+}
+
+export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, configOwner: Context = ctx, runtimeOptions: RuntimeApplyOptions = {}): Promise<void> {
   const config = configValues<Config>(runtimeConfig)
+  const taskNotifier = createTerminalNotifier(process.stdout)
+  const { settings: notificationSettings, configure: configureTaskNotifications } = createTaskNotificationSettings(taskNotifier, {
+    condition: config.taskNotifications ?? 'unfocused',
+    method: config.notificationMethod ?? 'auto',
+  })
+  configureTaskNotifications(config.taskNotifications, config.notificationMethod)
+  /**
+   * Whether a task completion is announced at all: the one gate, asked before
+   * the Windows transport so a suppressed notification never costs a PowerShell
+   * process, and so a delivered toast never also rings the bell. The Windows
+   * fallback re-enters through `ringTaskCompletion`, which carries this answer
+   * instead of asking the focus question again after the awaits. Explicit off or
+   * owner release revokes pending dispatch; an already started host is not recalled.
+   */
+  const taskCompletionAlertsEnabled = (): boolean =>
+    process.stdout.isTTY === true
+    && notificationSettings.condition !== 'off'
+    && !(notificationSettings.condition === 'unfocused' && getTerminalFocused())
+  /**
+   * Announce a finished task: the channel's `onTaskComplete` payload and gate,
+   * with the Windows method resolved first (`auto` picks the toast there, D2).
+   */
+  const announceTaskCompletion = (preview: string | undefined, backendId: string): void => {
+    if (!taskCompletionAlertsEnabled()) return
+    const title = t('task-complete-notification')
+    const message = preview ?? ''
+    if (resolveNotificationMethod(notificationSettings.method, process.platform) !== 'windows') {
+      taskNotifier.notify(title, message)
+      return
+    }
+    void deliverTaskCompletionOnWindows(title, message, backendId, {
+      pluginManager: pluginManagerOf(ctx),
+      canDispatch: () => channelOwnerCurrent(rawChannel) && notificationSettings.condition !== 'off',
+      toast: showWindowsToast,
+      terminal: (fallbackTitle, fallbackMessage) => ringTaskCompletion(taskNotifier, notificationSettings, fallbackTitle, fallbackMessage),
+    })
+  }
   // /restart handoff diagnosis: the replacement process is marked by env and
   // logs its boot progress to ~/.dsh-tui/restart.log (ordinary launches stay
   // silent). First line lands before anything in this function can throw.
@@ -237,21 +493,41 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
   // Validate settings before creating an agent or taking over the terminal.
   const tuiSettingsNs = resolveSettingsNamespace(configOwner, Config) as SettingsNamespace
 
+  // Register before agent creation so its first checkpoint includes web list metadata.
+  attachSessionListMetadata(ctx)
+  // The TUI's own settings layer (~/.dsh-tui/settings.json): the same
+  // document on every kernel and entry. Other namespaces still go
+  // to the host's settings service (absent in the standalone entry).
+  const tuiSettings = createTuiSettingsService({
+    ns: tuiSettingsNs,
+    profile: resolveDshProfileName() ?? runtimeOptions.profile ?? 'dsh-tui',
+    keys: EDITABLE_CONFIG_KEYS as readonly string[],
+    delegate: () => ctx.get('settings') as DelegateSettings | undefined,
+  })
+
+  // The in-process DSH kernel's screen mounts before DSH has composed: what
+  // needs DSH's services runs later, in `attachDsh`.
+  const entrySlot = runtimeOptions.entrySlot
+  const dshInEntry = entrySlot?.dsh === true
+
   // Modern hosts own a declarative registry; old hosts discover directories.
   // A modern bundle failure must not silently fall back to obsolete files.
-  if (!await registerBundledPresets(ctx)) try {
-    for (const result of ensurePackagedPresets()) {
-      if (result.status === 'conflict') {
-        ctx.logger.warn(
-          `dsh-tui: packaged preset "${result.id}" was not installed because an unmanaged preset already uses that id`,
-        )
+  const installPresets = async (presetCtx: Context): Promise<void> => {
+    if (!await registerBundledPresets(presetCtx)) try {
+      for (const result of ensurePackagedPresets()) {
+        if (result.status === 'conflict') {
+          presetCtx.logger.warn(
+            `dsh-tui: packaged preset "${result.id}" was not installed because an unmanaged preset already uses that id`,
+          )
+        }
       }
+    } catch (error) {
+      // A read-only home must not make the whole terminal unusable; the other
+      // official and user presets remain available.
+      presetCtx.logger.warn(`dsh-tui: unable to install packaged presets (${error instanceof Error ? error.message : String(error)})`)
     }
-  } catch (error) {
-    // A read-only home must not make the whole terminal unusable; the other
-    // official and user presets remain available.
-    ctx.logger.warn(`dsh-tui: unable to install packaged presets (${error instanceof Error ? error.message : String(error)})`)
   }
+  if (!dshInEntry) await installPresets(ctx)
 
   // UI language resolution: DSH_TUI_LANG env var wins, then the
   // settings.yaml `dsh-tui.lang` user layer (applied once the settings
@@ -304,6 +580,14 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
     }
   }
 
+  // The questionnaire store every backend's questions park in (a non-DSH
+  // session's `question.request` events too); Chat renders it.
+  const questionStore = new QuestionStore(adapterRuntimeFor(ctx))
+  bindQuestionStore(ctx, questionStore)
+  // One store, one teardown effect on both API lines. The compatibility
+  // adapter binds either registration to this Cordis fiber; this separate
+  // effect rejects asks still parked in the UI during teardown.
+  ctx.effect(() => () => questionStore.rejectAll())
   // DSH user-interaction seam: the model's ask_user_question tool parks on
   // the userQuestions service until a UI answerer responds. Mount the
   // service when the composition doesn't (the official dsh-base
@@ -313,49 +597,56 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
   // seat is registered below; the 0.1.2 line's agent-aware waterfall needs the
   // channel owner and is therefore registered immediately after the channel
   // is created. Optional-service access goes through `ctx.get`, not the
-  // inject proxy.
-  const userQuestions = ctx.get('userQuestions') ?? new UserQuestionService(ctx)
-  ctx.plugin(toolAskUser)
-  // The host-level tool mount above is intentional for the TUI and for user
-  // presets, but the official Minimal preset is a single-tool trajectory (one
-  // persistent shell: bash on POSIX, pwsh on Windows). Filter only that preset
-  // at the final assembly boundary. Reading the session on every assembly also
-  // makes blank-session /preset switches and resumed sessions behave correctly.
-  ctx.on('system-prompt/assemble', async (_assembly, context, next) => {
-    const assembled = await next()
-    const presetId = context.agent === undefined ? undefined : runningPresetOf(context.agent.session)
-    return filterMinimalPresetTools(assembled, presetId)
-  })
-  const questionStore = new QuestionStore(adapterRuntimeFor(ctx))
-  bindQuestionStore(ctx, questionStore)
-  // One store, one teardown effect on both API lines. The compatibility
-  // adapter binds either registration to this Cordis fiber; this separate
-  // effect rejects asks still parked in the UI during teardown.
-  ctx.effect(() => () => questionStore.rejectAll())
-  // `/debug-prompt` snapshots the final provider-neutral request at the
-  // llm/stream boundary, after every prompt and tool contributor has run.
-  registerPromptDebug(ctx)
-  // API selection and registration live behind one adapter boundary. The UI
-  // bootstrap only translates a legacy seat conflict into its visible notice.
-  const questionAnswererRegistration = prepareQuestionAnswerer(ctx, userQuestions, questionStore)
-  const questionSeatDecision = questionAnswererRegistration.kind === 'legacy'
-    ? questionAnswererRegistration.yieldDecision
-    : undefined
-  let questionSeatNotice: string | undefined
-  if (questionSeatDecision?.action === 'alert-unverified') {
-    ctx.logger.error(
-      `dsh-tui: user-questions provider seat is held by a component self-reporting as ${questionSeatDecision.incumbentId} ` +
-        '(identity not host-verified); this TUI will not register its questionnaire and model questions may be answered by it',
-    )
-    questionSeatNotice = t('question-provider-occupied-unverified', { id: questionSeatDecision.incumbentId ?? '' })
-  } else if (questionSeatDecision?.action === 'alert') {
-    const displayId = questionSeatDecision.incumbentId ?? t('question-provider-occupied-unknown')
-    ctx.logger.error(
-      `dsh-tui: user-questions provider seat is held by a non-host component (${displayId}); ` +
-        'this TUI will not register its questionnaire and model questions may be answered by it',
-    )
-    questionSeatNotice = t('question-provider-occupied', { id: displayId })
+  // inject proxy. The in-process DSH kernel mounts these from its dsh-tui row
+  // once DSH has composed: mounting them on the entry's root first would
+  // take the `userQuestions` seat the profile's own row registers.
+  const mountDshQuestionSeams = (dshCtx: Context): {
+    readonly registration: ReturnType<typeof prepareQuestionAnswerer>
+    readonly notice: string | undefined
+  } => {
+    const userQuestions = dshCtx.get('userQuestions') ?? new UserQuestionService(dshCtx)
+    dshCtx.plugin(toolAskUser)
+    // The host-level tool mount above is intentional for the TUI and for user
+    // presets, but the official Minimal preset is a single-tool trajectory (one
+    // persistent shell: bash on POSIX, pwsh on Windows). Filter only that preset
+    // (plus create_worktree for liangshen, presets.ts) at the final assembly
+    // boundary. Reading the session on every assembly also
+    // makes blank-session /preset switches and resumed sessions behave correctly.
+    // Agent Teams is decided at the same boundary: presets keep their legacy
+    // delegation rows, and a request that carries `spawn_teammate` drops
+    // `subagent` / `subagent_fork` (team-mode.ts), so a team bundle switched
+    // at run time reaches the sessions already running.
+    dshCtx.on('system-prompt/assemble', async (_assembly, context, next) => {
+      const assembled = filterTeamReplacedTools(await next())
+      const presetId = context.agent === undefined ? undefined : runningPresetOf(context.agent.session)
+      return filterMinimalPresetTools(assembled, presetId)
+    })
+    // `/debug-prompt` snapshots the final provider-neutral request at the
+    // llm/stream boundary, after every prompt and tool contributor has run.
+    registerPromptDebug(dshCtx)
+    // API selection and registration live behind one adapter boundary. The UI
+    // bootstrap only translates a legacy seat conflict into its visible notice.
+    const registration = prepareQuestionAnswerer(dshCtx, userQuestions, questionStore)
+    const seatDecision = registration.kind === 'legacy' ? registration.yieldDecision : undefined
+    let notice: string | undefined
+    if (seatDecision?.action === 'alert-unverified') {
+      dshCtx.logger.error(
+        `dsh-tui: user-questions provider seat is held by a component self-reporting as ${seatDecision.incumbentId} ` +
+          '(identity not host-verified); this TUI will not register its questionnaire and model questions may be answered by it',
+      )
+      notice = t('question-provider-occupied-unverified', { id: seatDecision.incumbentId ?? '' })
+    } else if (seatDecision?.action === 'alert') {
+      const displayId = seatDecision.incumbentId ?? t('question-provider-occupied-unknown')
+      dshCtx.logger.error(
+        `dsh-tui: user-questions provider seat is held by a non-host component (${displayId}); ` +
+          'this TUI will not register its questionnaire and model questions may be answered by it',
+      )
+      notice = t('question-provider-occupied', { id: displayId })
+    }
+    return { registration, notice }
   }
+  const questionSeams = dshInEntry ? undefined : mountDshQuestionSeams(ctx)
+  let questionSeatNotice: string | undefined = questionSeams?.notice
 
   // Child-process stderr guard (issue #17): MCP servers spawned with an
   // inherited stderr (the MCP SDK's stdio default) write straight to the
@@ -388,22 +679,14 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
     provider: config.provider,
     model: config.model,
   }
-  // Atomic route resolution (issue #67): a complete cordis.yml route wins
-  // whole, else the persisted `/model` choice wins whole, else Harness's
-  // provider-neutral agent-default-model selection. The local DeepSeek pair
-  // remains the final fallback for bare embedders without that service. This
-  // lets optional provider bundles supply the same default to Web and TUI
-  // without patching this front door by name.
-  const configuredDefault = (ctx.get('agentDefaultModel') as {
-    currentSelection?(): { provider?: unknown; model?: unknown }
-  } | undefined)?.currentSelection?.()
-  const harnessDefault = typeof configuredDefault?.provider === 'string'
-    && configuredDefault.provider.length > 0
-    && typeof configuredDefault.model === 'string'
-    && configuredDefault.model.length > 0
-    ? { provider: configuredDefault.provider, model: configuredDefault.model }
-    : undefined
-  const startupRoute = resolveModelRoute(configuredRoute, readModelPref(), harnessDefault)
+  // Atomic route resolution (issue #67): the persisted `/model` choice — the
+  // route the last session ran — wins whole; else a complete cordis.yml route
+  // wins whole as the deployment DEFAULT (it decides the first run, never a
+  // later one); else Harness's provider-neutral agent-default-model
+  // selection. The local DeepSeek pair remains the final fallback for bare
+  // embedders without that service. This lets optional provider bundles supply
+  // the same default to Web and TUI without patching this front door by name.
+  const { startupRoute, deploymentRoute } = startupRoutes(ctx, configuredRoute)
   // Session cwd (issue #96): explicit cordis.yml `cwd` wins; otherwise the
   // git worktree root containing the launch directory (the launch directory
   // itself outside any worktree), so `@` completion and mention expansion
@@ -469,11 +752,23 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
       'The bundle patch is older than the installed dsh-tui package — update the globally installed dsh-tui launcher to match the profile (issue #183).',
     )
   }
+  // Admit third-party activations from their package-root `dsh-plugin.json`.
+  armAdmissionLoader(ctx)
+  // Stage D-1: the backends installed bundles declare join the registry *here*,
+  // before anything below parses a backend choice (`parseBackendChoice` reads the
+  // registry for membership, so an id registered later reads as unknown: dsh plus a
+  // warning). Synchronous on purpose — a bundle's own rows are composed after this
+  // one, so waiting for them would be waiting past the parse. This is the caller
+  // notes 0009's "Wired (W-2)" section was still missing.
+  assembleBackendsFromProfile(ctx)
+  // The in-process DSH kernel mounts before the profile's workspace providers
+  // exist: a provider URI resolves in `attachDsh`, and an unresolvable one
+  // fails the startup session there instead of the mount.
   const initialWorkspace = requestedWorkspace === undefined
     ? undefined
     : await workspaceService.resolve(requestedWorkspace)
-  if (requestedWorkspace !== undefined && initialWorkspace === undefined) {
-    throw new Error(`dsh-tui: unsupported or unavailable workspace target: ${requestedWorkspace}`)
+  if (requestedWorkspace !== undefined && initialWorkspace === undefined && !dshInEntry) {
+    throw new Error(unsupportedWorkspaceTarget(requestedWorkspace))
   }
   const sessionCwd = initialWorkspace?.cwd ?? resolveSessionCwd(config.cwd)
   const meta = { cwd: sessionCwd }
@@ -481,56 +776,287 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
   // `dsh --profile tui` forwards `--resume` verbatim instead, so fall back to
   // the same app-argv snapshot as the initial prompt. Raw process.argv also
   // contains the DSH launcher's own -- and is only a legacy embedder fallback.
-  const cmdline = (ctx as { cmdlineArgs?: { get?: () => readonly string[]; args?: readonly string[] } }).cmdlineArgs
-  const cmdlineArgs = cmdline?.get?.() ?? cmdline?.args
+  const cmdlineArgs = cmdlineArgsOf(ctx)
+  // The raw request, deliberately self-contained: `scripts/verify-startup-argv.mjs`
+  // replays this very statement (picked out of the compiled `apply` by name) to check
+  // the launcher's argv interception end to end, so it has to stay computable from
+  // `config` and `cmdlineArgs` alone. Whether the target may actually be used is
+  // decided further down, once the backend this boot lands on is known.
   const launchSessionId = config.sessionId ?? resumeTargetFromArgv(cmdlineArgs ?? process.argv.slice(2))
-  const { agent, handle, agentPreset, route: createdRoute } = await resolveAgent(
-    ctx,
-    launchSessionId,
-    configuredRoute,
-    startupRoute,
-    meta,
-    config.preset,
-  )
-  try {
-    // Opening a persisted TUI session is an explicit ownership action too.
-    // Older TUI versions only wrote the Session log, so attaching on every
-    // startup repairs those durable-but-ungrouped sessions idempotently.
-    //
-    // This is ALSO how a workspace enters the rail: `resolveByPath(cwd) ??
-    // create(cwd)` mints the durable record for the directory this terminal
-    // was launched in, so the session screen lists every directory a TUI has
-    // ever started in. The ledger is DSH's own workspace store, so the Web UI
-    // reads the same records. There is deliberately no rail-side "add a
-    // workspace" control any more: a terminal's launch directory is the whole
-    // registration story.
-    //
-    // A RESUMED session is accounted where its OWN header cwd lives, never
-    // where this terminal was launched. The launch directory can be an
-    // ANCESTOR of the resumed session's: launching in `~/projects` and
-    // resuming a session recorded in `~/projects/app` accounts the same
-    // session in both workspaces, and the next boot dies inside
-    // `validateStoredState` ("session ... is accounted by both workspace
-    // ..."), which leaves `workspaceRegistry` unactivated and the whole TUI
-    // pending forever. Ownership must therefore agree with the `cwd:` handed
-    // to `createChannel` below, which already prefers the persisted header.
-    // Fresh sessions record `meta.cwd` at creation, so the launch directory
-    // still registers through them.
-    const ownershipCwd = agent.session.header.cwd ?? meta.cwd
-    const attached = await attachSessionToWorkspace(ctx, ownershipCwd, agent.session.id)
-    if (!attached) {
+  // The session's backend (Config `backend`, `dsh-tui --backend`). A non-DSH
+  // backend opens its own session here and skips everything DSH-specific
+  // below (preset composition, route validation, workspace ownership, the
+  // approval answerer); the DSH path is unchanged.
+  // The `backend` row reads DSH_TUI_BACKEND (`dsh-tui --backend`), but a
+  // launcher whose bundle patch predates that row (the issue #183 copy skew)
+  // never passes it — so the variable is also read here, below the config.
+  // Priority: an explicit Config row or env var always wins; then the
+  // launchpad kernel selector's memory (kernel.json — written only by the
+  // selector, never by boot); else dsh. An INVALID env value still means dsh
+  // (the warning below says exactly that), never the memory.
+  const rawBackend = process.env.DSH_TUI_BACKEND
+  // A kernel switch (restartTui's backend option) and the launcher's crash
+  // retry set this so the boot lands on the chosen kernel even when a Config
+  // row pins the other one. Deleted right away so no child inherits it; an
+  // invalid value is ignored.
+  const handoffBackendRaw = process.env[KERNEL_SWITCH_HANDOFF_ENV]
+  if (handoffBackendRaw !== undefined) delete process.env[KERNEL_SWITCH_HANDOFF_ENV]
+  const handoffBackend = parseBackendChoice(handoffBackendRaw)
+  // Fullscreen kernel switch: the old process spawned this one with an ACK
+  // pipe on fd 3 and the alternate screen still open (see handoffAck.ts).
+  const handoffAck = beginHandoffAck()
+  if (handoffAck !== undefined) {
+    logRestartEvent('handoff/boot: ack armed', { attemptId: handoffAttemptId() ?? '' })
+  }
+  // Every source is parsed in two stages (P0 D1): syntax first, then the
+  // registry. An id that is syntactically valid but not installed must behave
+  // exactly like an unknown value did before the set was open — dsh plus a
+  // warning, never a crashed boot. `envKnown` carries that into the resolver for
+  // the one source that arrives raw; the other three are parsed above/beside.
+  const configuredBackend = parseBackendChoice(config.backend)
+  const rememberedBackend = readKernelPrefs().backend
+  const entryKernel = runtimeOptions.entryKernel
+  const backendChoice: KernelBackendId = entryKernel ?? (dshInEntry ? DSH_BACKEND_ID : resolveRememberedBackend({
+    ...(handoffBackend === undefined ? {} : { handoff: handoffBackend }),
+    configured: configuredBackend,
+    envRaw: rawBackend,
+    envKnown: isRegisteredBackend,
+    memory: isRegisteredBackend(rememberedBackend) ? rememberedBackend : undefined,
+  }))
+  const rawBackendGiven = rawBackend === undefined ? '' : rawBackend.trim()
+  // The launcher marks a *derived* resume target with the backend it read it from
+  // (RESUME_BACKEND_ENV); a target the user placed carries no mark. Read and
+  // deleted right away, like the kernel handoff above, so no child inherits it.
+  // The mark is parsed with the syntax gate alone: the source is typically a
+  // backend that is NOT registered here, which is the whole reason to check.
+  // A marked target belongs to that one backend, and this boot may have landed
+  // elsewhere — an uninstalled plugin id falls back to dsh (P0 D1), an unset
+  // DSH_TUI_BACKEND follows the remembered kernel instead. Handing it over either
+  // fails or resumes an unrelated session that happens to share the id, so it is
+  // revoked rather than carried across (PR #1380 review R2) — and a revocation is
+  // a refusal, not a cold start (roadmap §6 item 11, B-2a).
+  const resumeBackendRaw = process.env[RESUME_BACKEND_ENV]
+  if (resumeBackendRaw !== undefined) delete process.env[RESUME_BACKEND_ENV]
+  // A safe-mode retry carries a licence to survive a revoked target (the launcher
+  // sets RESUME_RETRY_ENV; see resolveResumeTarget). Read and deleted right away,
+  // like the mark above: no child may inherit it.
+  const resumeRetry = process.env[RESUME_RETRY_ENV] !== undefined
+  delete process.env[RESUME_RETRY_ENV]
+  const resumeTarget = resolveResumeTarget({
+    sessionId: launchSessionId,
+    sourceBackend: parseBackendId(resumeBackendRaw),
+    backendChoice,
+    retry: resumeRetry,
+  })
+  const effectiveSessionId = resumeTarget.kind === 'usable' ? resumeTarget.sessionId : undefined
+  // The non-DSH path below opens `backendChoice`'s own session — a revoked target
+  // must not reach it either.
+  const configuredSessionId = resumeTarget.kind === 'revoked' ? undefined : config.sessionId
+  // Safe-mode retries replay the original argv. Revocation must also remove its
+  // resume flags, or either startup path can reopen the replacement backend's
+  // own last session after promising a cold start. Prompt parsing keeps raw argv.
+  const startupArgv = resumeTarget.kind === 'revoked'
+    ? stripResumeArgs(cmdlineArgs ?? process.argv.slice(2))
+    : cmdlineArgs ?? process.argv.slice(2)
+  if (resumeTarget.kind === 'revoked') {
+    // Fail closed (roadmap §6 item 11): the target belongs to another backend, so
+    // this boot neither carries it over nor quietly starts a session nobody asked
+    // for. A fatal refusal is thrown into the startup funnel, which reports it on
+    // stderr and exits non-zero after restoring the terminal; the only tolerated
+    // case is the safe-mode retry, whose target comes from last-run.json and whose
+    // failure would close the user's last way back (RESUME_RETRY_ENV).
+    // The advice must be executable (PR #1449 review R2): when the source backend
+    // is not registered here, `--backend <from> --resume` would hit this same
+    // refusal, so that branch says the backend is unavailable instead. The other
+    // branch names the id (`kernelId`), never the display label — `--backend`
+    // takes an id.
+    const refusalKey = !resumeTarget.fatal
+      ? 'resume-target-revoked-retry'
+      : isRegisteredBackend(resumeTarget.from) ? 'resume-target-revoked' : 'resume-target-revoked-uninstalled'
+    const refusal = t(refusalKey, {
+      from: resumeTarget.from,
+      kernel: backendLabel(backendChoice),
+      kernelId: backendChoice,
+    })
+    if (resumeTarget.fatal) throw new Error(refusal)
+    ctx.logger.warn(refusal)
+  }
+  // Config and handoff outrank env: an ignored env value cannot invalidate the
+  // selected backend's resume target or claim that this boot fell back to DSH.
+  if (handoffBackend === undefined && configuredBackend === undefined
+    && rawBackendGiven !== '' && !isRegisteredBackend(rawBackendGiven.toLowerCase())) {
+    // Two cases, two sentences: a typo is not an uninstalled plugin (P0 D1).
+    const installed = listBackends().map(entry => entry.manifest.id).join(', ')
+    // The plain fallback (no resume request) keeps P0 D1's shape: dsh plus a
+    // warning, exit code 0. With a resume target in hand it must not: dsh would
+    // be asked to open an id that belongs to the backend the user named, which
+    // either fails or resumes a session of another backend (roadmap §6 item 11).
+    // Nothing is resumed, nothing is created — the boot stops here instead.
+    if (effectiveSessionId !== undefined) {
+      throw new Error(t('resume-backend-unavailable', {
+        backend: rawBackendGiven,
+        session: effectiveSessionId,
+        installed,
+      }))
+    }
+    ctx.logger.warn(isBackendIdSyntax(rawBackendGiven)
+      ? `dsh-tui: DSH_TUI_BACKEND="${rawBackend}" names no installed backend (registered: ${installed}); starting on dsh`
+      : `dsh-tui: DSH_TUI_BACKEND="${rawBackend}" is not a valid backend id (lowercase letters, digits and dashes); starting on dsh`)
+  }
+  /**
+   * Whether a Config row or DSH_TUI_BACKEND overrides the selector's
+   * remembered kernel. The selector then says so: a switch still restarts
+   * onto the chosen kernel, but the next plain launch follows the override.
+   * Only a registered Config choice pins: the schema keeps syntactically
+   * valid but uninstalled ids too, which must not prevent a memory fallback.
+   */
+  const backendPinned = configuredBackend !== undefined
+    || (rawBackend !== undefined && rawBackend.trim() !== '')
+  // A remembered kernel whose backend cannot open (its SDK uninstalled, its
+  // session store unreadable, …) must not kill the boot: without an explicit
+  // flag or resume target the TUI falls back to DSH and says so — the wizard
+  // in /kernel is then one Enter away from installing what is missing.
+  // Explicit choices (flag/Config/handoff) and explicit resume targets keep
+  // the hard failure: silently swapping what the user named would be worse.
+  let backendStart: Awaited<ReturnType<typeof openBackendStartup>> | undefined
+  /** The startup session still opening (`deferBackendOpen`); the channel adopts it. */
+  let backendStartup: Promise<{ readonly session: AgentSession; readonly history: readonly AgentEvent[] }> | undefined
+  /** Once set, the channel's binding owns the session. */
+  let backendStartupAdopted = false
+  let backendFallbackNotice: string | undefined
+  const deferBackendOpen = runtimeOptions.deferBackendOpen === true
+  if (deferBackendOpen && backendChoice === 'dsh' && !dshInEntry) {
+    throw new Error('dsh-tui: the standalone entry cannot host the DSH kernel; start it through the profile launcher')
+  }
+  /** The in-process DSH kernel's startup session: settled by `attachDsh`
+   *  (the profile's dsh-tui row) or by a failed composition. */
+  let settleDshStartup: { resolve(startup: ChannelStartup): void; reject(error: unknown): void } | undefined
+  let dshStartupSettled = false
+  const dshStartup = dshInEntry
+    ? new Promise<ChannelStartup>((resolve, reject) => {
+      settleDshStartup = {
+        resolve: startup => { dshStartupSettled = true; resolve(startup) },
+        reject: error => { dshStartupSettled = true; reject(error) },
+      }
+    })
+    : undefined
+  // A boot that fails before the channel holds the startup must not leak an
+  // unhandled rejection.
+  dshStartup?.catch(() => undefined)
+  if (backendChoice !== 'dsh') {
+    try {
+      const startupInput = {
+        cwd: sessionCwd,
+        stderr: (line: string) => {
+          logForDebugging(`[${backendChoice}-stderr] ${line}`)
+          stderrReporter.push(line)
+        },
+        ...(configuredSessionId === undefined ? {} : { configuredSessionId }),
+        argv: startupArgv,
+      }
+      // One load per launch, shared by the deferred path (the entry mounts
+      // between `prepare` and `start`) and the eager one.
+      const backendModule = await loadBackend(backendChoice)
+      if (deferBackendOpen) {
+        const prepared = await prepareBackendStartup(ctx, backendModule, startupInput)
+        const startup = prepared.start().then(opened => ({ session: opened.session, history: opened.initialHistory }))
+        backendStartup = startup
+        // As for dshStartup above; the effect closes an unadopted session.
+        startup.catch(() => undefined)
+        ctx.effect(() => () => {
+          if (backendStartupAdopted) return
+          void startup.then(opened => opened.session.dispose(), () => undefined).catch(() => undefined)
+        }, 'dsh-tui deferred backend startup')
+        backendStart = { ...prepared, session: createStartingSession(prepared.backendId, sessionCwd), initialHistory: [] }
+      } else {
+        backendStart = await openBackendStartup(ctx, backendModule, startupInput)
+      }
+    } catch (error) {
+      if (deferBackendOpen || backendPinned || handoffBackend !== undefined || effectiveSessionId !== undefined) throw error
+      const reason = error instanceof Error ? error.message : String(error)
+      logForDebugging(`dsh-tui: remembered backend "${backendChoice}" failed to open (${reason}); falling back to dsh`)
+      backendFallbackNotice = t('kernel-memory-fallback', { name: backendLabel(backendChoice), reason })
+    }
+  }
+  // Resolve a surviving bare request on the backend that actually opened.
+  // This also covers a remembered backend whose startup fell back to DSH.
+  const bootSessionId = backendStart === undefined
+    ? effectiveSessionId ?? resumeTargetFromArgv(startupArgv)
+    : backendStart.resumedSessionId
+  // The backend session (and its child process) belongs to this fiber until the
+  // channel adopts it: a boot that throws before then disposes the fiber's
+  // effects, and this one stops the child instead of leaking it. Dispose is
+  // idempotent, so the channel's own release later is unaffected.
+  if (backendStart !== undefined) {
+    ctx.effect(() => () => {
+      void backendStart.session.dispose().catch((error: unknown) => {
+        logForDebugging(`dsh-tui: backend session dispose failed (${error instanceof Error ? error.message : String(error)})`)
+      })
+    }, 'dsh-tui backend startup session')
+  }
+  // A non-DSH session's permission prompts park in the shared store the
+  // approval panel renders; its questions share the DSH questionnaire store.
+  // Teardown withdraws whatever is still parked.
+  const backendPermissions = backendStart === undefined ? undefined : new PermissionStore()
+  if (backendPermissions !== undefined) ctx.effect(() => () => backendPermissions.settleAll())
+  const resolved = backendStart !== undefined || dshInEntry
+    ? { agent: undefined, handle: undefined, agentPreset: undefined, route: undefined }
+    : await resolveAgent(
+      ctx,
+      bootSessionId,
+      configuredRoute,
+      startupRoute,
+      deploymentRoute,
+      meta,
+      config.preset,
+    )
+  let agent: Agent | undefined = resolved.agent
+  const { handle, agentPreset, route: createdRoute } = resolved
+  // Workspace ownership is a DSH session-store fact (skipped off DSH).
+  // `ctx` here is the context that owns the session: this plugin's, or the
+  // dsh-tui row's for the in-process DSH kernel (`attachDsh`).
+  const attachWorkspaceOwnership = async (ctx: Context, agent: Agent): Promise<void> => {
+    try {
+      // Opening a persisted TUI session is an explicit ownership action too.
+      // Older TUI versions only wrote the Session log, so attaching on every
+      // startup repairs those durable-but-ungrouped sessions idempotently.
+      //
+      // This is ALSO how a workspace enters the rail: `resolveByPath(cwd) ??
+      // create(cwd)` mints the durable record for the directory this terminal
+      // was launched in, so the session screen lists every directory a TUI has
+      // ever started in. The ledger is DSH's own workspace store, so the Web UI
+      // reads the same records. There is deliberately no rail-side "add a
+      // workspace" control any more: a terminal's launch directory is the whole
+      // registration story.
+      //
+      // A RESUMED session is accounted where its OWN header cwd lives, never
+      // where this terminal was launched. The launch directory can be an
+      // ANCESTOR of the resumed session's: launching in `~/projects` and
+      // resuming a session recorded in `~/projects/app` accounts the same
+      // session in both workspaces, and the next boot dies inside
+      // `validateStoredState` ("session ... is accounted by both workspace
+      // ..."), which leaves `workspaceRegistry` unactivated and the whole TUI
+      // pending forever. Ownership must therefore agree with the `cwd:` handed
+      // to `createChannel` below, which already prefers the persisted header.
+      // Fresh sessions record `meta.cwd` at creation, so the launch directory
+      // still registers through them.
+      const ownershipCwd = agent.session.header.cwd ?? meta.cwd
+      const attached = await attachSessionToWorkspace(ctx, ownershipCwd, agent.session.id)
+      if (!attached) {
+        ctx.logger.warn(
+          `dsh-tui: session "${agent.session.id}" has no workspace ownership because workspaceRegistry is not mounted`,
+        )
+      }
+    } catch (error) {
+      // The Session is already published and durable, matching Web's partial
+      // failure contract. Keep the TUI usable but make the missing ownership
+      // loud instead of silently leaving the conversation Ungrouped.
       ctx.logger.warn(
-        `dsh-tui: session "${agent.session.id}" has no workspace ownership because workspaceRegistry is not mounted`,
+        `dsh-tui: session "${agent.session.id}" workspace attachment failed: ${error instanceof Error ? error.message : String(error)}`,
       )
     }
-  } catch (error) {
-    // The Session is already published and durable, matching Web's partial
-    // failure contract. Keep the TUI usable but make the missing ownership
-    // loud instead of silently leaving the conversation Ungrouped.
-    ctx.logger.warn(
-      `dsh-tui: session "${agent.session.id}" workspace attachment failed: ${error instanceof Error ? error.message : String(error)}`,
-    )
   }
+  if (agent !== undefined) await attachWorkspaceOwnership(ctx, agent)
 
   // Status-line route: the exact route the agent runs with — on create the
   // validated startup resolution, on resume the route the target session's
@@ -552,39 +1078,102 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
   // context-low warning. Created unconditionally (unlike the activity store,
   // there is no config gate: hiding the bar must not make the warning or the
   // footer read a stale sample). A composition without the meter leaves it
-  // empty and the channel falls back to the last-request sample.
+  // empty and the channel falls back to the last-request sample — as does a
+  // non-DSH session, whose id the DSH meter never projects.
   const contextOccupancyStore = createContextOccupancyStore(ctx)
-  const rawChannel = createChannel(ctx, agent, {
+  // Read side of the Agent Teams `agentTeam` projection, for the same TDZ
+  // reason; empty unless the profile mounts the team service.
+  const teamRosterStore = createTeamRosterStore(ctx)
+  // The channel holds a backend session; this DSH one owns the resolved
+  // handle (disposed by the binding when a later adoption replaces it).
+  let startupSession: AgentSession
+  if (backendStart !== undefined) startupSession = backendStart.session
+  else if (agent !== undefined) startupSession = createDshSession(ctx, { agent, handle })
+  else if (dshInEntry) startupSession = createStartingSession('dsh', sessionCwd)
+  else throw new Error('dsh-tui: no startup session was opened')
+  // The in-process DSH kernel's route and Config pins from its dsh-tui row,
+  // set in `attachDsh` before adoption; the getters below serve them.
+  const rowFacts: {
+    route?: { readonly provider: string; readonly model: string }
+    config?: Pick<Config, 'provider' | 'model' | 'preset' | 'effort' | 'modes' | 'upstreamRetry'>
+  } = {}
+  /**
+   * The in-process DSH kernel's `/new` while no DSH session was adopted (its
+   * startup open failed). Installed by `attachDsh`.
+   */
+  let openDshSession: ((cwd: string) => Promise<AgentSession>) | undefined
+  let compositionFailed = false
+  /** How the in-process DSH kernel's composition ended: a failing startup open
+   *  waits for it, so a failed composition (the root cause) is reported. */
+  let settleComposition: (ok: boolean) => void = () => undefined
+  const compositionSettled = new Promise<boolean>(resolve => { settleComposition = resolve })
+  const rawChannel = createChannel(ctx, startupSession, {
     // The namespace this boot actually registered the settings section under
     // (the Config owner's Loader id; custom ids are supported). Chat and the
     // channel's own settings reads look the section up by it.
     settingsNs: tuiSettingsNs,
-    model: displayRoute.model,
+    onTaskComplete: preview => {
+      if (!shadow) announceTaskCompletion(preview, rawChannel.sessionRef.backendId)
+    },
+    settingsService: tuiSettings,
+    // The backend reports its model with its first turn (`system/init`);
+    // until then the status line names the backend.
+    get model() { return rowFacts.route?.model ?? (backendStart !== undefined ? backendStart.label : displayRoute.model) },
+    ...(backendStart === undefined || backendPermissions === undefined ? {} : {
+      backendLabel: backendStart.label,
+      openSession: backendStart.open,
+      interaction: { permissions: backendPermissions, questions: questionStore },
+      // The session browser, /resume, /fork and rewind.
+      sessionCatalog: backendStart.catalog,
+      sessionPrefs: backendStart.sessionPrefs,
+      initialHistory: backendStart.initialHistory,
+      resumeCommand: backendStart.resumeCommand,
+      ...(backendStartup === undefined ? {} : { startup: backendStartup }),
+    }),
+    // The in-process DSH kernel: a DSH placeholder until the row's session.
+    ...(dshStartup === undefined ? {} : {
+      backendLabel: backendLabel('dsh'),
+      startup: dshStartup,
+      openSession: async target => {
+        if (target.kind !== 'create' || openDshSession === undefined) throw new Error(t('new-session-unavailable'))
+        return await openDshSession(target.cwd)
+      },
+    }),
     // The activity projection only pushes on change; read the current value as
     // soon as this session binds so a resumed or reattached session renders its
     // line immediately instead of waiting for the next event.
     seedActivity: session => activityStore.seed(session),
+    // A backend-provided working line lands
+    // in the SAME store the projection feed fills, so the Chat/StatusLine
+    // read side stays one seam for every backend.
+    publishActivity: (sessionId, view) => activityStore.update(sessionId, view),
+    clearActivity: sessionId => activityStore.clear(sessionId),
     // Same reason as the activity line: the occupancy projection only pushes on
     // change, so a resumed session reads one baseline at bind time.
     contextPressure: contextOccupancyStore,
     seedContextOccupancy: session => contextOccupancyStore.seed(session),
+    team: teamRosterStore,
+    seedTeam: session => teamRosterStore.seed(session),
     // A RESUMED session keeps its persisted header cwd (issue #96 review):
     // pre-upgrade sessions recorded the launch directory, and re-resolving
     // from the current launch directory would split @ expansion / file
     // completion (state.cwd) from the agent's own workspace record. Fresh
     // sessions record sessionCwd at creation, so both agree there.
-    cwd: agent.session.header.cwd ?? sessionCwd,
-    provider: displayRoute.provider,
+    // A resumed backend session runs where it was recorded.
+    cwd: backendStart?.session.cwd ?? agent?.session.header.cwd ?? sessionCwd,
+    get provider() { return rowFacts.route?.provider ?? (backendStart !== undefined ? backendStart.backendId : displayRoute.provider) },
     // Raw cordis.yml route (undefined when unset): the channel's
     // new-session path re-resolves prefs against these, and resume passes
     // only explicit values so the target session's own record wins.
-    configuredModel: config.model,
-    configuredProvider: config.provider,
+    get configuredModel() { return rowFacts.config === undefined ? config.model : rowFacts.config.model },
+    get configuredProvider() { return rowFacts.config === undefined ? config.provider : rowFacts.config.provider },
     // Raw cordis.yml `lang` / `activityFrames`: /reload must not override a
     // static deployment choice with the persisted preference.
     configuredLang: config.lang,
     configuredActivityFrames: config.activityFrames,
-    effort: config.effort,
+    // Read when the DSH extensions attach (the adoption), after the row's
+    // facts are in; the display fields below are fixed at the first frame.
+    get effort() { return rowFacts.config === undefined ? config.effort : rowFacts.config.effort },
     activity: config.activity,
     // Explicit cordis.yml value (static deployment choice) wins over the
     // runtime `/activity` preference, which wins over the default.
@@ -593,20 +1182,24 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
     contextBar: config.contextBar,
     // Same precedence for the agent preset: cordis.yml `preset` over the
     // persisted `/preset` choice; undefined adopts the roster default.
-    configuredPreset: config.preset,
+    get configuredPreset() { return rowFacts.config === undefined ? config.preset : rowFacts.config.preset },
     agentPreset,
     // Shift+Tab session-mode cycle (undefined → the built-in default/
     // plan/full cycle in sessionModes.ts).
-    modes: config.modes,
+    get modes() { return rowFacts.config === undefined ? config.modes : rowFacts.config.modes },
     // Edit/Write diff presentation (schema default 'auto'); the /settings
     // screen edits this key live through the dsh-tui namespace.
     diffLayout: config.diffLayout,
+    // Upstream auto-retry seeding (cordis.yml upstreamRetry, default on):
+    // only an explicit opt-out disables it.
+    get upstreamRetry() { return rowFacts.config === undefined ? config.upstreamRetry : rowFacts.config.upstreamRetry },
     thinkingFold: config.thinkingFold,
     jobGroupFold: config.jobGroupFold,
     toolBackground: config.toolBackground,
     scrollGutter: config.scrollGutter,
     pageMargin: config.pageMargin,
     foldTerminalCommand: config.foldTerminalCommand,
+    turnUsageRow: config.turnUsageRow,
     promptSessionLabel: config.promptSessionLabel,
     expandEditor: config.expandEditor,
     smoothStreaming: config.smoothStreaming,
@@ -617,8 +1210,11 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
     // 开屏大字字体：cordis.yml 这一层的值（未设置时 undefined → 通道归一化成
     // `daily`）；/settings 的改动由 applySplashFont 实时接上。
     splashFont: config.splashFont,
-    handle,
+    // 品牌外观（`dsh-tui.brand`）：`auto`（未设置）跟随后端自动切，/settings
+    // 的改动由 applyBrand 实时接上（branding.ts 负责解析）。
+    brand: config.brand,
   })
+  backendStartupAdopted = backendStartup !== undefined
   // Register the live Channel for the adapter Kernel. The Channel driver
   // resolves it lazily from the composition root, so this can be called after
   // the plugin-host Kernel started without requiring a re-mount.
@@ -627,17 +1223,54 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
   // child activation context.
   const unregisterTuiChannel = registerTuiChannel(compositionRoot(ctx), rawChannel)
   ctx.effect(() => () => { unregisterTuiChannel() })
-  const pluginHost = ctx.get('tuiPluginHost')
   const adapterRuntime = adapterRuntimeFor(ctx)
-  const uiMount = mountChannelUi(ctx, rawChannel, pluginHost, adapterRuntime.mode)
+  // Looked up per probe: the plugin-host row can compose after the mount.
+  const uiMount = mountChannelUi(ctx, rawChannel, ctx.get('tuiPluginHost'), adapterRuntime.mode, () => ctx.get('tuiPluginHost'))
   const channel = uiMount.channel
   bindChannelCommands(rawChannel, channel)
+  // last-run.json for the launcher's crash retry (see writeLastRunRecord):
+  // written once here, refreshed by the exit funnel with what is resumable
+  // at that point. The kernel-switch branch skips the refresh because the
+  // replacement writes its own record when it boots.
+  const bootAttemptId = `${process.pid.toString(36)}-${Date.now().toString(36)}`
+  /** None before DSH has composed (the in-process DSH kernel) or off DSH. */
+  const liveDshAgent = (): Agent | undefined => dshAgentOn(ctx, channel.agentId)
+  const refreshLastRunRecord = (): void => {
+    // An observational composition (replay/embedding) is not "the instance the
+    // user ran last" — it must not overwrite the interactive record.
+    if (adapterRuntime.mode === 'passive-shadow' || adapterRuntime.mode === 'replay-shadow') return
+    const resumable = backendStart !== undefined
+      ? backendStart.persisted(channel.agentId, channel.rows)
+      : isExitResumable({
+        pendingCount: channel.pending.length,
+        liveAgent: liveDshAgent(),
+        startupAgent: agent,
+      })
+    writeLastRunRecord({
+      backendId: backendChoice,
+      sessionId: resumable ? channel.agentId : '',
+      cwd: sessionCwd,
+      attemptId: bootAttemptId,
+      pid: process.pid,
+    })
+  }
+  refreshLastRunRecord()
   const shadow = adapterRuntime.mode === 'passive-shadow' || adapterRuntime.mode === 'replay-shadow'
   // Bootstrap notices/prompts are deliberately dropped in observational mode;
   // interactive commands retain rejection semantics through the UI capability.
   const notifyChannel: typeof channel.notify = (text, options) => {
     if (shadow) return () => undefined
     return channel.notify(text, options)
+  }
+  // The remembered-kernel fallback notice (set during backend startup above)
+  // lands once the channel can actually show it.
+  if (backendFallbackNotice !== undefined) notifyChannel(backendFallbackNotice, { color: 'warning' })
+  // The entry could not use the installed dsh and fell back (this process,
+  // or the `dsh --profile` it handed the launch to): say why, once.
+  const hostNotice = process.env[HOST_NOTICE_ENV]
+  delete process.env[HOST_NOTICE_ENV]
+  if (hostNotice !== undefined && hostNotice !== '') {
+    notifyChannel(t('host-dsh-unavailable', { reason: hostNotice }), { color: 'warning', timeoutMs: 10000 })
   }
   const submitChannel: typeof channel.submit = text => {
     if (!shadow) channel.submit(text)
@@ -657,9 +1290,14 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
   applySidePanelSplitEnabled(config.sidePanel?.splitEnabled)
   applySidePanelOpen(config.sidePanel?.open)
   applySidePanelRatio(config.sidePanel?.ratio)
+  // The stored value only: `*` (the default) lets the registry supply the
+  // plugin panels, so no registration-time merge is needed (issue #1662).
   applySidePanelPanels(config.sidePanel?.panels)
   applyCompanionSkin(config.companion?.skin)
+  applyBtwContextTurns(config.btw?.contextTurns)
+  applyBtwContextBudget(config.btw?.contextBudget)
   applyMermaidDiagrams(config.mermaidDiagrams)
+  applyCodeFrameStyle(config.codeFrameStyle)
   applyMathRendering(resolveMathRendering({}, config))
   applyMathImageScale(config.mathImageScale ?? 'auto')
   applyMathImageBacking(config.mathImageBacking ?? 'transparent')
@@ -669,14 +1307,16 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
   // Without the extensions row (tuiToast absent) plugin toasts are dropped
   // by the runtime itself — same soft-degrade contract as the other seams.
   // Delivery uses the same owner-bound UI capability as all renderer actions.
-  const toastStore = getHostToastStore(ctx.get('tuiToast') as TuiToastRuntime | undefined)
-  toastStore?.setSink(delivery => {
-    notifyChannel(delivery.text, { color: delivery.color, timeoutMs: delivery.timeoutMs })
-  })
-  if (questionAnswererRegistration.kind === 'waterfall') {
+  const bindToastSink = (): void => {
+    getHostToastStore(ctx.get('tuiToast') as TuiToastRuntime | undefined)?.setSink(delivery => {
+      notifyChannel(delivery.text, { color: delivery.color, timeoutMs: delivery.timeoutMs })
+    })
+  }
+  bindToastSink()
+  if (questionSeams?.registration.kind === 'waterfall') {
     // Ownership follows the mutable channel; registration cleanup belongs to
     // this Cordis fiber.
-    questionAnswererRegistration.register(channel)
+    questionSeams.registration.register(channel)
   }
   // Fullscreen layout decision: the settings user layer (edited through the
   // /settings screen) overrides cordis.yml when set. The settings injection
@@ -687,6 +1327,11 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
   // (swapping layouts requires re-mounting the whole tree).
   let bootedFullscreen = config.fullscreen === true
   let bootedTerminalImages = lastBootedTerminalImages ?? config.terminalImages ?? true
+  // The launchpad boot decision (settings `launchpad`): same
+  // restart-to-apply pattern as fullscreen — resolved before the tree mounts
+  // from the settings user layer over cordis.yml; a mid-session edit is for
+  // the next boot, the running session keeps what it booted with.
+  let bootedLaunchpad = config.launchpad !== false
   let rendererSettingsFrozen = false
   const terminalImagesDisabledByEnv = isEnvTruthy(process.env.DSH_TUI_DISABLE_TERMINAL_IMAGES)
   // The settings service may come up AFTER this plugin's apply: the cordis
@@ -701,10 +1346,10 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
     resolveSettingsReady = () => resolve()
     setTimeout(resolve, 300)
   })
-  // Old hosts register a settings.yaml scope. 0.1.7 projects the plugin's
-  // volatile Config fields instead; both paths apply edits without remounting.
-  ctx.inject(['settings'], (settingsCtx) => {
-    // Loader targets the Config owner's fiber, not the injected child fiber.
+  // This namespace uses the TUI's own settings.json service on every host.
+  // Its registered scope is a sparse user layer: clearing a key inherits
+  // the deployment config. File-backed settings apply before the first mount.
+  ;((settingsCtx: { settings: typeof tuiSettings; effect: Context['effect'] }) => {
     const scope = createSettingsScope<SettingsValue>(configOwner, settingsCtx.settings,
       tuiSettingsNs,
       Schema.object({
@@ -727,6 +1372,9 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
         // `?? config.foldTerminalCommand ?? false` already supplies the
         // default and keeps cordis.yml decisive.
         foldTerminalCommand: Schema.boolean(),
+        // Same no-default rule as foldTerminalCommand: applyDisplay resolves
+        // `?? config.turnUsageRow ?? false` so cordis.yml stays decisive.
+        turnUsageRow: Schema.boolean(),
         promptSessionLabel: Schema.boolean().default(false),
         // No schema default (same rule as foldTerminalCommand): applyDisplay
         // resolves `?? config.expandEditor ?? true` so cordis.yml stays
@@ -734,8 +1382,14 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
         expandEditor: Schema.boolean(),
         // Same no-default rule: applyDisplay resolves `?? config.smoothStreaming ?? true`.
         smoothStreaming: Schema.boolean(),
+        taskNotifications: Schema.union(['off', 'unfocused', 'always']),
+        // Must mirror Config's union (`src/dsh-adapter/index.ts`): a method
+        // missing here is rejected by /settings and never reaches the runtime.
+        notificationMethod: Schema.union(['auto', 'osc9', 'bel', 'windows']),
         // Same no-default rule: applyDisplay resolves `?? config.mermaidDiagrams ?? true`.
         mermaidDiagrams: Schema.boolean(),
+        // Code-frame shape; unset keeps the light rail frame.
+        codeFrameStyle: Schema.union(['light', 'full']),
         // Same no-default rule: resolveMathRendering falls back to cordis.yml.
         mathRendering: Schema.union(['auto', 'image', 'unicode', 'source']),
         // Display-formula image size; unset keeps the base (text) scale.
@@ -769,6 +1423,8 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
           activity: Schema.boolean().default(DEFAULT_STATUS_BAR.activity),
           trajectory: Schema.boolean().default(DEFAULT_STATUS_BAR.trajectory),
           shortcutHint: Schema.boolean().default(DEFAULT_STATUS_BAR.shortcutHint),
+          pluginFields: Schema.boolean().default(DEFAULT_STATUS_BAR.pluginFields),
+          pluginFieldsOrder: Schema.string().default(DEFAULT_STATUS_BAR.pluginFieldsOrder),
         }).default({ ...DEFAULT_STATUS_BAR }),
         // Side-panel preferences. No schema defaults on purpose (same rule as
         // foldTerminalCommand/expandEditor above): a default here would come
@@ -786,6 +1442,13 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
         companion: Schema.object({
           skin: Schema.string(),
         }),
+        // btw thread-context budgets (settings `btw.*`): no schema defaults
+        // (same rule as sidePanel above) — the apply* stores normalize an
+        // unset value to 4 turns / 24k chars.
+        btw: Schema.object({
+          contextTurns: Schema.number(),
+          contextBudget: Schema.number(),
+        }),
         // Header pixel whale art; on unless settings.yaml says otherwise.
         whale: Schema.boolean().default(true),
         // Idle whale behaviors after the intro settles; on by default —
@@ -802,6 +1465,9 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
         // (undefined → daily), so cordis.yml stays decisive and junk lands on
         // daily.
         splashFont: Schema.string(),
+        // 品牌外观：与 splashFont 同规则——用户层不设默认，cordis.yml 保持
+        // 决定权；applyBrand 归一化（undefined → auto）。
+        brand: Schema.string(),
         // Minimal UI (极简界面, settings key `minimal` — never renamed): strips
         // the header splash, emoji glyphs, and decorative colors; code highlight
         // and tool colors stay. Unrelated to the kernel agent preset `minimal`.
@@ -813,6 +1479,10 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
         // Same no-default rule: unset keeps cordis.yml's `fullscreen`
         // decisive; set overrides it from the next boot on.
         fullscreen: Schema.boolean(),
+        // Same no-default rule as fullscreen: the launchpad boot gate reads
+        // `value.launchpad ?? config.launchpad ?? true`, so cordis.yml stays
+        // decisive while the user layer is unset.
+        launchpad: Schema.boolean(),
         // Unset inherits cordis.yml; a saved choice takes effect after restart.
         terminalImages: Schema.boolean(),
         // Built-in action-shortcut overrides, one optional combo string per
@@ -836,8 +1506,12 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
       /** Raw user-layer value: junk is normalized at the apply site (the
        *  settings schema is a plain string, see applySplashFont). */
       splashFont?: string
+      /** Raw user-layer value: junk is normalized at the apply site (the
+       *  settings schema is a plain string, see applyBrand). */
+      brand?: string
       minimal?: boolean
       fullscreen?: boolean
+      launchpad?: boolean
       terminalImages?: boolean
       thinkingFold?: 'preview' | 'full'
       jobGroupFold?: 'auto' | 'always' | 'never'
@@ -846,10 +1520,14 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
       scrollGutter?: ScrollGutterMode
       pageMargin?: PageMarginSetting
       foldTerminalCommand?: boolean
+      turnUsageRow?: boolean
       promptSessionLabel?: boolean
       expandEditor?: boolean
       smoothStreaming?: boolean
+      taskNotifications?: TaskNotifications
+      notificationMethod?: NotificationMethod
       mermaidDiagrams?: boolean
+      codeFrameStyle?: CodeFrameStyle
       mathRendering?: MathRendering
       mathImageScale?: MathImageScale
       mathImageBacking?: MathImageBacking
@@ -866,6 +1544,13 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
       }
       companion?: {
         skin?: string
+      }
+      /** btw thread context (settings `btw.*`): turns carried into the
+       * next ask and the total character budget; both optional, falling
+       * through to cordis.yml and then the store defaults (4 / 24000). */
+      btw?: {
+        contextTurns?: number
+        contextBudget?: number
       }
       shortcuts?: Partial<Record<ShortcutActionId, string>>
     }
@@ -890,6 +1575,13 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
       if (shadow) return
       channel.setSplashFont(normalizeSplashFont(value.splashFont ?? config.splashFont))
     }
+    /** 品牌外观（`dsh-tui.brand`）：`auto` 跟随后端（Claude 后端整套换橙、
+     *  Codex 后端整套换薰衣草紫），其余固定一档；设置用户层优先于
+     *  cordis.yml，非法值回落 `auto`。 */
+    const applyBrand = (value: Pick<SettingsValue, 'brand'>): void => {
+      if (shadow) return
+      channel.setBrand(normalizeBrandSetting(value.brand ?? config.brand))
+    }
     const applyMinimalUi = (value: { minimal?: boolean }): void => {
       if (shadow) return
       // `value.minimal` is the persisted settings key (never renamed); the
@@ -901,6 +1593,9 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
       if (rendererSettingsFrozen) return
       if (typeof value.fullscreen === 'boolean') {
         bootedFullscreen = value.fullscreen
+      }
+      if (typeof value.launchpad === 'boolean') {
+        bootedLaunchpad = value.launchpad
       }
       bootedTerminalImages = lastBootedTerminalImages ?? value.terminalImages ?? config.terminalImages ?? true
     }
@@ -930,10 +1625,13 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
       channel.setPageMargin(pageMargin)
       applyPageMargin(pageMargin)
       channel.setFoldTerminalCommand(value.foldTerminalCommand ?? config.foldTerminalCommand ?? false)
+      channel.setTurnUsageRow(value.turnUsageRow ?? config.turnUsageRow ?? false)
       channel.setPromptSessionLabel(value.promptSessionLabel ?? config.promptSessionLabel ?? false)
       channel.setExpandEditor(value.expandEditor ?? config.expandEditor ?? true)
       channel.setSmoothStreaming(value.smoothStreaming ?? config.smoothStreaming ?? true)
+      configureTaskNotifications(value.taskNotifications ?? config.taskNotifications, value.notificationMethod ?? config.notificationMethod)
       applyMermaidDiagrams(value.mermaidDiagrams ?? config.mermaidDiagrams)
+      applyCodeFrameStyle(value.codeFrameStyle ?? config.codeFrameStyle)
       applyMathRendering(resolveMathRendering(value, config))
       applyMathImageScale(value.mathImageScale ?? config.mathImageScale ?? 'auto')
       applyMathImageBacking(value.mathImageBacking ?? config.mathImageBacking ?? 'transparent')
@@ -946,8 +1644,12 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
       applySidePanelSplitEnabled(value.sidePanel?.splitEnabled ?? config.sidePanel?.splitEnabled)
       applySidePanelOpen(value.sidePanel?.open ?? config.sidePanel?.open)
       applySidePanelRatio(value.sidePanel?.ratio ?? config.sidePanel?.ratio)
+      // The stored value only: registration never rewrites it, so every apply
+      // (boot or live, same CSV or a new one) is idempotent (issue #1662).
       applySidePanelPanels(value.sidePanel?.panels ?? config.sidePanel?.panels)
       applyCompanionSkin(value.companion?.skin ?? config.companion?.skin)
+      applyBtwContextTurns(value.btw?.contextTurns ?? config.btw?.contextTurns)
+      applyBtwContextBudget(value.btw?.contextBudget ?? config.btw?.contextBudget)
     }
     // Legacy user scopes layer over cordis.yml. Modern Config is already
     // resolved: an unset action must not revive its startup override.
@@ -972,12 +1674,20 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
     // re-apply — unrelated settings edits must not disturb a live /effort
     // choice mid-session.
     let lastEffortDefault: string | null | undefined = undefined
+    /** True only while boot's first settings snapshot is applied: a capability
+     *  backend restores its own effort at boot, and that first apply must not
+     *  overwrite it (#1688). */
+    let bootApplication = false
     const applyEffortDefault = (value: SettingsValue): void => {
       const next = value.effortDefault ?? null
       if (next === lastEffortDefault) return
-      lastEffortDefault = next
       const level = next === null || next === 'auto' ? undefined : next
-      channel.setDefaultEffort(level)
+      // Capability backends restore their own effort. Boot is not a live edit:
+      // Auto and resumed sessions keep that selection until the user changes it.
+      const preserve = bootApplication && backendStart !== undefined && (level === undefined || backendStart.resumedSessionId !== undefined)
+      if (!preserve && backendStart !== undefined && !channel.ready) { lastEffortDefault = undefined; return }
+      if (!preserve && (channel.setDefaultEffort(level) as unknown) === false) { lastEffortDefault = undefined; return }
+      lastEffortDefault = next
     }
     const apply = (next: SettingsValue): void => {
       applyLayout(next)
@@ -985,6 +1695,7 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
       applyWhaleIdle(next)
       applyWhaleGirl(next)
       applySplashFont(next)
+      applyBrand(next)
       applyMinimalUi(next)
       applyLang(next)
       applyDisplay(next)
@@ -1015,8 +1726,28 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
       notifyChannel(t('settings-fullscreen-migrated'), { color: 'warning' })
     }
     const { fullscreen: staleFullscreen, ...migratedSettings } = bootSettings
+    bootApplication = true
     apply(fullscreenMigration === 'unset' ? migratedSettings : bootSettings)
+    bootApplication = false
+    if (backendStart !== undefined) settingsCtx.effect(() => {
+      let active = true
+      let generation = channel.ready ? channel.agentBindingGeneration : undefined
+      const stop = channel.subscribe(() => {
+        if (!channel.ready || (lastEffortDefault !== undefined && generation === channel.agentBindingGeneration)) return
+        // Adoption publishes several synchronous updates before its binding generation.
+        queueMicrotask(() => {
+          if (!active || !channel.ready) return
+          if (generation !== undefined && generation !== channel.agentBindingGeneration) {
+            lastEffortDefault = scope.get().effortDefault ?? null
+          }
+          generation = channel.agentBindingGeneration
+          if (lastEffortDefault === undefined) applyEffortDefault(scope.get())
+        })
+      })
+      return () => { active = false; stop() }
+    })
     let lastTerminalImages = bootSettings.terminalImages ?? config.terminalImages ?? true
+    let lastLaunchpad = bootSettings.launchpad ?? config.launchpad ?? true
     settingsCtx.effect(() => scope.watch(next => {
       apply(next)
       if (typeof next.fullscreen === 'boolean' && next.fullscreen !== bootedFullscreen) {
@@ -1027,9 +1758,14 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
         channel.notify(t('settings-terminal-images-restart'), { color: 'warning' })
       }
       lastTerminalImages = terminalImages
+      const launchpad = next.launchpad ?? config.launchpad ?? true
+      if (launchpad !== lastLaunchpad && launchpad !== bootedLaunchpad) {
+        notifyChannel(t('settings-launchpad-restart'), { color: 'warning' })
+      }
+      lastLaunchpad = launchpad
     }))
     resolveSettingsReady?.()
-  })
+  })({ settings: tuiSettings, effect: ctx.effect.bind(ctx) })
   // The /settings screen's own section: the dsh-tui namespace comes from
   // the settings registration above, and the declared selects write `lang`
   // and `diffLayout` back through the settings service's revision-fenced
@@ -1068,12 +1804,12 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
   // dsh-tui-* host-seam insert list right after load (issue #557), which
   // left this registration silently skipped and /settings read-only.
   // channel.ts reads through the same fallback, so both sides meet in the
-  // same registry either way.
+  // same registry either way — but which registry that is can still change
+  // after this registration: the service row may activate later, or reload
+  // into an empty state. trackHostSettingsSection follows it, so the section
+  // never strands in the registry /settings stopped reading.
   {
-    const settingsSections = getHostSettingsSections(
-      ctx.get('tuiSettingsSections') as TuiSettingsSectionsRuntime | undefined,
-    ) ?? getLocalSettingsSectionsHost(ctx)
-    const unregister = settingsSections.register({
+    const tuiSection: TuiSettingsSection = {
       ns: tuiSettingsNs,
       title: 'dsh-tui',
       groups: [...SETTING_GROUPS],
@@ -1150,6 +1886,13 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
           },
         },
         {
+          ...settingField('turnUsageRow'),
+          format(value: unknown): string {
+            // Same effective-resolution rule as foldTerminalCommand's field.
+            return String(typeof value === 'boolean' ? value : config.turnUsageRow === true)
+          },
+        },
+        {
           ...settingField('promptSessionLabel'),
         },
         {
@@ -1174,6 +1917,17 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
           },
         },
         {
+          ...settingField('taskNotifications'),
+          format: value => String(value ?? config.taskNotifications ?? 'unfocused'),
+        },
+        {
+          ...settingField('notificationMethod'),
+          format: value => String(value ?? config.notificationMethod ?? 'auto'),
+        },
+        {
+          ...settingField('codeFrameStyle'),
+        },
+        {
           ...settingField('mathRendering'),
         },
         {
@@ -1194,12 +1948,13 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
         },
         {
           ...settingField('effortDefault'),
+          optionsSource: 'effort',
           format(value: unknown): string {
             // Unset in settings.yaml: show what a boot would actually start
-            // on (the cordis effort pin → the persisted /effort choice)
+            // on (the persisted /effort choice → the cordis effort default)
             // instead of a misleading blank.
-            if (value === undefined || value === null || value === 'auto') {
-              return config.effort ?? readEffortPref() ?? 'auto'
+            if (value === undefined || value === null) {
+              return readEffortPref() ?? config.effort ?? 'auto'
             }
             return String(value)
           },
@@ -1260,6 +2015,28 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
           ...settingField('statusBar.shortcutHint'),
         },
         {
+          ...settingField('statusBar.pluginFields'),
+        },
+        {
+          ...settingField('statusBar.pluginFieldsOrder'),
+          // An empty draft means "show none" here, not the editor's default
+          // "clear" (which would fall back to `*` and silently re-show every
+          // field). `*` stays reachable by typing it, and an illegal shape
+          // (`a`, `a;b`, a duplicate key) blocks the save instead of being
+          // normalized into something the user did not ask for.
+          parse(text: string): TuiSettingsFieldWrite | undefined {
+            return parsePluginFieldsOrder(text).mode === 'invalid'
+              ? undefined
+              : { kind: 'set', value: normalizePluginFieldsOrder(text) }
+          },
+          // Unset in the user layer: show the value the footer actually uses
+          // (the schema default, `*`) instead of a blank row that would read
+          // as "none" next to the all-unchecked boxes.
+          format(value: unknown): string {
+            return normalizePluginFieldsOrder(value)
+          },
+        },
+        {
           ...settingField('sidePanel.splitEnabled'),
           format(value: unknown): string {
             // Unset in the user layer: the effective default is on.
@@ -1294,22 +2071,67 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
         },
         {
           ...settingField('sidePanel.panels'),
-          placeholder: DEFAULT_SIDE_PANEL_IDS,
+          placeholder: ALL_SIDE_PANELS,
           format(value: unknown): string {
-            // Unset in the user layer: show the effective list.
-            return typeof value === 'string' && value.trim() !== ''
-              ? value
-              : config.sidePanel?.panels ?? DEFAULT_SIDE_PANEL_IDS
+            // Project what the store actually uses: a hand-edited value with
+            // an unusable token must not read differently here than it does
+            // in the PanelBar, so it is normalized exactly like the store
+            // normalizes it. Unset in the user layer: the effective config
+            // value (`*` by default), which the picker reads as "everything
+            // checked".
+            return normalizeSidePanelPanels(
+              typeof value === 'string' && value.trim() !== '' ? value : config.sidePanel?.panels,
+            )
+          },
+          parse(text: string) {
+            const parsed = parseSidePanelPanels(text)
+            if (parsed.mode === 'empty') return { kind: 'clear' }
+            if (parsed.mode === 'all') return { kind: 'set', value: ALL_SIDE_PANELS }
+            // Strict gate: a malformed token (or a list embedding `*`, or a
+            // temporary address no later run could honour) is refused instead
+            // of saved as something else.
+            if (parsed.mode === 'invalid') return undefined
+            return { kind: 'set', value: parsed.ids.join(',') }
+          },
+        },
+        {
+          // Like sidePanel.ratio: an out-of-range draft is rejected before
+          // saving, and the store clamps to the same range anyway.
+          ...settingField('btw.contextTurns'),
+          placeholder: '4',
+          format(value: unknown): string {
+            const turns = typeof value === 'number' && Number.isFinite(value) ? value : config.btw?.contextTurns
+            return String(turns ?? 4)
           },
           parse(text: string) {
             const draft = text.trim()
             if (draft === '') return { kind: 'clear' }
-            // Strict gate: every token must be a well-formed panel id. The
-            // store would drop a typo silently, so a draft that does not
-            // round-trip is refused instead of saved as something else.
-            const tokens = draft.split(',').map(token => token.trim().toLowerCase()).filter(token => token !== '')
-            if (tokens.length === 0 || tokens.some(token => !SIDE_PANEL_ID_PATTERN.test(token))) return undefined
-            return { kind: 'set', value: normalizeSidePanelPanels(draft) }
+            const turns = Number(draft)
+            if (!Number.isInteger(turns) || turns < BTW_CONTEXT_TURNS_MIN || turns > BTW_CONTEXT_TURNS_MAX) return undefined
+            return { kind: 'set', value: turns }
+          },
+        },
+        {
+          ...settingField('btw.contextBudget'),
+          placeholder: '24000',
+          format(value: unknown): string {
+            const budget = typeof value === 'number' && Number.isFinite(value) ? value : config.btw?.contextBudget
+            return String(budget ?? 24000)
+          },
+          parse(text: string) {
+            const draft = text.trim()
+            if (draft === '') return { kind: 'clear' }
+            const budget = Number(draft)
+            if (!Number.isInteger(budget) || budget < BTW_CONTEXT_BUDGET_MIN || budget > BTW_CONTEXT_BUDGET_MAX) return undefined
+            return { kind: 'set', value: budget }
+          },
+        },
+        {
+          ...settingField('launchpad'),
+          format(value: unknown): string {
+            // Unset in settings.yaml: the effective default is on — same
+            // rule as expandEditor's field.
+            return String(typeof value === 'boolean' ? value : config.launchpad !== false)
           },
         },
         {
@@ -1334,11 +2156,18 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
           },
         },
         {
+          ...settingField('brand'),
+          format(value: unknown): string {
+            return normalizeBrandSetting(value ?? config.brand)
+          },
+        },
+        {
           ...settingField('minimal'),
         },
       ],
-    })
-    ctx.effect(() => unregister)
+    }
+    const disposeSection = trackHostSettingsSection(ctx, tuiSection)
+    ctx.effect(() => () => { disposeSection() })
   }
   // DSH approval seam: the permission layer asks ApprovalService.request(),
   // which dispatches an `approval/request` waterfall. With no answerer the
@@ -1350,26 +2179,34 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
   // (/new, /resume, rewind), so ownership is re-evaluated per request.
   const approvalStore = new ApprovalStore(adapterRuntimeFor(ctx))
   bindApprovalStore(ctx, approvalStore)
-  if (ctx.get('approval') !== undefined) {
-    ctx.on('approval/request', (req, next) =>
-      approvalStore.park(req).catch(() => next()))
-    // Badge-flip push (P-4): React does not know the session log appended —
-    // a source-badge verdict that only flips inside getSnapshot() surfaces
-    // solely when something else re-renders. Feed the session firehose to
-    // the store: it reacts only to tool/result (the sole verdict-flipping
-    // event type), and its internal log-length memo skips appends from any
-    // session other than the active ask's, so no agent filtering is needed
-    // here. The firehose fires post-commit, after the event entered
-    // session.events, so the recheck sees the settled result.
-    ctx.on('session/event', (session, event) => approvalStore.noteSessionEvent(session.id, event))
-    ctx.effect(() => () => approvalStore.settleAll('cancelled'))
+  // A non-DSH backend answers its own permission prompts: the DSH answerer
+  // is not registered for it.
+  // The in-process DSH kernel installs it in `attachDsh`.
+  const mountDshApprovals = (dshCtx: Context): void => {
+    if (dshCtx.get('approval') !== undefined && backendStart === undefined) {
+      dshCtx.on('approval/request', (req, next) =>
+        approvalStore.park(req).catch(() => next()))
+      // Badge-flip push (P-4): React does not know the session log appended —
+      // a source-badge verdict that only flips inside getSnapshot() surfaces
+      // solely when something else re-renders. Feed the session firehose to
+      // the store: it reacts only to tool/result (the sole verdict-flipping
+      // event type), and its internal log-length memo skips appends from any
+      // session other than the active ask's, so no agent filtering is needed
+      // here. The firehose fires post-commit, after the event entered
+      // session.events, so the recheck sees the settled result.
+      dshCtx.on('session/event', (session, event) => approvalStore.noteSessionEvent(session.id, event))
+      dshCtx.effect(() => () => approvalStore.settleAll('cancelled'))
+    }
   }
+  if (!dshInEntry) mountDshApprovals(ctx)
   // The agent view reads parked ask ids for its "needs input" state.
   rawChannel.bindApprovalStore(approvalStore)
+  // The panel source Chat renders: the backend's own prompts off DSH.
+  const panelApprovals = backendPermissions ?? approvalStore
   const herdr = attachHerdrIntegration({
     channel,
     questions: questionStore,
-    approvals: approvalStore,
+    approvals: panelApprovals,
   })
   if (herdr !== undefined) {
     ctx.effect(() => () => herdr.dispose())
@@ -1381,8 +2218,26 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
   // Submit once the channel exists; delivery goes through the normal pending/inbox
   // chain, so no special timing is needed. The parser separates startup flags
   // from literal prompt text.
-  const initialPrompt = initialPromptFromCmdlineArgs(cmdlineArgs)
-  if (initialPrompt) submitChannel(initialPrompt)
+  // The standalone entry has no `ctx.cmdlineArgs` (its argv is the app's); a
+  // replacement keeps the arguments but the first process sent their prompt.
+  const initialPrompt = launchPromptSent ? '' : initialPromptFromCmdlineArgs(cmdlineArgs ?? process.argv.slice(2))
+  // The queue a /restart carried over: held, never auto-sent (heldInputs.ts).
+  const stopHeldInputs = adoptHeldInputs(channel)
+  if (stopHeldInputs !== undefined) ctx.effect(() => stopHeldInputs, 'dsh-tui held inputs after startup')
+  if (initialPrompt) {
+    // A placeholder session refuses sends and nothing replays them after
+    // adoption: hold the prompt until the channel is ready.
+    if (channel.ready) {
+      submitChannel(initialPrompt)
+    } else {
+      const unsubscribe = channel.subscribe(() => {
+        if (!channel.ready) return
+        unsubscribe()
+        submitChannel(initialPrompt)
+      })
+      ctx.effect(() => unsubscribe, 'dsh-tui initial prompt after startup')
+    }
+  }
   // Attach the stderr reporter to the live channel and flush anything a
   // startup-spawned server produced while the channel didn't exist yet.
   notifyStderr = (text, options) => notifyChannel(text, options)
@@ -1412,56 +2267,85 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
   // write the resume target, restore the terminal, respawn the process with
   // the original argv, and let the fresh boot attach the same session.
   let restartRequested = false
+  // The launchpad kernel selector's switch target: set once a choice was
+  // accepted; the exit funnel then respawns onto that kernel (a NEW session —
+  // no resume markers at all).
+  let backendSwitchRequested: KernelBackendId | undefined
+  // A signal or `ctx.appExit` via the entry's exit seam: the clean-exit branch
+  // runs as for `/quit`, then ends the process by the signal / with the code.
+  let processExitRequest: ExitRequest | undefined
   // The profile this process was booted with (`dsh --profile <name>`); dsh
   // exposes it nowhere else, and /update must update the installation the
   // user is actually running, not a hard-coded one.
-  const profile = resolveDshProfileName()
+  const profile = resolveDshProfileName() ?? runtimeOptions.profile
   // Single exit funnel: `/exit` and double Ctrl+C land here, and so does
   // the unmount triggered by a cordis context teardown — but the two must
   // not share a fate (issue #12). Teardown only unmounts the UI; user exit
   // runs the full leave sequence below (resume marker, terminal restore,
   // update handoff or resume hint).
+  /** The session id for a restart or update handoff, or empty when the backend
+   * has not persisted it and the replacement must start fresh. */
+  const handoffSessionId = (): string => {
+    if (backendStart !== undefined) return backendStart.persisted(channel.agentId, channel.rows) ? channel.agentId : ''
+    return isUnstoredFreshSession(liveDshAgent()?.session) ? '' : channel.agentId
+  }
+  const handoffHint = backendStart === undefined ? undefined : (sessionId: string): string => backendStart.resumeCommand(sessionId)
   const funnel = createExitFunnel({
     onUserExit: error => {
       // Mirror the funnel's internal exited flag for the /update and
       // background-check guards that still read the outer one.
       exited = true
       if (error !== undefined) {
-        const message = error instanceof Error ? error.message : String(error)
-        ctx.logger.error(`dsh-tui: exit after error: ${message}`)
-        // A crash must leave the resume marker a clean exit would leave: the
-        // launcher's next start (and its safe-mode retry) then reopens the
-        // session the user was actually in instead of a blank one. Only the
-        // resumable case writes — unlike the clean-exit branch below, a crash
-        // never CLEARS a marker, so a session the user still has cannot be
-        // dropped by a failure that happened before the first message landed.
-        try {
-          if (isExitResumable({
-            pendingCount: channel.pending.length,
-            liveAgent: ctx.agents.get(SessionId(channel.agentId)),
-            startupAgent: agent,
-          })) {
-            writeResumeTarget(channel.agentId)
-          }
-        } catch {
-          // Resume persistence is best effort and must never block the exit.
-        }
-        void finishExit(
-          ctx,
-          instance,
-          bootedFullscreen,
-          undefined,
-          `dsh-tui crashed: ${message}`,
-          () => disposeRootAndExit(ctx, 1),
-        )
+        // runCrashExit keeps the diagnostics apart from the resume markers
+        // and the terminal cleanup, so a throw while describing the error
+        // cannot skip finishExit.
+        runCrashExit({
+          error,
+          logError: message => { ctx.logger.error(message) },
+          appendLog: appendCrashLog,
+          logRestart: logRestartEvent,
+          logDebug: logForDebugging,
+          // A crash must leave the resume marker a clean exit would leave: the
+          // launcher's next start (and its safe-mode retry) then reopens the
+          // session the user was actually in instead of a blank one. Only the
+          // resumable case writes — unlike the clean-exit branch below, a crash
+          // never CLEARS a marker, so a session the user still has cannot be
+          // dropped by a failure that happened before the first message landed.
+          writeResumeMarkers: () => {
+            writeCrashResumeMarkers({
+              ctx,
+              backendStart,
+              channel,
+              startupAgent: agent,
+              writeResumeTarget,
+              refreshLastRunRecord,
+            })
+          },
+          finish: crashLine => {
+            void finishExit(
+              ctx,
+              instance,
+              bootedFullscreen,
+              undefined,
+              crashLine,
+              () => disposeRootAndExit(ctx, 1),
+            )
+          },
+        })
         return
       }
       if (updateRequested) {
         try {
-          writeResumeTarget(channel.agentId)
+          // Non-DSH sessions keep their marker in backend prefs, not DSH's `resume.txt`.
+          if (backendStart === undefined) {
+            const sessionId = handoffSessionId()
+            if (sessionId === '') clearResumeTarget()
+            else writeResumeTarget(sessionId)
+          } else if (backendStart.persisted(channel.agentId, channel.rows)) backendStart.sessionPrefs.setLastSession(channel.agentId)
         } catch {
           // Resume persistence is best effort and must never block an update.
         }
+        refreshLastRunRecord()
         const hintText = isStandaloneRuntime()
           ? t('update-standalone-starting')
           : t('update-starting')
@@ -1471,32 +2355,77 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
           bootedFullscreen,
           hintText,
           undefined,
-          () => runUpdate(ctx, profile, channel.agentId, updateTargetVersion),
+          () => runUpdate(ctx, profile, handoffSessionId(), updateTargetVersion, backendChoice, handoffHint, exitSeam),
+        )
+        return
+      }
+      // The kernel selector's switch: the same respawn machinery, no resume.
+      // The new kernel starts a NEW session — no resume target is written
+      // (this kernel's sessions stay persisted; /resume finds them again
+      // after switching back), and restartTui's backend option deletes the
+      // inherited DSH_TUI_RESUME_SESSION marker from the replacement env.
+      // kernel.json was already written when the choice was accepted.
+      if (backendSwitchRequested !== undefined) {
+        // Captured: the closure below runs after this block, where the outer
+        // `let` is no longer narrowed.
+        const switchingTo = backendSwitchRequested
+        logRestartEvent('funnel: backend-switch branch entered', { backend: switchingTo })
+        // Fullscreen keeps the alternate screen and writes the "switching"
+        // notice into it until the replacement takes over (see handoffAck.ts);
+        // inline restores the main screen and writes the notice there.
+        logRestartEvent(handoffEventTag('starting'), { backend: switchingTo })
+        const keepAlt = bootedFullscreen
+        void finishExit(
+          ctx,
+          instance,
+          bootedFullscreen,
+          formatHandoffNotice('starting', { name: backendLabel(switchingTo), color: process.stdout.isTTY === true }),
+          undefined,
+          () => runRestart(ctx, profile, '', undefined, {
+            backend: switchingTo,
+            // The replacement's parent prints the same name this process just
+            // put on screen (update.ts has no registry to look it up in).
+            backendName: backendLabel(switchingTo),
+            ...(keepAlt ? { handoffScreen: 'alt' } : {}),
+          }, exitSeam),
+          { keepAltScreen: keepAlt },
         )
         return
       }
       // `/restart`: same handoff as the update path, no installation step.
-      // The resume target is written unconditionally — the user asked to
-      // restart THIS session, blank or not (mirrors the update contract).
+      // A fresh initialization-only session has no log to reopen. Restart
+      // it fresh; saved sessions keep their identity across the handoff.
       if (restartRequested) {
         beginRestartAttempt(channel.agentId)
         logRestartEvent('funnel: /restart branch entered')
         try {
-          writeResumeTarget(channel.agentId)
-          logRestartEvent('funnel: resume target written')
+          if (backendStart === undefined) {
+            const sessionId = handoffSessionId()
+            if (sessionId === '') clearResumeTarget()
+            else writeResumeTarget(sessionId)
+          } else if (backendStart.persisted(channel.agentId, channel.rows)) backendStart.sessionPrefs.setLastSession(channel.agentId)
+          logRestartEvent('funnel: resume target updated')
         } catch (error) {
           // Resume persistence is best effort and must never block a restart.
           logRestartEvent('funnel: resume target write failed', {
             message: error instanceof Error ? error.message : String(error),
           })
         }
+        refreshLastRunRecord()
+        // The queue dies with this process (the kernel records it canceled);
+        // the replacement parks the same texts as held dock rows (#1651).
+        const heldEnv = writeHeldInputs(channel.pending.map(item => item.text))
         void finishExit(
           ctx,
           instance,
           bootedFullscreen,
-          t('restart-starting'),
+          // This line is the one the user actually sees before the terminal is
+          // handed over (the composer's toast dies with the unmount): a
+          // mid-turn restart must say that the running turn is interrupted,
+          // not promise a clean resume.
+          t(channel.working ? 'restart-during-turn' : 'restart-starting'),
           undefined,
-          () => runRestart(ctx, profile, channel.agentId),
+          () => runRestart(ctx, profile, handoffSessionId(), handoffHint, { kernel: backendChoice, env: heldEnv }, exitSeam),
         )
         return
       }
@@ -1505,31 +2434,97 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
       // not the boot-time agent captured above: /resume, /new and /model swap
       // the active agent, so the captured reference can go stale (see
       // isExitResumable).
-      const resumable = isExitResumable({
-        pendingCount: channel.pending.length,
-        liveAgent: ctx.agents.get(SessionId(channel.agentId)),
-        startupAgent: agent,
-      })
-      try {
-        if (resumable) writeResumeTarget(channel.agentId)
-        else clearResumeTarget()
-      } catch {
-        // Resume persistence is best effort and must never block shutdown.
+      let hint: string | undefined
+      if (backendStart !== undefined) {
+        // Each non-DSH backend provides its marker and resume command; DSH uses
+        // `resume.txt`.
+        const resumable = backendStart.persisted(channel.agentId, channel.rows)
+        try {
+          if (resumable) backendStart.sessionPrefs.setLastSession(channel.agentId)
+        } catch {
+          // Resume persistence is best effort and must never block shutdown.
+        }
+        hint = resumable ? `Resume with the command below:\n${backendStart.resumeCommand(channel.agentId)}` : undefined
+      } else {
+        const resumable = isExitResumable({
+          pendingCount: channel.pending.length,
+          liveAgent: liveDshAgent(),
+          startupAgent: agent,
+        })
+        try {
+          if (resumable) writeResumeTarget(channel.agentId)
+          else clearResumeTarget()
+        } catch {
+          // Resume persistence is best effort and must never block shutdown.
+        }
+        hint = resumable
+          ? `Resume with the command below:\n${resumeCommand(profile, channel.agentId)}`
+          : undefined
       }
-      const hint = resumable
-        ? `Resume with the command below:\n${resumeCommand(profile, channel.agentId)}`
-        : undefined
+      // Same resumability as the markers above.
+      refreshLastRunRecord()
+      const request = processExitRequest
       void finishExit(
         ctx,
         instance,
         bootedFullscreen,
         hint,
         undefined,
-        () => disposeRootAndExit(ctx, 0),
+        () => {
+          if (request === undefined) disposeRootAndExit(ctx, 0)
+          else if (request.kind === 'code') disposeRootAndExit(ctx, request.code)
+          // A signal: the process dies by it once the root is down (bounded
+          // as any dispose; the stalled case dies by it too).
+          else disposeRootAndThen(ctx, () => { dieBySignal(request.signal) }, () => { dieBySignal(request.signal) })
+        },
       )
     },
   })
   const handleExit = funnel.handleExit
+  const exitSeam = runtimeOptions.exitSeam
+  const requestProcessExit = (request: ExitRequest): ExitRequestAnswer => {
+    // A handoff is under way: no backstop, which could kill the supervisor of
+    // a replacement already up; superviseReplacement takes the seam over.
+    if (updateRequested || restartRequested || backendSwitchRequested !== undefined) return 'supervising'
+    // A `/quit` or a crash is already ending this process.
+    if (exited) return 'pending'
+    processExitRequest = request
+    logRestartEvent('funnel: process exit requested', request.kind === 'signal' ? { signal: request.signal } : { code: request.code })
+    if (handleExit()) return 'exiting'
+    // The tree is being torn down: the funnel cannot own the process.
+    processExitRequest = undefined
+    return 'refused'
+  }
+  if (exitSeam !== undefined) exitSeam.request = requestProcessExit
+
+  /** The launchpad kernel selector's accept path (the Chat side passes the
+   *  chosen kernel through onSwitchBackend — the prop wiring lands together
+   *  with the selector's Chat rendering). Persists the choice BEFORE the
+   *  teardown, so a crash mid-handoff still leaves the pick remembered, then
+   *  exits into the funnel's backend-switch branch: a fresh session on the
+   *  new kernel; this kernel's sessions stay persisted (/resume finds them
+   *  again after switching back). */
+  const switchBackend = (backend: KernelBackendId): void => {
+    if (exited || restartRequested || backendSwitchRequested !== undefined) return
+    backendSwitchRequested = backend
+    writeKernelPrefs({ backend })
+    logRestartEvent('command: backend switch accepted', { backend })
+    notifyChannel(t('kernel-switch-restarting', { name: backendLabel(backend) }))
+    handleExit()
+  }
+
+  /** /channel changed the active channel's connection. The running CLI child
+   *  cannot change its baseUrl or token, so restart through the same funnel
+   *  branch as a kernel switch: same kernel, new session, no resume target.
+   *  The caller supplies the notice. */
+  const restartFreshSession = (notice: string): void => {
+    if (exited || restartRequested || backendSwitchRequested !== undefined) return
+    if (backendChoice === 'codex') restartRequested = true
+    else backendSwitchRequested = backendChoice
+    logRestartEvent('command: channel connection switch accepted', { backend: backendChoice })
+    notifyChannel(notice)
+    handleExit()
+  }
 
   // Process-level crash backstop (see installNestedUpdateOverflowProcessGuard):
   // an uncaught exception or unhandled rejection that is NOT the React #185
@@ -1547,7 +2542,19 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
     // the funnel as-is: `error !== undefined` is what selects the crash path, so
     // a bare undefined would exit 0 while this sink claims the process.
     const fatal = fatalReasonForExit(error, origin)
-    ctx.logger.error(`dsh-tui: fatal ${origin}: ${fatal instanceof Error ? fatal.message : String(fatal)}`)
+    // Reading .message or String() can throw on a hostile value, and this
+    // runs before the funnel latch: an escape here would reach Node's default
+    // crash handler with no terminal cleanup. runCrashExit serializes the
+    // value safely later.
+    try {
+      ctx.logger.error(`dsh-tui: fatal ${origin}: ${fatal instanceof Error ? fatal.message : String(fatal)}`)
+    } catch {
+      try {
+        ctx.logger.error(`dsh-tui: fatal ${origin}: (unserializable reason)`)
+      } catch {
+        // Logging is gone; the funnel still must run.
+      }
+    }
     return handleExit(fatal)
   })
 
@@ -1586,28 +2593,45 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
    * 目标喂进来（D:/node/dst.cmd 里 set DSH_TUI_WORKSPACE_TARGET=%CD%），一旦
    * 算进去，落地页在本机最主流的启动方式下**永远不出**——用户实测「既没看到
    * ob 也没看到 lp」的根因就是这一条。
+   *
+   * Two of the three boot screens are DSH screens: the workspace home lists
+   * DSH sessions and workspaces, and the first-run guide configures a DeepSeek
+   * key. The launchpad is not one of them: it is where the first sentence gets
+   * typed, so a remembered claude kernel boots onto it too (the session the
+   * plugin opened keeps warming underneath) — only a resume target skips it
+   * and opens straight into its conversation.
    */
-  const noResume = isLandingLaunch({ launchSessionId, initialPrompt })
-  const openHomeOnBoot = !homeSeen && noResume && requestedWorkspace === undefined
+  const dshBoot = backendStart === undefined
+  const noResume = isLandingLaunch({ launchSessionId: bootSessionId, initialPrompt })
+  const openHomeOnBoot = dshBoot && !homeSeen && noResume && requestedWorkspace === undefined
   /**
    * The launchpad is NOT one-shot the way the workspace home is: every
    * ordinary launch starts on it, because it is where the first sentence gets
-   * typed rather than a tutorial that retires itself. `DSH_TUI_NO_LAUNCHPAD=1`
-   * is the escape hatch (an automation that wants the old blank conversation
-   * and no dialog in front of it).
+   * typed rather than a tutorial that retires itself — on every backend: a
+   * remembered claude kernel lands here exactly like a dsh one (the `dshBoot`
+   * gate below is deliberately absent). The /settings `launchpad` toggle
+   * (settings user layer over cordis.yml, resolved into `bootedLaunchpad`
+   * above) is the persistent off switch — off boots straight into the chat
+   * page. `DSH_TUI_NO_LAUNCHPAD=1` remains the env escape hatch (an
+   * automation that wants the old blank conversation and no dialog in front
+   * of it).
    */
-  const launchpadOnBoot = noResume && process.env.DSH_TUI_NO_LAUNCHPAD !== '1'
+  const launchpadOnBoot = noResume && bootedLaunchpad && process.env.DSH_TUI_NO_LAUNCHPAD !== '1'
   /**
    * The first-run guide. Gated on its own preference (not on `homeSeen`): the
    * two answer different questions, and an install that already knows its
    * workspace may still never have configured a key.
    */
-  const onboardingOnBoot = noResume && shouldOfferOnboarding()
-  const chat = React.createElement(Chat, {
+  const onboardingOnBoot = dshBoot && noResume && shouldOfferOnboarding()
+  // 品牌镜像初值（branding.ts）：首帧渲染前铺好，避免 Claude 后端先画一屏
+  // 蓝再变橙。Chat 里的 effect 会在品牌解析变化时跟进更新这个镜像。
+  setActiveBrand(resolveBrand(config.brand, backendChoice))
+  const liveThemeHost = (): TuiThemeHost | undefined => getHostThemes(ctx.get('tuiThemes') as TuiThemeRuntime | undefined)
+  const buildChat = (): React.ReactElement => React.createElement(Chat, {
     channel,
     renderScene: createChannelSceneOutlet(() => rawChannel.pluginScene),
     questionStore,
-    approvalStore,
+    approvalStore: panelApprovals,
     injectControllerRef,
     openHomeOnBoot,
     launchpadOnBoot,
@@ -1623,7 +2647,7 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
     // no longer runs a second activity tracker of its own.
     activityStore,
     extensionShortcuts: getHostShortcuts(ctx.get('tuiShortcuts') as TuiShortcutRuntime | undefined),
-    themeHost,
+    themeHost: liveThemeHost(),
     // Full-screen surfaces inside Chat — the trajectory scene and the session
     // browser — enter the alt screen themselves in inline mode; in fullscreen
     // the tree is already wrapped below, so they must not nest.
@@ -1637,6 +2661,44 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
       notifyChannel(t('restart-starting'))
       handleExit()
     },
+    // Kernel selector (/kernel and the launchpad row): the choice goes to
+    // kernel.json and the exit funnel restarts onto that kernel with a new
+    // session. The old kernel's sessions stay listed for /resume.
+    onSwitchBackend: switchBackend,
+    // /channel: restart with a new session after the connection changed.
+    onRestartFreshSession: restartFreshSession,
+    // The backend registry as the picker sees it: the UI takes data, not the
+    // registry (P0). dsh first, then the manifest order — picker order. Entries
+    // that registered without an admission are not offered (B-2).
+    kernelEntries: kernelEntriesOf(listOfferedBackends()),
+    onProbeKernels: () => probeKernels(ctx, sessionCwd),
+    // The kernel picker's SDK install wizard (a dim row's Enter): the surface of
+    // whichever row the user picked, looked up by id — the manifest says what to
+    // install and with which executor, this host holds the actions.
+    onResolveSdkInstall: installSurfaceFor,
+    // `/plugin install <spec>` (C-4): the write path. The wiring lives beside
+    // the flow (`createPluginInstallEntry`) so a regression can drive the real
+    // feed load, declaration read and profile-relative path resolution with a
+    // fixture context. `undefined` ⇒ not an install form, or no service to
+    // install through; the screen then runs the read-only report instead.
+    onPluginInstall: createPluginInstallEntry(ctx, {
+      ownVersion: installedTuiVersion(),
+      profileName: profile ?? resolveDshProfileName(),
+    }),
+    // `/plugin remove|enable|disable` (C-5): the lifecycle write path. Wired the
+    // same way and for the same reason — the entry is where the real profile, the
+    // declaration read and the data directory meet, so a regression can drive
+    // them with a fixture context. `undefined` ⇒ not one of those forms, or no
+    // service to act through; the screen then runs the read-only report.
+    onPluginManage: createPluginManageEntry(ctx, {
+      profileName: profile ?? resolveDshProfileName(),
+    }),
+    // `/team [status]`: the live team report (team-mode.ts). The bundle switch
+    // is `/plugin enable|disable`, which shares the lifecycle flow.
+    onTeamCommand: createTeamCommandEntry(ctx, {
+      profileName: profile ?? resolveDshProfileName(),
+    }),
+    kernelPinned: backendPinned,
     // Only a `dsh --profile <name>` launch has a profile installation for
     // `/update` to act on; source checkouts and `--config` overlays get the
     // unavailable notice instead.
@@ -1703,14 +2765,32 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
   // the screen border). It must sit INSIDE AlternateScreen: the alt-screen
   // box sizes itself to the real terminal rows, while PageMargin reports
   // content-box dimensions to everything below it.
-  const marginChildren = bootedFullscreen
-    ? React.createElement(AlternateScreen, null, React.createElement(PageMargin, null, chat))
-    : React.createElement(PageMargin, null, chat)
-  const tree = React.createElement(ThemeProvider, {
-    themeHost,
-    children: marginChildren,
+  const buildTree = (): React.ReactElement => {
+    const chat = buildChat()
+    const marginChildren = bootedFullscreen
+      ? React.createElement(AlternateScreen, null, React.createElement(PageMargin, null, chat))
+      : React.createElement(PageMargin, null, chat)
+    return React.createElement(ThemeProvider, {
+      themeHost: liveThemeHost(),
+      children: marginChildren,
+    })
+  }
+  const tree = buildTree()
+  // Kernel-switch replacement: send the ready ACK once the first frame after
+  // adoption is flushed. Does nothing on an ordinary boot.
+  armFirstFrameAck(process.stdout)
+  markBoot('render-start')
+  // The entry's composition right after the mount freezes the event loop for
+  // a while: it waits for the first frame to reach the terminal.
+  const awaitsFirstFrame = entrySlot !== undefined
+  let frameFlushed = (): void => undefined
+  const firstFrame = awaitsFirstFrame ? new Promise<void>(resolve => { frameFlushed = resolve }) : undefined
+  instance = await render(tree, {
+    exitOnCtrlC: false,
+    terminalImages: bootedTerminalImages,
+    ...(awaitsFirstFrame ? { onFrame: () => { frameFlushed() } } : {}),
   })
-  instance = await render(tree, { exitOnCtrlC: false, terminalImages: bootedTerminalImages })
+  markBoot('render-done')
   const isRecompose = lastBootedFullscreen !== undefined
   lastBootedFullscreen = bootedFullscreen
   lastBootedTerminalImages = bootedTerminalImages
@@ -1725,19 +2805,35 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
   // External injection channel (dsh.nvim etc.): expose a per-session local
   // socket that appends text into the prompt input and submits it. Optional
   // integration — a bind failure degrades to "no channel" and never fails the
-  // session. Closed on teardown so the socket and discovery record do not leak.
-  const injectChannel = openInjectChannel(
-    agent.session.id,
-    channel.cwd,
-    {
-      append: (text) => injectControllerRef.current?.append(text),
-      submit: () => injectControllerRef.current?.submit(),
-    },
-    (message) => ctx.logger.warn(`dsh-tui: ${message}`),
-  )
-  if (injectChannel) {
-    ctx.effect(() => () => injectChannel.close())
+  // session. It follows the bound session: a placeholder still opening (empty
+  // id) binds nothing, and adoption or a session switch rebinds under the new
+  // id and cwd, closing the previous socket and discovery record (a connected
+  // client reconnects through servers.json). Closed on teardown so neither leaks.
+  let injectChannel: InjectChannel | null = null
+  let injectSessionId = ''
+  const bindInjectChannel = (): void => {
+    if (channel.agentId === injectSessionId) return
+    injectChannel?.close()
+    injectChannel = null
+    injectSessionId = channel.agentId
+    if (injectSessionId === '') return
+    injectChannel = openInjectChannel(
+      injectSessionId,
+      channel.cwd,
+      {
+        append: (text) => injectControllerRef.current?.append(text),
+        submit: () => injectControllerRef.current?.submit(),
+      },
+      (message) => ctx.logger.warn(`dsh-tui: ${message}`),
+    )
   }
+  bindInjectChannel()
+  const unsubscribeInject = channel.subscribe(bindInjectChannel)
+  ctx.effect(() => () => {
+    unsubscribeInject()
+    injectChannel?.close()
+    injectChannel = null
+  }, 'dsh-tui inject channel')
 
   // Cross-process session mounting: publish the sessions this process has
   // mounted so another TUI (a different terminal process on the same machine)
@@ -1747,7 +2843,12 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
   // Registered on the same teardown funnel as everything else: the disposer
   // stops the heartbeat and removes the claim, so a clean exit frees its
   // sessions at once while a killed process is reclaimed by liveness.
-  ctx.effect(() => startSessionMountHeartbeat(ctx))
+  // A non-DSH session is in no DSH registry: the bound one is published under
+  // its backend-qualified key (`claude:<id>`), so a second TUI refuses it.
+  ctx.effect(() => startSessionMountHeartbeat(ctx, () => {
+    const ref = rawChannel.sessionRef
+    return ref.backendId === 'dsh' ? [] : [formatSessionRef(ref)]
+  }))
 
   // Check in the background so registry latency never delays the first frame.
   // A failed/offline check is intentionally silent; the manual `/update`
@@ -1783,9 +2884,150 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
     // the process, so a later fatal error falls back to Node's default crash
     // instead of reaching a disposed ctx.
     registerProcessGuardFatalSink(undefined)
+    if (exitSeam?.request === requestProcessExit) exitSeam.request = undefined
     rawChannel.releaseContributions()
     instance?.unmount()
   })
+
+  /** The first frame's write, then stdout drained (bounded: a renderer that
+   *  never draws must not hold the composition back). */
+  const flushFirstFrame = async (): Promise<void> => {
+    await Promise.race([firstFrame ?? Promise.resolve(), new Promise<void>(resolve => { setTimeout(resolve, 1000).unref() })])
+    await new Promise<void>(resolve => { process.stdout.write('', () => { resolve() }) })
+  }
+  /**
+   * Services composed after the mount: re-read what the screen took as values
+   * at mount (Chat's stores, theme host, toast sink). The /settings section
+   * follows its registry on its own (trackHostSettingsSection).
+   */
+  const refreshHostServices = (): void => {
+    bindToastSink()
+    if (!exited) instance?.rerender(buildTree())
+  }
+  if (entrySlot !== undefined) entrySlot.firstFrameFlushed = flushFirstFrame
+  // The kernels without a dsh-tui row: no row to refresh the mounted screen,
+  // so the slot does it.
+  if (entrySlot !== undefined && !entrySlot.dsh) entrySlot.composeSucceeded = () => { refreshHostServices() }
+
+  if (entrySlot?.dsh === true) {
+    entrySlot.composeSucceeded = () => { settleComposition(true) }
+    entrySlot.composeFailed = (error, logPath) => {
+      settleComposition(false)
+      const reason = error instanceof Error ? error.message : String(error)
+      logForDebugging(`dsh-tui: host composition failed (${reason})${logPath === undefined ? '' : ` — startup report: ${logPath}`}`)
+      compositionFailed = true
+      openDshSession = undefined
+      // No DSH to open on: the failure row names the report and the ways out.
+      const hint = logPath === undefined ? t('startup-compose-failed-hint') : t('startup-compose-failed-hint-log', { path: logPath })
+      if (!dshStartupSettled) {
+        settleDshStartup?.reject(new StartupOpenError(reason.split('\n')[0] ?? reason, hint, { cause: error }))
+        return
+      }
+      if (exited) return
+      // The session may already be adopted (the audit runs after the tree
+      // settled): a row that stays, not a toast.
+      try {
+        channel.pushLocal(t('startup-open-failed', { backend: backendLabel('dsh'), err: reason.split('\n')[0] ?? reason }), [hint])
+      } catch {
+      }
+    }
+    // The row's seams (presets, ask_user, approvals, the assembly filters)
+    // live on the row and unload with it: a row that comes back mounts them again.
+    const rowAttachment = createRowAttachment({
+      closed: () => compositionFailed || exited,
+      ready: () => channel.ready,
+      mountSeams: async (dshCtx) => {
+        await installPresets(dshCtx)
+        const seams = mountDshQuestionSeams(dshCtx)
+        if (seams.notice !== undefined) notifyChannel(seams.notice, { color: 'error' })
+        if (seams.registration.kind === 'waterfall') seams.registration.register(channel)
+        mountDshApprovals(dshCtx)
+        refreshHostServices()
+      },
+      readConfig: (rowRuntimeConfig) => { rowFacts.config = configValues<Config>(rowRuntimeConfig as RuntimeConfig<Config>) },
+      ended: () => channel.status === 'disposed',
+      // The resume path reopens the session on the entry's own context, so
+      // a later unload of the row can no longer take the agent along. It
+      // runs as the entry's action: the row's activation only triggered it.
+      reopen: async () => {
+        const result = await outsideActivation(() => channel.resumeTo(channel.sessionId))
+        if (result.ok) notifyChannel(t('session-reattached'))
+      },
+      failed: (error) => {
+        logForDebugging(`dsh-tui: reopening the session after its row came back failed (${error instanceof Error ? error.message : String(error)})`)
+      },
+    })
+    entrySlot.reattachDsh = rowAttachment.reattach
+    entrySlot.attachDsh = async (rowCtx, rowRuntimeConfig) => {
+      const dshCtx = rowCtx as Context
+      // The composition failed (its row is on screen), or the process is
+      // leaving (the root dispose waited for the Loader, which started this row).
+      if (compositionFailed || exited) return
+      try {
+        const rowConfig = configValues<Config>(rowRuntimeConfig as RuntimeConfig<Config>)
+        rowFacts.config = rowConfig
+        await rowAttachment.mount(dshCtx)
+        const rowRoute = { provider: rowConfig.provider, model: rowConfig.model }
+        // The same startup/deployment split the plugin's own boot makes (issue #67).
+        const { startupRoute: rowStartupRoute, deploymentRoute: rowDeploymentRoute } = startupRoutes(dshCtx, rowRoute)
+        const openOnRow = (sessionId: string | undefined, openMeta: { cwd: string }) =>
+          resolveAgent(dshCtx, sessionId, rowRoute, rowStartupRoute, rowDeploymentRoute, openMeta, rowConfig.preset)
+        /** The opened agent is this screen's from now on; returns its route. */
+        const takeOpened = async (opened: Awaited<ReturnType<typeof openOnRow>>): Promise<NonNullable<typeof rowFacts.route>> => {
+          agent = opened.agent
+          await attachWorkspaceOwnership(dshCtx, opened.agent)
+          rowFacts.route = opened.route ?? rowStartupRoute
+          return rowFacts.route
+        }
+        // `/new` after a failed startup open: DSH's create path on this row.
+        openDshSession = async cwd => {
+          const created = await openOnRow(undefined, { cwd })
+          await takeOpened(created)
+          refreshLastRunRecord()
+          return createDshSession(dshCtx, { agent: created.agent, handle: created.handle }, { screenOutlivesContext: true })
+        }
+        // The entry mounted on rebuilt defaults: the row's own `workspace` /
+        // `cwd` decide the session directory, with `apply`'s precedence. A
+        // provider-URI target resolves now that the providers exist.
+        const rowWorkspace = rowConfig.workspace ?? requestedWorkspace
+        let startupMeta = { cwd: resolveSessionCwd(rowConfig.cwd) }
+        if (rowWorkspace !== undefined) {
+          if (initialWorkspace !== undefined && rowWorkspace === requestedWorkspace) {
+            startupMeta = meta
+          } else {
+            const workspaces = getHostWorkspaceRuntime(dshCtx.get('tuiWorkspaces'))
+            const target = workspaces === undefined ? undefined : await workspaces.resolve(rowWorkspace)
+            if (target === undefined) throw new Error(unsupportedWorkspaceTarget(rowWorkspace))
+            startupMeta = { cwd: target.cwd }
+          }
+        }
+        // A revoked target (the safe-mode retry's warning path) cold-starts here too.
+        const rowSessionId = resumeTarget.kind === 'revoked'
+          ? undefined
+          : rowConfig.sessionId ?? resumeTargetFromArgv(cmdlineArgsOf(dshCtx) ?? process.argv.slice(2))
+        const opened = await openOnRow(rowSessionId, startupMeta)
+        const session = createDshSession(dshCtx, { agent: opened.agent, handle: opened.handle }, { screenOutlivesContext: true })
+        // The composition failed while this opened: close the unadoptable session.
+        if (compositionFailed) {
+          await session.dispose().catch(() => undefined)
+          return
+        }
+        const route = await takeOpened(opened)
+        settleDshStartup?.resolve({
+          session,
+          history: [],
+          route,
+          ...(opened.agentPreset === undefined ? {} : { agentPreset: opened.agentPreset }),
+        })
+        refreshLastRunRecord()
+      } catch (error) {
+        logForDebugging(`dsh-tui: DSH session failed to open (${error instanceof Error ? error.message : String(error)})`)
+        // A composition that fails reports itself (its row names the report).
+        if (!await compositionSettled) return
+        settleDshStartup?.reject(error)
+      }
+    }
+  }
 
   // The TUI is the front door: when the user unmounts it (Ctrl+C), dispose
   // the app tree and exit the process. The rejection handler covers
@@ -1793,6 +3035,10 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
   // unhandled rejection instead of a clean exit. A teardown-driven settle
   // is swallowed by the funnel (issue #12).
   void instance.waitUntilExit().then(handleExit, handleExit)
+}
+
+function unsupportedWorkspaceTarget(target: string): string {
+  return `dsh-tui: unsupported or unavailable workspace target: ${target}`
 }
 
 /**
@@ -1804,33 +3050,56 @@ export async function apply(ctx: Context, runtimeConfig: RuntimeConfig<Config>, 
  * without a session id.
  *
  * Preset composition (issue #8): a create resolves the requested preset
- * (cordis.yml `preset` over the persisted `/preset` choice over the roster
- * default) and mounts it in the factory's setup hook; a resume re-mounts the
- * preset the session's own log records. Without the roster both paths behave
- * as before presets existed.
+ * (`DSH_TUI_PRESET` over the persisted `/preset` choice over the cordis.yml
+ * default over the roster default) and mounts it in the factory's setup hook;
+ * a resume re-mounts the preset the session's own log records. Without the
+ * roster both paths behave as before presets existed.
  *
  * Model route (issues #14/#30/#67): a create adopts the caller's atomically
  * resolved route (validated against the adapter catalog below); a resume
- * passes only a COMPLETE cordis.yml route through — a provider-only pin must
- * not half-override the route the target session's own records carry.
+ * prefers the route the target session's own records carry and falls back to
+ * a COMPLETE cordis.yml route — a provider-only pin must not half-override
+ * the session's route, and the static route is only the deployment default.
  */
+/**
+ * The startup route and the deployment route a rejected preference falls back
+ * to (issue #67): the persisted `/model` pick wins whole, else a complete
+ * cordis.yml route, else Harness's agent-default-model selection — never the
+ * lock the user's own pick replaced, never a half-pinned config.
+ */
+function startupRoutes(ctx: Context, configuredRoute: { provider?: string; model?: string }): { startupRoute: ReturnType<typeof resolveModelRoute>; deploymentRoute: ReturnType<typeof resolveModelRoute> } {
+  const selected = (ctx.get('agentDefaultModel') as {
+    currentSelection?(): { provider?: unknown; model?: unknown }
+  } | undefined)?.currentSelection?.()
+  const harnessDefault = typeof selected?.provider === 'string' && selected.provider.length > 0
+    && typeof selected.model === 'string' && selected.model.length > 0
+    ? { provider: selected.provider, model: selected.model }
+    : undefined
+  return {
+    startupRoute: resolveModelRoute(configuredRoute, readModelPref(), harnessDefault),
+    deploymentRoute: resolveModelRoute(configuredRoute, undefined, harnessDefault),
+  }
+}
+
 async function resolveAgent(
   ctx: Context,
   requestedSessionId: string | undefined,
   configuredRoute: { provider?: string; model?: string },
   startupRoute: ModelRoute,
+  deploymentRoute: ModelRoute,
   meta: { cwd: string },
   configuredPreset?: string,
 ): Promise<{ agent: Agent; handle?: AgentHandle; agentPreset?: string; route?: ModelRoute }> {
-  // Resume override (issue #67): cordis.yml overrides the target session's
-  // recorded route only when it pins BOTH halves; undefined halves let the
-  // session's own request/header records win (issue #30). The recorded route
-  // is ALSO fed back into agentOptions (not just the status line): a resume
+  // Deployment fallback (issue #67): a resumed session continues on the route
+  // its own request/header records carry (issue #30) — the route it actually
+  // ran is more specific than any static config — and only a session that
+  // records none adopts the complete cordis.yml route. The recorded route is
+  // ALSO fed back into agentOptions (not just the status line): a resume
   // whose cordis.yml pins only `provider` would otherwise leave
   // agentOptions.model undefined, which breaks the `{{model}}` persona
   // variable for the resumed agent's own assembly and for every subagent it
   // spawns (dsh-subagent inherits `parent.options.model`).
-  const resumeRoute = explicitModelRoute(configuredRoute)
+  const resumeRoute = explicitModelRoute(configuredRoute) ?? deploymentRoute
   if (requestedSessionId !== undefined) {
     const resumeId = SessionId(requestedSessionId)
     const existing = ctx.agents.get(resumeId)
@@ -1889,8 +3158,8 @@ async function resolveAgent(
       const composed = await composePreset(ctx, persisted)
       const recorded = await resolvePersistedRoute(ctx, resumeId)
       const resumeOptions = {
-        provider: resumeRoute?.provider ?? recorded?.provider,
-        model: resumeRoute?.model ?? recorded?.model,
+        provider: recorded?.provider ?? resumeRoute?.provider,
+        model: recorded?.model ?? resumeRoute?.model,
       }
       const resumed = await ctx.agents.resume({
         resumeSessionId: resumeId,
@@ -1898,14 +3167,14 @@ async function resolveAgent(
         ...(composed.setup === undefined ? {} : { setup: composed.setup }),
       })
       // Status-line route on resume: the route the session actually
-      // continues on — a complete cordis.yml pin, else the route its own
-      // request/header records carry (a bare log yields undefined and the
-      // caller falls back to the startup resolution, best effort).
+      // continues on — its own request/header record, else the complete
+      // cordis.yml deployment route (a bare log that pins none falls back to
+      // the startup resolution, best effort).
       return {
         agent: resumed.agent,
         handle: resumed,
         agentPreset: composed.agentPreset,
-        route: resumeRoute ?? recordedModelRoute(snapshotLiveSessionEvents(resumed.agent.session)),
+        route: recordedModelRoute(snapshotLiveSessionEvents(resumed.agent.session)) ?? resumeRoute,
       }
     } catch (error) {
       // A claim says "this process is driving the log". A resume that never
@@ -1930,22 +3199,28 @@ async function resolveAgent(
     }
   }
   const sessionId = SessionId(randomUUID())
-  const presetPref = configuredPreset === undefined ? readPresetPref() : undefined
-  const composed = await composePreset(ctx, configuredPreset ?? presetPref)
-  if (!migratePresetPref(presetPref, composed.agentPreset)) {
+  // Fresh-session preset precedence (issue #8): the DSH_TUI_PRESET launch
+  // instruction, then the persisted `/preset` choice (the standing user
+  // default), then the cordis.yml value as the deployment default, then the
+  // roster default. The pref is migrated only when it was the effective
+  // source — an override must not rewrite the remembered id.
+  const presetOverride = presetOverrideFromEnv()
+  const presetPref = readPresetPref()
+  const composed = await composePreset(ctx, presetOverride ?? presetPref ?? configuredPreset)
+  if (presetOverride === undefined && !migratePresetPref(presetPref, composed.agentPreset)) {
     ctx.logger.warn(
       `dsh-tui: resolved preset preference "${presetPref}" as "${composed.agentPreset}" but could not persist the migrated id`,
     )
   }
   // Fresh-session route precedence (issues #14/#30/#67): resolved atomically
-  // by the caller (complete cordis.yml route > the persisted `/model` choice
+  // by the caller (the persisted `/model` choice > a complete cordis.yml route
   // > the harness default), then validated against the adapter catalog — a
-  // stale persisted choice falls back to the default route wholesale instead
-  // of reaching the server as an unknown model name.
+  // stale persisted choice falls back to the deployment route wholesale
+  // instead of reaching the server as an unknown model name.
   const llm = ctx.get('llm') as
     | { listModels(provider: string): Promise<readonly { id: string }[]> }
     | undefined
-  const { route, rejected } = await validateModelRoute(llm, startupRoute)
+  const { route, rejected } = await validateModelRoute(llm, startupRoute, deploymentRoute)
   if (rejected !== undefined) {
     ctx.logger.warn(
       `dsh-tui: model route ${rejected.provider}/${rejected.model} is not advertised by provider "${rejected.provider}"; falling back to ${route.provider}/${route.model}`,
@@ -1964,7 +3239,7 @@ async function resolveAgent(
   const bootReservation = bootReserved.ok ? bootReserved.reservation : undefined
   let created: Awaited<ReturnType<typeof ctx.agents.create>>
   try {
-    created = await ctx.agents.create({
+    created = await createFreshAgent(ctx, ctx.agents, {
       sessionId,
       meta: {
         ...meta,
@@ -1987,6 +3262,7 @@ async function resolveAgent(
   bootReservation?.settle()
   return { agent: created.agent, handle: created, agentPreset: composed.agentPreset, route }
 }
+
 
 /**
  * Distinguish a user-driven exit from a cordis context teardown (issue #12).
@@ -2030,6 +3306,106 @@ export function createExitFunnel(deps: { onUserExit: (error?: unknown) => void }
 }
 
 /**
+ * The exit funnel's crash tail, separate so scripts/verify-shutdown-fallback
+ * can drive it with failing sinks:
+ *
+ *  - Diagnostics (serialization and every log sink) may fail: a throwing
+ *    getter or Proxy trap on the error, or a sink that throws, falls back to
+ *    unserializableCrashDetail and one more logging attempt. The funnel latch
+ *    is already set here, so an exception escaping would skip the rest.
+ *  - The resume markers (and the last-run record, via writeResumeMarkers)
+ *    and the terminal cleanup (finish, then disposeRootAndExit(1)) always
+ *    run, whatever happened to the diagnostics.
+ */
+export interface CrashExitDeps {
+  /** The crash value itself (may be hostile: throwing getters, Proxy traps). */
+  readonly error: unknown
+  /** Serializer override (verify fault injection); default serializeCrashDetail. */
+  readonly serialize?: (error: unknown) => CrashDetail
+  /** One-line error log (ctx.logger.error). */
+  readonly logError: (message: string) => void
+  /** crash.log append (appendCrashLog). */
+  readonly appendLog: (detail: CrashDetail) => void
+  /** restart.log one-line event (logRestartEvent). */
+  readonly logRestart: (event: string, data?: Record<string, unknown>) => void
+  /** Debug log (logForDebugging). */
+  readonly logDebug: (message: string, data?: Record<string, unknown>) => void
+  /** Resume markers; best effort, isolated from the diagnostics' fate. */
+  readonly writeResumeMarkers: () => void
+  /** MUST-RUN terminal cleanup + exit(1) handoff (finishExit + dispose). */
+  readonly finish: (crashLine: string) => void
+}
+
+export function runCrashExit(deps: CrashExitDeps): void {
+  let detail: CrashDetail
+  try {
+    detail = (deps.serialize ?? serializeCrashDetail)(deps.error)
+    deps.logError(`dsh-tui: exit after error: ${detail.summary}`)
+    deps.appendLog(detail)
+    deps.logRestart('crash', { summary: detail.summary, ...(detail.digest === undefined ? {} : { digest: detail.digest }) })
+    deps.logDebug('dsh-tui: crash detail', { crash: detail.text })
+  } catch {
+    // Ultimate degradation: fixed literals only — never re-read the throwable,
+    // never re-run the sink chain beyond one best-effort attempt.
+    detail = unserializableCrashDetail()
+    try {
+      deps.logError(`dsh-tui: exit after error: ${detail.summary}`)
+      deps.appendLog(detail)
+      deps.logRestart('crash', { summary: detail.summary })
+    } catch {
+      // Nothing left to try — the cleanup below still must run.
+    }
+  }
+  try {
+    deps.writeResumeMarkers()
+  } catch {
+    // Resume persistence is best effort and must never block the exit.
+  }
+  deps.finish(`dsh-tui crashed: ${detail.message}`)
+}
+
+/** None where the root has no `ctx.agents` (before DSH composes, or a non-DSH kernel). */
+function dshAgentOn(ctx: Context, agentId: string): Agent | undefined {
+  return (ctx.get('agents') as { get(id: ReturnType<typeof SessionId>): Agent | undefined } | undefined)?.get(SessionId(agentId))
+}
+
+/**
+ * The crash tail's resume markers (exported for scripts/verify-shutdown-fallback).
+ * Leaves the marker a clean exit would, never CLEARS one.
+ */
+export function writeCrashResumeMarkers(deps: {
+  readonly ctx: Context
+  /** The non-DSH backend startup; undefined on the DSH kernel. */
+  readonly backendStart: {
+    persisted(sessionId: string, rows: readonly { readonly kind: string }[]): boolean
+    readonly sessionPrefs: { setLastSession(sessionId: string): void }
+  } | undefined
+  readonly channel: {
+    readonly agentId: string
+    readonly pending: readonly unknown[]
+    readonly rows: readonly { readonly kind: string }[]
+  }
+  readonly startupAgent: Agent | undefined
+  readonly writeResumeTarget: (sessionId: string) => void
+  readonly refreshLastRunRecord: () => void
+}): void {
+  const { ctx, backendStart, channel } = deps
+  if (backendStart === undefined) {
+    if (isExitResumable({
+      pendingCount: channel.pending.length,
+      liveAgent: dshAgentOn(ctx, channel.agentId),
+      startupAgent: deps.startupAgent,
+    })) {
+      deps.writeResumeTarget(channel.agentId)
+    }
+  } else if (backendStart.persisted(channel.agentId, channel.rows)) {
+    // Non-DSH sessions use their backend preference as the launcher marker.
+    backendStart.sessionPrefs.setLastSession(channel.agentId)
+  }
+  deps.refreshLastRunRecord()
+}
+
+/**
  * Whether a user exit should leave the resume marker (and print the resume
  * hint). Must be judged against the LIVE session behind the channel, not the
  * boot-time agent apply() captured: /resume, /new and /model swap the active
@@ -2043,9 +3419,13 @@ export function createExitFunnel(deps: { onUserExit: (error?: unknown) => void }
 export function isExitResumable(deps: {
   pendingCount: number
   liveAgent: Agent | undefined
-  startupAgent: Agent
+  /** Undefined when the session runs on a non-DSH backend: its id is never
+   *  a DSH resume target. */
+  startupAgent: Agent | undefined
 }): boolean {
   const agent = deps.liveAgent ?? deps.startupAgent
+  if (agent === undefined) return false
+  if (isUnstoredFreshSession(agent.session)) return false
   return (
     deps.pendingCount > 0 ||
     snapshotLiveSessionEvents(agent.session).some(
@@ -2055,7 +3435,7 @@ export function isExitResumable(deps: {
 }
 
 type InkShutdownState = {
-  detachForShutdown?: () => void
+  detachForShutdown?: () => void | Promise<void>
   /**
    * Full stdin detach for the /update child handoff (issues #284/#307):
    * removes the readable/data listeners and pauses the pump so the
@@ -2079,7 +3459,13 @@ export async function finishExit(
   notice: string | undefined,
   stderrNotice: string | undefined,
   done: () => void,
+  options: {
+    keepAltScreen?: boolean
+    /** Explicit renderer lease for legacy wrappers that replace unmount(). */
+    shutdownInput?: ShutdownInput
+  } = {},
 ): Promise<void> {
+  const input = options.shutdownInput ?? getShutdownInput(instance)
   try {
     // Resolve the Ink runtime twice: the instances map is keyed by stdout
     // identity, so a replaced/overridden stdout misses it; the render()
@@ -2087,7 +3473,10 @@ export async function finishExit(
     // a missed lookup skipped detachForShutdown, leaving the stdin pump,
     // TTY handlers and querier alive so the self-heal probe re-wrote
     // ENABLE_MOUSE_TRACKING after DISABLE_MOUSE_TRACKING had been sent).
-    const fromMap = readInkShutdownState(instances.get(process.stdout))
+    const mapped = instances.get(input?.stdout ?? process.stdout)
+    const fromMap = input === undefined || mapped?.shutdownInput === input
+      ? readInkShutdownState(mapped)
+      : undefined
     const fromHandle = instance === undefined ? undefined : readInkShutdownState(instance)
     // A handle that exposes neither detach hook is not an Ink runtime we can
     // latch (e.g. the fake render handles in shutdown regressions) — treat it
@@ -2118,7 +3507,7 @@ export async function finishExit(
     const cursor = fullscreen ? '' : cursorMoveToFrameEnd(runtime)
 
     try {
-      runtime?.detachForShutdown?.()
+      await runtime?.detachForShutdown?.()
       // The /update continuation spawns children that inherit this stdin;
       // strip the readable pump so the parent cannot swallow their input
       // (issues #284/#307). Harmless on plain exits — the process exits
@@ -2127,8 +3516,15 @@ export async function finishExit(
     } catch {
       ctx.logger.debug('dsh-tui: Ink shutdown detach failed; continuing with generic terminal cleanup')
     }
+    // Kernel-switch handoff (see handoffAck.ts):
+    //  - keepAltScreen: the old process stays in the alternate screen across
+    //    the spawn; it clears it and writes the switch notice there.
+    //  - ownsAltScreenExit() false: this is a replacement exiting before its
+    //    first frame, and the old process will close the alternate screen.
+    const exitAlt = fullscreen && !(options.keepAltScreen === true) && ownsAltScreenExit() ? EXIT_ALT_SCREEN : ''
     const cleanup = [
-      fullscreen ? EXIT_ALT_SCREEN : '',
+      ESU,
+      exitAlt,
       cursor,
       DISABLE_MOUSE_TRACKING,
       DISABLE_MODIFY_OTHER_KEYS,
@@ -2141,7 +3537,12 @@ export async function finishExit(
       supportsTabStatus() ? wrapForMultiplexer(CLEAR_TAB_STATUS) : '',
     ].join('')
     const suffix = notice === undefined ? '' : `${notice}\n`
-    await writeStream(process.stdout, `${cleanup}\r\n${suffix}`)
+    const restoreFrame = options.keepAltScreen === true ? '\x1b[2J\x1b[H' : ''
+    // A replacement may already own the terminal. Its modes and frame must
+    // survive old-root disposal; a stale exit notice also belongs to that root.
+    if (input?.ownsInput() !== false) {
+      await writeStream(input?.stdout ?? process.stdout, `${restoreFrame}${cleanup}\r\n${suffix}`)
+    }
     // Re-drain AFTER the cleanup sequences have landed (#507): terminal
     // replies and mouse packets already in flight when the exit started
     // keep arriving while cleanup is being written — the detach-time drain
@@ -2151,13 +3552,17 @@ export async function finishExit(
     // environment; 50ms proved too tight there) while staying well inside
     // the exit window the user already waits through.
     await new Promise<void>(resolve => setTimeout(resolve, 150))
-    runtime?.drainStdin?.()
-    if (stderrNotice !== undefined) {
+    if (input !== undefined) input.drain()
+    else runtime?.drainStdin?.()
+    if (stderrNotice !== undefined && input?.ownsInput() !== false) {
       await writeStream(process.stderr, `\n${stderrNotice}\n`)
     }
   } catch {
-    ctx.logger.debug('dsh-tui: terminal cleanup failed; continuing with process shutdown')
+    try {
+      ctx.logger.debug('dsh-tui: terminal cleanup failed; continuing with process shutdown')
+    } catch { /* a failed diagnostic must not swallow the exit action */ }
   }
+  input?.release()
   // Filesystem-only: the exported clipboard images live in a per-process
   // temp directory that nothing else removes.
   removeClipboardImageDir()
@@ -2225,18 +3630,79 @@ function writeStream(stream: NodeJS.WriteStream, data: string): Promise<void> {
  * terminal handoff the /update path uses, minus the installation step.
  * The resume contract is dual-written (env + resume.txt) before this runs.
  */
-function runRestart(ctx: Context, profile: string | undefined, sessionId: string): void {
+/**
+ * The tail of a failed restart / update notice: how to resume the session —
+ * or nothing, when there is none to resume (a backend session the CLI never
+ * persisted hands over an empty id: a hint without an id would mislead).
+ */
+function preservedSessionTail(sessionId: string, hint: (sessionId: string) => string): string {
+  return sessionId === '' ? '\n\n' : ` Your session is preserved — resume with:\n${hint(sessionId)}\n\n`
+}
+
+/**
+ * The entry's signals while following a replacement: SIGTERM is forwarded;
+ * SIGINT/SIGHUP already reach it through the process group. A replacement
+ * that dies by a termination signal ends this process the same way.
+ */
+function superviseReplacement<T extends TuiRestartOptions>(exitSeam: ProcessExitSeam | undefined, options: T): T {
+  if (exitSeam === undefined) return options
+  let replacement: { kill(signal: NodeJS.Signals): boolean } | undefined
+  exitSeam.request = request => {
+    if (replacement === undefined) return 'refused'
+    const forwarded = request.kind === 'signal' && request.signal === 'SIGTERM'
+    if (forwarded) replacement.kill('SIGTERM')
+    logRestartEvent('supervisor: exit request while following the replacement', request.kind === 'signal' ? { signal: request.signal, forwarded } : { code: request.code })
+    return 'supervising'
+  }
+  return {
+    ...options,
+    onSpawn: child => { replacement = child },
+    onTerminationSignal: signal => {
+      if ((TERMINATION_SIGNALS as readonly string[]).includes(signal)) dieBySignal(signal as TerminationSignal)
+    },
+  }
+}
+
+function runRestart(ctx: Context, profile: string | undefined, sessionId: string, hint: (sessionId: string) => string = id => resumeCommand(profile, id), options: TuiRestartOptions = {}, exitSeam?: ProcessExitSeam): void {
   logRestartEvent('runRestart: entered, disposing cordis root')
+  // A wedged turn makes the root dispose wait forever: the agent teardown
+  // waits for the loop to reach quiescence, and a tool that ignores its
+  // AbortSignal never settles (dsh-agent-loop drains every dispatched tool on
+  // abort). Spawning the replacement then would race this process for the
+  // session mount, so the only honest answer is the resume hint the user can
+  // run after this process is gone.
+  // Held texts no replacement took (a stall, a failed spawn) stay on disk for
+  // the resume command, which names their file; without a session to resume
+  // they go. A replacement that ran took them already.
+  const dropHeldInputs = (): void => { takeHeldInputs({ ...options.env }) }
+  const resumeLine = (id: string): string => heldInputsResumeCommand(hint(id), options.env)
+  const ended = (): string => {
+    if (sessionId === '') dropHeldInputs()
+    return preservedSessionTail(sessionId, resumeLine)
+  }
+  const stalled = (): void => {
+    writeHandoffNotice(`\ndsh-tui restart timed out while stopping the current turn.${ended()}`)
+    process.exit(1)
+  }
   disposeRootAndThen(ctx, () => {
     logRestartEvent('runRestart: root disposed, starting restartTui')
-    void restartTui(sessionId).then(
+    const supervision = superviseReplacement(exitSeam, options)
+    // The React tree stays mounted while supervising, so a late UI read of the
+    // ended channel is logged instead of crashing the supervisor.
+    addProcessErrorAbsorber(error => {
+      if (!(error instanceof Error) || error.message !== CHANNEL_UI_LIFETIME_ENDED) return false
+      logRestartEvent('supervisor: late UI read after dispose ignored', { at: error.stack?.split('\n').slice(1, 4).map(line => line.trim()).join(' | ') })
+      return true
+    })
+    void restartTui(sessionId, supervision).then(
       restartCode => {
         logRestartEvent('runRestart: restartTui resolved', { restartCode })
         if (restartCode !== 0) {
           writeHandoffNotice(
-            `\ndsh-tui restart failed to spawn (exit ${restartCode}). Your session is preserved — resume with:\n` +
-              `${resumeCommand(profile, sessionId)}\n\n`,
+            `\ndsh-tui restart failed to spawn (exit ${restartCode}).${ended()}`,
           )
+        } else {
+          dropHeldInputs()
         }
         process.exit(restartCode)
       },
@@ -2244,13 +3710,12 @@ function runRestart(ctx: Context, profile: string | undefined, sessionId: string
         const message = restartError instanceof Error ? restartError.message : String(restartError)
         logRestartEvent('runRestart: restartTui rejected', { message })
         writeHandoffNotice(
-          `\ndsh-tui restart failed: ${message}. Your session is preserved — resume with:\n` +
-            `${resumeCommand(profile, sessionId)}\n\n`,
+          `\ndsh-tui restart failed: ${message}.${ended()}`,
         )
         process.exit(1)
       },
     )
-  })
+  }, stalled)
 }
 
 function runUpdate(
@@ -2258,27 +3723,47 @@ function runUpdate(
   profile: string | undefined,
   sessionId: string,
   targetVersion: string | undefined,
+  kernel: KernelBackendId,
+  hint: (sessionId: string) => string = id => resumeCommand(profile, id),
+  exitSeam?: ProcessExitSeam,
 ): void {
+  const recovery = preservedSessionTail(sessionId, hint)
   disposeRootAndThen(ctx, () => {
+    logRestartEvent('update: starting', { profile, targetVersion })
+    writeHandoffNotice(`\ndsh-tui: installation starts. Check/repair an interrupted installation before resuming.${recovery}`)
     if (profile === undefined) {
-      process.stderr.write(`\n${t('update-aborted-no-profile')}\n`)
+      writeHandoffNotice(`\n${t('update-aborted-no-profile')}${recovery}`)
       process.exit(1)
     }
-    void updateTuiAndRestart(sessionId, profile, targetVersion).then(
+    const cancellation = new AbortController()
+    const supervision: TuiRestartOptions = superviseReplacement(exitSeam, {})
+    const replacementRequest = exitSeam?.request
+    if (exitSeam !== undefined) exitSeam.request = () => {
+      cancellation.abort()
+      // Installer owns its cancellation deadline. Entry fallback disposal
+      // must not kill this process before the owned installer tree settles.
+      return 'supervising'
+    }
+    const onSpawn = supervision.onSpawn
+    supervision.onSpawn = child => {
+      if (exitSeam !== undefined) exitSeam.request = replacementRequest
+      onSpawn?.(child)
+    }
+    void updateTuiAndRestart(sessionId, profile, targetVersion, kernel, supervision, cancellation.signal).then(
       ({ updateCode, restartCode }) => {
+        logRestartEvent('update: finished', { updateCode, restartCode })
         if (updateCode !== 0) {
-          process.stderr.write(
-            `\ndsh-tui update failed (exit ${updateCode}). Your session is preserved — resume with:\n` +
-              `${resumeCommand(profile, sessionId)}\n\n`,
+          writeHandoffNotice(
+            `\ndsh-tui update failed (exit ${updateCode}). Check/repair the installation before resuming.${preservedSessionTail(sessionId, hint)}`,
           )
         }
         process.exit(restartCode)
       },
       updateError => {
+        logRestartEvent('update: rejected')
         const message = updateError instanceof Error ? updateError.message : String(updateError)
-        process.stderr.write(
-          `\ndsh-tui update failed: ${message}. Your session is preserved — resume with:\n` +
-            `${resumeCommand(profile, sessionId)}\n\n`,
+        writeHandoffNotice(
+          `\ndsh-tui update failed: ${message}. Check/repair the installation before resuming.${preservedSessionTail(sessionId, hint)}`,
         )
         process.exit(1)
       },
@@ -2322,17 +3807,24 @@ function resumeCommand(profile: string | undefined, sessionId: string): string {
  * handoff (update/restart) may legitimately take longer than the bound, and
  * reporting failure on a clean exit would mislead wrapper scripts.
  */
-function disposeRootAndThen(ctx: Context, done: () => void, fallbackCode = 1): void {
+function disposeRootAndThen(ctx: Context, done: () => void, fallback: number | (() => void) = 1): void {
+  const startedAt = Date.now()
   const timer = setTimeout(() => {
     // Diagnosis for a stalled disposal: without this line the fallback exit
     // is indistinguishable from a successful handoff in the field.
-    logRestartEvent('dispose: timeout, taking fallback exit', { fallbackCode })
-    process.exit(fallbackCode)
+    logRestartEvent('dispose: timeout, taking fallback exit', typeof fallback === 'number' ? { fallbackCode: fallback } : { fallback: 'signal' })
+    if (typeof fallback === 'number') process.exit(fallback)
+    else fallback()
   }, 5000)
   timer.unref()
-  void withHostRootCapability(() => ctx.root.fiber.dispose()).then(
+  // A composition still running into this root settles first.
+  // The pooled, process-wide resources of every backend this process actually
+  // loaded are closed here — after the fiber, never before (P0 D4-P2/P3).
+  void disposeRootSettled(ctx, () => withHostRootCapability(() => ctx.root.fiber.dispose())).finally(() => unloadBackends()).then(
     () => {
       clearTimeout(timer)
+      // The teardown's length, to restart.log only (never the terminal).
+      logRestartEvent('dispose: root disposed', { ms: Date.now() - startedAt })
       done()
     },
     () => {

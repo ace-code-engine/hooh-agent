@@ -2,18 +2,19 @@ import React from 'react'
 // 粘贴/清洗语义已抽到 utils/inputPaste.ts（方案 B：PromptInput 与 Launchpad 共享；
 // 行为逐字节不变，只是搬了家）。
 import { sanitizeEditableText, sanitizePastedText } from '../utils/inputPaste.js'
-import { constants as fsConstants } from 'node:fs'
-import { open, unlink } from 'node:fs/promises'
+import { unlink } from 'node:fs/promises'
 import { basename, resolve } from 'node:path'
 import { t } from '../i18n.js'
 import { Box, Text, useInput, useTerminalSize, useTheme, type ScrollBoxHandle } from '../ui.js'
+import { COMPOSER_IMAGE_TOKEN, imageTokenSpans, imageTokenAround, snapOffImageToken, expandImageTokenRange, type ImageTokenSpan } from './composerImageTokens.js'
 import { EffortChargeGlyph } from './EffortChargeGlyph.js'
 import { EffortInputBorder, type InputBorderLabel } from './EffortInputBorder.js'
 import { EffortTierBadge } from './EffortTierBadge.js'
-import { isLightThemeActive } from '../theme.js'
+import { cursorGlyphColor, getTheme } from '../theme.js'
 import { sessionColorHex } from '../terminal-utils/sessionColors.js'
-import { useDeclaredCursor } from '../ink/hooks/use-declared-cursor.js'
+import { useDeclaredCursor, useNativeCursor } from '../ink/hooks/use-declared-cursor.js'
 import type { ClickEvent } from '../ink/events/click-event.js'
+import type { Color } from '../ink/styles.js'
 import type { DragEvent } from '../ink/events/drag-event.js'
 import { TerminalWriteContext } from '../ink/useTerminalNotification.js'
 import { setClipboard } from '../ink/termio/osc.js'
@@ -23,8 +24,9 @@ import { stringWidth } from '../ink/stringWidth.js'
 import { truncateToWidth } from '../ink/truncateToWidth.js'
 import { getGraphemeSegmenter } from '../utils/intl.js'
 import { draftWordRangeAt, isDraftWordBoundary } from '../utils/draftWordBoundary.js'
+import { wordBoundaryLeft, wordBoundaryRight } from '../utils/inputWordBoundary.js'
 import { formatClipboardInsert, readClipboard } from '../utils/clipboard.js'
-import { imagePathMediaType, parsePastedImagePath, stageClipboardFilePaths } from '../utils/pastedImagePath.js'
+import { imagePathMediaType, parsePastedImagePath, readBoundedRegularFile, stageClipboardFilePaths } from '../utils/pastedImagePath.js'
 import { editInExternalEditor } from '../utils/externalEditor.js'
 import { setPromptEditorNode, EditorButton } from './PromptEditor.js'
 import type { ChannelUi as Channel } from '../adapter/channel/ui-policy.js'
@@ -34,7 +36,7 @@ import type {
   StagedImageHandle,
 } from '../dsh-adapter/channel.js'
 import type { TranscriptImage } from '../dsh-adapter/transcript-images.js'
-import { isHiddenCommandName, parseCommandName } from '../commands.js'
+import { isBootSafeCommand, isHiddenCommandName, isLocalCommandName, isUnavailableLocalCommand, parseCommandName, workingHoldOf } from '../commands.js'
 import { appendHistory, HISTORY_LIMIT, historyProjectKey, loadHistoryOldestFirst } from '../history.js'
 import { mentionAtCaret } from '../utils/mentions.js'
 import { preserveSelection, type FileCandidate } from '../utils/fileSuggestions.js'
@@ -43,7 +45,8 @@ import { actionMatches } from '../utils/keymap.js'
 import { CommandSuggestions } from './CommandSuggestions.js'
 import { FileSuggestions } from './FileSuggestions.js'
 import { HelpMenu } from './HelpMenu.js'
-import { OverlayAbove } from './OverlayAbove.js'
+import { OverlayAbove, useOverlayListRows } from './OverlayAbove.js'
+import { listWindow } from './listWindow.js'
 import { SuggestionCard, cardContentWidth } from './SuggestionCard.js'
 import {
   filterLiveImageBindings,
@@ -223,60 +226,10 @@ const FOLD_MIN_CHARS = 600
 const isBigInput = (text: string): boolean =>
   text.split('\n').length >= FOLD_MIN_LINES || text.length >= FOLD_MIN_CHARS
 
-
-const COMPOSER_IMAGE_TOKEN = /\[Image #\d+\]/gu
-
 /** Format label for one image media type, matching the image preview card's
  *  title (`JPEG`, `PNG`, `WEBP`, `GIF`). */
 const mediaTypeLabel = (mediaType: string): string =>
   mediaType.replace(/^image\//u, '').replace(/\+xml$/u, '').toUpperCase()
-
-/** One `[Image #N]` occurrence: [start, end) offsets into the draft. */
-interface ImageTokenSpan {
-  readonly start: number
-  readonly end: number
-  readonly token: string
-}
-
-/** Every `[Image #N]` in `text`, in order. */
-function imageTokenSpans(text: string): ImageTokenSpan[] {
-  const spans: ImageTokenSpan[] = []
-  for (const match of text.matchAll(COMPOSER_IMAGE_TOKEN)) {
-    const start = match.index ?? 0
-    spans.push({ start, end: start + match[0].length, token: match[0] })
-  }
-  return spans
-}
-
-/** The span whose interior (exclusive of both edges) contains `offset`. */
-function imageTokenAround(spans: readonly ImageTokenSpan[], offset: number): ImageTokenSpan | undefined {
-  return spans.find(span => span.start < offset && offset < span.end)
-}
-
-/**
- * A caret never rests inside a staged token: an offset in a span's interior
- * moves to the edge `prefer` names — `'start'` (the token becomes the caret
- * cluster), `'end'`, or whichever is nearer.
- */
-function snapOffImageToken(
-  spans: readonly ImageTokenSpan[],
-  offset: number,
-  prefer: 'start' | 'end' | 'nearest',
-): number {
-  const span = imageTokenAround(spans, offset)
-  if (span === undefined) return offset
-  if (prefer === 'start') return span.start
-  if (prefer === 'end') return span.end
-  return offset - span.start < span.end - offset ? span.start : span.end
-}
-
-/** Expand a deletion or selection to include every staged token it touches. */
-function expandImageTokenRange(spans: readonly ImageTokenSpan[], start: number, end: number) {
-  return {
-    start: snapOffImageToken(spans, start, 'start'),
-    end: snapOffImageToken(spans, end, 'end'),
-  }
-}
 
 /** Capabilities referenced by `text`, in first occurrence order. A raw token
  * restored from disk/history has no sidecar entry and therefore stays inert. */
@@ -294,49 +247,6 @@ export function composerImageRefsForText(
     if (stageId !== undefined) refs.push({ token, stageId })
   }
   return refs
-}
-
-/** Read one regular file through one descriptor, bounded to `maxBytes + 1`.
- * The extra byte detects a file that grows after fstat; a short read detects
- * shrinkage. This avoids stat(path) → readFile(path)'s path-swap TOCTOU and
- * never allocates from an untrusted size before the profile limit is checked. */
-async function readBoundedRegularFile(path: string, maxBytes: number): Promise<Uint8Array> {
-  // O_NONBLOCK keeps a pasted FIFO/device path from parking the UI before
-  // fstat can reject it; regular-file reads are unchanged.
-  const file = await open(path, fsConstants.O_RDONLY | fsConstants.O_NONBLOCK)
-  try {
-    const info = await file.stat()
-    if (!info.isFile()) throw new Error(`${basename(path)} is not a regular file`)
-    if (info.size > maxBytes) throw new Error(`image exceeds this profile's per-image size limit`)
-    const data = Buffer.allocUnsafe(info.size + 1)
-    let offset = 0
-    while (offset < data.byteLength) {
-      const { bytesRead } = await file.read(data, offset, data.byteLength - offset, offset)
-      if (bytesRead === 0) break
-      offset += bytesRead
-    }
-    if (offset !== info.size) throw new Error(`${basename(path)} changed while it was being read`)
-    return data.subarray(0, offset)
-  } finally {
-    await file.close()
-  }
-}
-
-/** Index of the word boundary at or before `cursor` (readline alt+b). */
-function wordBoundaryLeft(text: string, cursor: number): number {
-  let index = cursor
-  while (index > 0 && /\s/.test(text[index - 1]!)) index--
-  while (index > 0 && !/\s/.test(text[index - 1]!)) index--
-  return index
-}
-
-/** Index of the word boundary after `cursor` (readline alt+f). */
-function wordBoundaryRight(text: string, cursor: number): number {
-  const length = text.length
-  let index = cursor
-  while (index < length && !/\s/.test(text[index]!)) index++
-  while (index < length && /\s/.test(text[index]!)) index++
-  return index
 }
 
 // --- vim normal-mode helpers -----------------------------------------------
@@ -527,7 +437,7 @@ export interface PromptController {
    * branch calls this first, before its clear/exit semantics.
    */
   consumeSelectionCopy(): boolean
-  /** Consume selection/editor Esc before Chat's working-turn interrupt. */
+  /** Consume a local overlay/editor Esc before Chat's working-turn interrupt. */
   consumeEscape(): boolean
   /** Toggle vim editing mode (`/vim`); returns the new state (true = on). */
   toggleVim(): boolean
@@ -546,6 +456,13 @@ export interface PromptInputProps {
   channel: Channel
   /** Keep the draft mounted while another prompt-slot panel owns the UI. */
   suspended?: boolean
+  /**
+   * 原生终端光标（IME 预编辑/读屏锚点）的让位：侧栏持有键盘焦点时传
+   * false——主输入框停驻硬件光标会让输入法的临时拼音浮在主聊天框，即使
+   * 按键已经路由进面板。聚焦的面板自己的输入组件（如 btw 的 composer）
+   * 会接管声明。默认 true（无侧栏/焦点在聊天时行为不变）。
+   */
+  cursorParking?: boolean
   /**
    * Host judgement "this notice needs no toast" — the pet panel says it with
    * its speech bubble instead while it is the active panel. Evaluated during
@@ -569,6 +486,14 @@ export interface PromptInputProps {
    * empty first value.
    */
   draftCache?: PromptDraftCache
+  /**
+   * The input can take keys: draft adoption has run and the listener above is
+   * live. Fires on mount when already unsuspended, and again whenever
+   * `suspended` lifts — a caller replaying keys captured during a screen swap
+   * must hold its queue until then, because a replay emitted while suspended
+   * is dropped by `isActive: !suspended` with nothing left to retry it.
+   */
+  onInputReady?: () => void
   /** Whether the `?` help menu is open (state lives in the Chat screen). */
   helpOpen: boolean
   onToggleHelp(): void
@@ -593,8 +518,8 @@ export interface PromptInputProps {
   /** Double-tap Esc with an empty input: open the rewind picker. */
   onRewindRequest?(): void
   /**
-   * ← on an EMPTY prompt backgrounds this session and
-   * opens the agent view (with text, ← moves the caret as usual).
+   * ← on an EMPTY prompt opens the session manager. DSH backgrounds the
+   * session first; other backends keep it attached. With text, ← moves the caret.
    */
   onBackgroundRequest?(): void
   /**
@@ -607,6 +532,17 @@ export interface PromptInputProps {
    * had before.
    */
   onOpenSessions?(): void
+  /**
+   * 当前内核的**短品牌名**（选择器目录里那一行的 `manifest.shortLabel`，宿主经
+   * Chat 透传）：只用在「这条命令当前后端不支持」的提示里，与内核选择器、落地页
+   * 铭牌同一份来源（P0 D2——界面里不再有 id→名字表）。
+   *
+   * 不复用 `channel.backendCapabilities.backendLabel`：那是**会话后端自己的全名**
+   * （后端 `descriptor.label`，如 "Claude Agent"），而这里是宿主词表给内核起的短名
+   * （"Claude"）；两者在真机上恰好都可用，但短名才是选择器那一屏的用词。缺席 =
+   * 退回原样 backendId（不猜品牌名）。
+   */
+  backendLabel?: string
   /**
    * Background sessions waiting on the user (agent view "needs input" rows
    * excluding this session); the prompt footer shows the
@@ -626,9 +562,9 @@ export interface PromptInputProps {
   onCaretImage?(image: TranscriptImage | undefined, title: string | undefined, reason: 'caret' | 'click'): void
   /**
    * True while the caller shows the caret-driven preview. Esc then goes to
-   * `onDismissCaretPreview` ahead of every other Esc meaning (the ladder's
-   * "close the image preview" rung): this input's listener runs before
-   * Chat's, and the prompt is NOT inert under a caret preview.
+   * `onDismissCaretPreview` after help and before ordinary editing (the
+   * "close the image preview" rung). Chat can delegate through the prompt
+   * controller; the prompt remains active under a caret preview.
    */
   caretPreviewOpen?: boolean
   onDismissCaretPreview?(): void
@@ -643,11 +579,11 @@ export interface PromptInputProps {
 /**
  * dsh-TUI prompt input: rounded border box (top+bottom borders
  * only), `❯ ` prompt char (dimmed while a turn is working), the text with a
- * block cursor at the cursor position, and above it the slash-command /
+ * native cursor at the editing position, and above it the slash-command /
  * file-completion suggestion card (SuggestionCard: rounded panel with the
  * selected row behind a `❯` pointer in the theme's `suggestion` color).
  *
- * Empty input: a solid block caret on a blank cell and nothing else — no
+ * Empty input: a caret on a reserved blank cell and nothing else — no
  * placeholder text, so the terminal-painted IME preedit (pinyin) at the
  * parked cursor can never be overlaid on anything.
  *
@@ -674,7 +610,9 @@ export function PromptInput({
   channel,
   toastSuppressed,
   suspended = false,
+  cursorParking = true,
   draftCache,
+  onInputReady,
   helpOpen,
   onToggleHelp,
   onRunCommand,
@@ -684,6 +622,7 @@ export function PromptInput({
   onRewindRequest,
   onBackgroundRequest,
   onOpenSessions,
+  backendLabel,
   backgroundAgentsNeedingInput,
   controllerRef,
   onCaretImage,
@@ -692,6 +631,15 @@ export function PromptInput({
   now = Date.now,
 }: PromptInputProps) {
   const [themeName] = useTheme()
+  const nativeCursor = useNativeCursor()
+  /**
+   * Painted caret fill for static snapshots and atomic image-token focus.
+   * Ordinary TTY editing uses the terminal's own cursor. A legacy palette
+   * may omit `cursor`; normalize that case to the inverse-video fallback.
+   */
+  const cursorTheme = getTheme(themeName)
+  const cursorColor = cursorTheme.cursor ?? ''
+  const cursorGlyph = cursorGlyphColor(cursorTheme)
   // Raw stdout writer for OSC 52 clipboard writes (selection copy) — must
   // bypass the frame pipeline; null outside a mounted Ink App.
   const writeRaw = React.useContext(TerminalWriteContext)
@@ -844,6 +792,15 @@ export function PromptInput({
   const [homeHovered, setHomeHovered] = React.useState(false)
   /** Pointer over the input box (drives the hover peek card). */
   const [hovered, setHovered] = React.useState(false)
+  /** Highlighted row of the docked-queue selector (null = inactive; the
+   *  index runs over the docked subset of `channel.pending`, oldest first).
+   *  The ref mirrors it for the deferred consumeEscape controller closure. */
+  const [dockSelected, setDockSelectedState] = React.useState<number | null>(null)
+  const dockSelectedRef = React.useRef<number | null>(null)
+  const setDockSelected = (index: number | null): void => {
+    dockSelectedRef.current = index
+    setDockSelectedState(index)
+  }
   /** 120ms grace so the pointer crossing the input border row from the
    *  chip up onto the peek card never flickers the card. */
   const hoverLeaveTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null)
@@ -1091,7 +1048,10 @@ export function PromptInput({
   // hand-off below. A commit-time write would run BEFORE the restore effect
   // has consumed the slot, so the composer's own first (empty) value would
   // erase the draft it just came back for.
-  // Publish the live controller (fresh closure over `value` every render).
+  // Publish the live controller. `hasText()` reads the ref, not the render
+  // closure: a draft restored in a passive effect (the launchpad hand-off
+  // replays its keys from there) is already in `valueRef` while this facade
+  // still carries the empty first value.
   // A prompt-slot panel withdraws the handle in the same commit: external
   // injection must not append/submit a hidden command draft while it waits
   // for a decision. clear() mirrors the double-tap-Esc clear.
@@ -1102,7 +1062,7 @@ export function PromptInput({
       return
     }
     controllerRef.current = {
-      hasText: () => value.length > 0,
+      hasText: () => valueRef.current.length > 0,
       text: () => valueRef.current,
       previewImages: () => composerImageRefsForText(valueRef.current, draftImagesRef.current).flatMap(ref => {
         const image = channel.stagedImage(ref.stageId)
@@ -1153,7 +1113,7 @@ export function PromptInput({
         // The selection stays: copy never clears it (Esc/typing/delete do).
         return true
       },
-      consumeEscape: consumeEditingEscape,
+      consumeEscape: consumeLocalEscape,
       toggleVim: () => {
         const next = !vimEnabledRef.current
         vimEnabledRef.current = next
@@ -1179,7 +1139,15 @@ export function PromptInput({
   // tell the caller to clear it.
   const lastFill = React.useRef<string | null>(null)
   React.useLayoutEffect(() => {
-    if (fillText && fillText !== lastFill.current) {
+    // The caller clears a fill once it lands (`fillText` returns to null).
+    // Drop the dedupe key with it: keeping the key past the clear made the
+    // next recall of the SAME text look like a duplicate re-render and
+    // silently swallowed it (#1665).
+    if (!fillText) {
+      lastFill.current = null
+      return
+    }
+    if (fillText !== lastFill.current) {
       lastFill.current = fillText
       syncImageGeneration()
       discardDraftImages()
@@ -1199,6 +1167,15 @@ export function PromptInput({
   const editorBusyRef = React.useRef(false)
   /** Enter dedupe window: cmd pipelines can deliver one Enter as `\r`+`\n`. */
   const lastEnterAtRef = React.useRef(0)
+  /**
+   * Ctrl+Enter already carried the non-docked queue through its interrupt and
+   * re-queued it: those previews are the parked copies now, so a second
+   * Ctrl+Enter during the same convergence must not list them again.
+   */
+  const interruptRequeuedRef = React.useRef(false)
+  React.useEffect(() => {
+    if (!channel.cancelPending) interruptRequeuedRef.current = false
+  }, [channel.cancelPending])
   React.useEffect(() => {
     return () => {
       if (escTimerRef.current) clearTimeout(escTimerRef.current)
@@ -1282,7 +1259,28 @@ export function PromptInput({
   // snapshot's cherry-pick resurrected the old formula.)
   const helpViewportHeight = Math.max(3, Math.min(terminalRows - 7, 15))
 
-  const suggestions = value.startsWith('/') ? channel.commandCompletions(value) : []
+  // Issue #1072: while a turn runs, the overlay groups the commands that
+  // AFFECT the running conversation (gated / conversation-acting / steering)
+  // below the ones that do not. The partition is a stable reorder and keeps ONE
+  // index space: `suggestions` stays the only list selection, Enter dispatch and
+  // clicks read, and the default selection stays the first normal-region row.
+  // The region is marked by colour only — it costs no display row.
+  const completionInput = value
+  const completions = value.startsWith('/') ? channel.commandCompletions(value) : []
+  const holdOf = (commandLine: string): boolean =>
+    workingHoldOf(commandLine, channel.commandList.find(
+      command => command.name === commandLine.replace(/^\//, '').split(/[\t ]/u)[0],
+    )?.skill === true) !== undefined
+  const normalCompletions = channel.working
+    ? completions.filter(completion => !holdOf(completion.commandLine))
+    : completions
+  /** 灰区起始索引；灰区为空时不分区。 */
+  const suggestionsHoldFrom = channel.working && normalCompletions.length < completions.length
+    ? normalCompletions.length
+    : undefined
+  const suggestions = suggestionsHoldFrom === undefined
+    ? completions
+    : [...normalCompletions, ...completions.filter(completion => holdOf(completion.commandLine))]
   const overlayOpen =
     suggestions.length > 0 &&
     !expanded &&
@@ -1320,16 +1318,17 @@ export function PromptInput({
   }, [channel, mention?.query, atTrigger])
   // Esc dismisses the overlay for the token being edited (it reopens once the
   // text changes); it must NOT clear a mid-message input.
-  const fileEscRef = React.useRef(-1)
-  React.useEffect(() => {
-    fileEscRef.current = -1
-  }, [value])
+  const fileEscRef = React.useRef<{ edit: number; start: number } | null>(null)
+  const [, refreshFileMenu] = React.useState(0)
+  const fileMenuDismissed = (start: number): boolean =>
+    fileEscRef.current?.edit === inputEditSequenceRef.current && fileEscRef.current.start === start
   const fileOverlayOpen =
+    mention !== undefined &&
     fileMatches.length > 0 &&
     !expanded &&
     !helpOpen &&
     !selectionActive &&
-    fileEscRef.current !== mention?.start
+    !fileMenuDismissed(mention.start)
 
   /**
    * The `[Image #N]` tokens of `text` that carry a live draft capability.
@@ -1467,6 +1466,11 @@ export function PromptInput({
     // this edit replaces, and `diffSpan` needs both texts. `reset` ends the
     // draft's history, `silent` (undo itself, a recall) leaves it untouched.
     if (next !== prev) {
+      // Every real text change (typing, paste, history, external editor,
+      // undo) hands the arrows back to the draft: a held-queue selection
+      // must not survive an edited draft and steer ↑/↓ over the text.
+      // Caret-only moves (next === prev) never land here.
+      if (dockSelectedRef.current !== null) setDockSelected(null)
       if (undo === 'reset') clearDraftUndo()
       else if (undo !== 'silent') {
         recordDraftEdit(prev, prevCursor, snapshotBlock === undefined ? block : snapshotBlock, next, offset, undo)
@@ -1708,14 +1712,37 @@ export function PromptInput({
     setFileSelected(0)
   }
 
+  /**
+   * A channel action that throws synchronously (owner/lifetime race while the
+   * process is tearing down or a registration changed) is swallowed by Ink's
+   * stdin pump — stderr only, no UI. Reporting it here is the difference
+   * between "the send failed" and "my text vanished". The draft is never
+   * cleared before the call succeeds, so the text stays editable either way.
+   */
+  const reportSendFailure = (error: unknown): void => {
+    const message = error instanceof Error ? error.message : String(error)
+    try {
+      channel.notify(t('send-failed', { err: message }), { color: 'error' })
+    } catch {
+      // A channel whose owner is already gone cannot show a toast either.
+      // The draft surviving is the important half; the renderer's stdin
+      // catch only writes the throw to stderr.
+    }
+  }
+
   const submitText = (text: string, notice?: string) => {
     const trimmed = text.trim()
     if (!trimmed) return
     const images = imageRefsFor(trimmed)
     if (shellImagesUnsupported(trimmed, images)) return
     rememberHistory(trimmed, images)
+    try {
+      channel.submit(trimmed, images)
+    } catch (error) {
+      reportSendFailure(error)
+      return
+    }
     clearDeliveredDraft()
-    channel.submit(trimmed, images)
     if (notice) {
       channel.notify(notice, { timeoutMs: 2500 })
     } else if (channel.working) {
@@ -1735,8 +1762,20 @@ export function PromptInput({
     if (!trimmed) return
     const images = imageRefsFor(trimmed)
     rememberHistory(trimmed, images)
+    try {
+      channel.steer(trimmed, images)
+    } catch (error) {
+      reportSendFailure(error)
+      return
+    }
     clearDeliveredDraft()
-    channel.steer(trimmed, images)
+    // While an abort is still converging the step boundary this steer waits
+    // for may be the very thing the wedged turn never reaches: do not promise
+    // an immediate next step then.
+    if (channel.cancelPending) {
+      channel.notify(t('input-steer-pending'), { color: 'warning', timeoutMs: 4000 })
+      return
+    }
     channel.notify(t('input-interrupted-next'), { timeoutMs: 2500 })
   }
 
@@ -1750,8 +1789,13 @@ export function PromptInput({
     const images = imageRefsFor(trimmed)
     if (shellImagesUnsupported(trimmed, images)) return
     rememberHistory(trimmed, images)
+    try {
+      channel.submit(trimmed, images)
+    } catch (error) {
+      reportSendFailure(error)
+      return
+    }
     clearDeliveredDraft()
-    channel.submit(trimmed, images)
     channel.notify(t('input-queued-after-turn'), { timeoutMs: 2500 })
   }
 
@@ -1761,6 +1805,9 @@ export function PromptInput({
    * cannot withdraw inbox messages (released package without the inbox API).
    */
   const pullBackLast = () => {
+    // Alt+↑ keeps its direct last-item meaning even while the dock selector
+    // is open — one press, one retracted row (the selector closes with it).
+    setDockSelected(null)
     const item = channel.pending[channel.pending.length - 1]
     if (!item) return
     if (!channel.removePending(item.id)) {
@@ -1801,6 +1848,96 @@ export function PromptInput({
   }
 
   /**
+   * The docked queue (Esc parked it while interrupting, Claude Code parity):
+   * previews the composer keeps until the user sends them all (⏎ on an empty
+   * draft / the clickable hint) or retracts items (the ↑ selector / Alt+↑).
+   */
+  const dockedPending = channel.pending.filter(item => item.docked === true)
+  const dockCount = dockedPending.length
+
+  /** Send the whole dock now (⏎ on an empty draft, or the hint row click):
+   *  FIFO, exactly once, through the channel's own delivery chain. */
+  const sendDocked = (): void => {
+    let sent: number
+    try {
+      sent = channel.deliverDocked()
+    } catch (error) {
+      // The dock rows are still parked: no "sent" claim may be made here.
+      reportSendFailure(error)
+      return
+    }
+    if (sent > 0) channel.notify(t('input-dock-sent', { n: sent }), { timeoutMs: 2500 })
+    setDockSelected(null)
+  }
+
+  /** Retract one docked row into the draft for editing (selector ⏎, row
+   *  click, Alt+↑ on the last): purely local — the backend dropped its copy
+   *  with the aborted turn, so every backend can do it.
+   *
+   *  A draft with real content is never destroyed by the retraction: it
+   *  SWAPS — the whole draft (text + staged images) parks at
+   *  the dock's tail while the clicked row comes into the input. Nothing
+   *  sends; the swap is one undo step, so Ctrl+Z brings the parked draft
+   *  back (text, caret, images and fold block; the parked row retains the
+   *  image capabilities, see stageIdIsRetained). Only an empty (or
+   *  whitespace-only) draft takes the plain retraction path. */
+  const editDocked = (index: number): void => {
+    const item = dockedPending[index]
+    setDockSelected(null)
+    if (item === undefined) return
+    if (valueRef.current.trim() !== '') {
+      // Park the draft FIRST: its capabilities must already be retained by
+      // the pending row when setInput's undo bookkeeping and sidecar pruning
+      // run below, or a later swap-back would find them discarded.
+      const swapped = channel.swapDockedForDraft(item.id, {
+        text: valueRef.current,
+        images: imageRefsFor(valueRef.current),
+      })
+      if (!swapped) {
+        channel.notify(t('input-cannot-retract'), { color: 'warning', timeoutMs: 2500 })
+        return
+      }
+      // One sealed undo step captures the draft the swap replaces (same
+      // shape as the external-editor refill): snapshot the fold block
+      // BEFORE clearing it, so Ctrl+Z restores the chip too. setInput runs
+      // while the sidecar still maps the parked draft's tokens — the undo
+      // snapshot then carries them, and its pruning sees the pending row
+      // already retains every capability (nothing is discarded).
+      const beforeBlock = foldBlockRef.current
+      updateFoldBlock(null)
+      setInput(item.text, item.text.length, 'step', beforeBlock)
+      replaceDraftImages(item.images ?? [])
+      setSelectedCommand(0)
+      setFileSelected(0)
+      channel.notify(t('input-dock-swapped'), { timeoutMs: 2000 })
+      return
+    }
+    if (!channel.removePending(item.id)) {
+      channel.notify(t('input-cannot-retract'), { color: 'warning', timeoutMs: 2500 })
+      return
+    }
+    restoreDraftImages({
+      text: item.text,
+      images: item.images ?? [],
+    })
+    setInput(item.text, item.text.length, 'silent')
+    updateFoldBlock(null)
+    setSelectedCommand(0)
+    setFileSelected(0)
+    channel.notify(t('input-retracted'), { timeoutMs: 2000 })
+  }
+
+  // A dock that empties or shrinks under an open selector (rows claimed,
+  // a receipt un-docking them, a session reset) leaves the highlight
+  // pointing past the list — fold it instead of steering arrows at an
+  // invisible row.
+  React.useEffect(() => {
+    if (dockSelected !== null && (dockSelected >= dockCount || dockCount === 0)) {
+      setDockSelected(null)
+    }
+  }, [dockSelected, dockCount])
+
+  /**
    * Ctrl+Enter: abort the running turn and send the input immediately — the
    * model stops what it is doing and starts on this message right away.
    */
@@ -1812,17 +1949,53 @@ export function PromptInput({
     }
     // Abort the running turn and deliver: previously queued pending
     // messages first (FIFO), then the current input — all processed
-    // immediately once the abort settles.
+    // immediately once the abort settles. Docked rows are NOT listed here:
+    // the channel's interruptAndDeliver takes the dock itself first (same
+    // FIFO order), so including them would send each docked text twice.
+    const interruptWasPending = channel.cancelPending
     const images = imageRefsFor(trimmed)
+    // A cancel already in flight did NOT carry the queue: either it is a plain
+    // Esc/Ctrl+C cancel (the backend kept the rows, and the interrupt below
+    // drops them, so re-listing them here is what re-delivers them) or a
+    // previous Ctrl+Enter already re-queued them (re-listing would duplicate
+    // every one). `interruptRequeuedRef` tells the two apart across the
+    // convergence window.
+    const includePending = !interruptWasPending || !interruptRequeuedRef.current
     const queued: ComposerSubmission[] = [
-      ...channel.pending.map(item => ({ text: item.text, images: item.images ?? [] })),
+      ...(includePending
+        ? channel.pending.filter(item => item.docked !== true).map(item => ({ text: item.text, images: item.images ?? [] }))
+        : []),
       { text: value, images },
     ]
-    const count = channel.interruptAndDeliver(queued)
+    const count = (() => {
+      try {
+        return channel.interruptAndDeliver(queued)
+      } catch (error) {
+        reportSendFailure(error)
+        return 0
+      }
+    })()
     if (count === 0) return
+    // This request owns the queue's re-delivery from here on — including the
+    // fresh draft, whose preview enters `pending` as a followup. A later
+    // Ctrl+Enter during the same convergence must not list that preview again
+    // (a repeated interrupt does not drop the earlier copies).
+    if (includePending) interruptRequeuedRef.current = true
     rememberHistory(trimmed, images)
     clearDeliveredDraft()
+    // A cancel already in flight means the text was re-queued behind an abort
+    // that has not converged; the "immediate" claim would be false until it
+    // does (the wedged-turn case). The channel keeps the messages queued.
+    if (interruptWasPending) {
+      channel.notify(t('input-interrupt-deferred'), { color: 'warning', timeoutMs: 4000 })
+      return
+    }
     channel.notify(t('input-interrupt-immediate'), { timeoutMs: 2500 })
+  }
+
+  /** The startup phase's refusal (see `ChannelUi.ready`). */
+  const notifyNotReady = (): void => {
+    channel.notify(t('startup-not-ready', { backend: backendLabel ?? channel.backendCapabilities.backendId }), { color: 'warning', timeoutMs: 2500 })
   }
 
   /**
@@ -1837,8 +2010,29 @@ export function PromptInput({
     if (!text.startsWith('/')) return false
     const parsed = parseCommandName(text)
     if (parsed === undefined) return false
+    // Not ready (`ChannelUi.ready`): only boot-safe commands run; the rest
+    // are refused before dispatch so the draft stays. The one chokepoint.
+    if (channel.ready === false && !isBootSafeCommand(parsed.name)) {
+      notifyNotReady()
+      return true
+    }
     const command = channel.commandList.find(entry => entry.name === parsed.name)
-    const known = command !== undefined || isHiddenCommandName(parsed.name)
+    // A built-in the bound backend does not serve is hidden from the menu and
+    // Tab, and a typed one must neither run nor reach the model as text. A
+    // partial embedder channel carries no snapshot: everything is served.
+    // oxlint-disable-next-line typescript/no-unnecessary-condition -- partial embedder channels omit the snapshot
+    const capabilities = channel.backendCapabilities as Channel['backendCapabilities'] | undefined
+    if (command === undefined && isUnavailableLocalCommand(parsed.name, capabilities)) {
+      channel.notify(t('cmd-unavailable-backend', { cmd: parsed.name, backend: capabilities === undefined ? '' : backendLabel ?? capabilities.backendId }), {
+        color: 'warning',
+        timeoutMs: 4000,
+      })
+      return true
+    }
+    // A local command may be intentionally absent from the published catalog
+    // (the service-gated `/team`): a typed name is still this app's command,
+    // never text for the model. Backend-unavailable locals were refused above.
+    const known = command !== undefined || isHiddenCommandName(parsed.name) || isLocalCommandName(parsed.name)
     if (!known) return false
     const generation = syncImageGeneration()
     const revision = draftRevisionRef.current
@@ -1911,8 +2105,9 @@ export function PromptInput({
    * The Enter main path, shared by the inline prompt, the expanded
    * editor's Ctrl+Enter, and its Send button:
    * - command menu open → run the SELECTED command (never send `/mo`);
-   * - model working → STEER into the running turn (next step boundary,
-   *   agent continues — the "immediate" send; Codex/pi semantics);
+   * - model working → a KNOWN command is still a command; anything else
+   *   STEERS into the running turn (next step boundary, agent continues —
+   *   the "immediate" send; Codex/pi semantics);
    * - otherwise → submit directly (or run a unique command).
    * Reads valueRef so a key batch (typing + Enter in one stdin read)
    * operates on the text the preceding keys produced.
@@ -1925,7 +2120,16 @@ export function PromptInput({
     if (now - lastEnterAtRef.current < 80) return
     lastEnterAtRef.current = now
     const value = valueRef.current
-    if (overlayOpen) {
+    // The docked-queue selector owns Enter while a row is highlighted and
+    // the draft is untouched: retract that row into the input for editing.
+    if (dockSelectedRef.current !== null && value.trim() === '' && dockCount > 0) {
+      editDocked(dockSelectedRef.current)
+      return
+    }
+    // A preceding edit in this stdin batch has already updated valueRef, but
+    // the completion rows still belong to the last render. Submit the current
+    // draft through the ordinary path instead of accepting a stale row.
+    if (overlayOpen && value === completionInput) {
       const command = suggestions[selectedCommand]
       if (command) {
         tryRunCommand(command.commandLine)
@@ -1941,20 +2145,28 @@ export function PromptInput({
         return
       }
     }
+    // Not ready: refuse before any path that clears the draft.
+    if (channel.ready === false && value.trim() !== '') {
+      if (tryRunCommand(value)) return
+      notifyNotReady()
+      return
+    }
+    // A docked queue (Esc parked it) owns a bare Enter on an EMPTY draft
+    // (Claude Code parity: "…or Enter to send them now"). A draft in
+    // progress keeps the ordinary submit path and the dock stays parked —
+    // sending parked messages silently along with the next typed submit is
+    // exactly the surprise the dock exists to prevent.
+    if (value.trim() === '' && !channel.working && dockCount > 0) {
+      sendDocked()
+      return
+    }
     if (channel.working && value.trim() !== '') {
-      // Immediate-command semantics: /btw and /skills are exempt from
-      // steering — neither command interrupts the running turn. Hidden
-      // UI-only easter eggs (e.g. /deepseek) are also safe to run while
-      // streaming. Every other input keeps the steer behavior so /new
-      // /model etc. stay idle-only.
-      const parsed = value.startsWith('/') ? parseCommandName(value) : undefined
-      if (parsed !== undefined && (
-        ((parsed.name === 'btw' || parsed.name === 'skills')
-          && channel.commandList.some(c => c.name === parsed.name))
-        || isHiddenCommandName(parsed.name)
-      )) {
-        if (tryRunCommand(value)) return
-      }
+      // While a turn is running a KNOWN command is dispatched as a command:
+      // with or without arguments, with the completion overlay open or closed,
+      // from the inline prompt or the fullscreen editor (issue #1072). Each
+      // command's own gate decides whether it can run mid-turn and says why;
+      // steering is reserved for input that is NOT a command.
+      if (tryRunCommand(value)) return
       steerSend(value)
       return
     }
@@ -1992,13 +2204,55 @@ export function PromptInput({
 
   /** Local Esc layers, shared by the prompt listener and Chat's delegation.
    * Refs preserve this order even when expansion and Esc share a stdin batch. */
-  const consumeEditingEscape = (): boolean => {
-    if (selectionRef.current && !helpOpen && !overlayOpen && !fileOverlayOpen) {
+  const consumeLocalEscape = (): boolean => {
+    if (helpOpen) {
+      onToggleHelp()
+      return true
+    }
+    if (caretPreviewOpen) {
+      onDismissCaretPreview?.()
+      return true
+    }
+    // Read the live draft: typing `/`, Esc and more text can arrive in the
+    // same stdin batch before React has rendered the command menu (#1310).
+    const current = valueRef.current
+    if (!expandedRef.current && !selectionActive) {
+      if (current.startsWith('/') && !current.includes('\n') && channel.commandCompletions(current).length > 0) {
+        clearDraftUndoably()
+        return true
+      }
+      const currentMention = mentionAtCaret(current, cursorRef.current)
+      if (currentMention !== undefined && fileMatches.length > 0 && !fileMenuDismissed(currentMention.start)) {
+        // An edit sequence makes the dismissal token-local and resets it
+        // on the next text edit, including one in the same stdin batch.
+        fileEscRef.current = { edit: inputEditSequenceRef.current, start: currentMention.start }
+        refreshFileMenu(tick => tick + 1)
+        return true
+      }
+    }
+    // Esc leaves the docked-queue selector; the dock itself stays put
+    // (⏎/↑ keep working afterwards).
+    if (dockSelectedRef.current !== null) {
+      setDockSelected(null)
+      return true
+    }
+    if (selectionRef.current) {
       clearSelection()
       return true
     }
     if (expandedRef.current) {
       collapseEditor()
+      return true
+    }
+    if (foldBlockRef.current !== null) {
+      updateFoldBlock(null)
+      return true
+    }
+    // Send-to-Chat chips peel before the draft; that same Esc must not
+    // interrupt a running turn. Vim keeps its existing mode-key ownership.
+    const stagedContexts = channel.attachedContexts ?? []
+    if (!vimEnabledRef.current && stagedContexts.length > 0) {
+      for (const staged of [...stagedContexts]) channel.detachContext(staged.id)
       return true
     }
     return false
@@ -2168,24 +2422,13 @@ export function PromptInput({
     const cursor = cursorRef.current
     const selection = selectionRef.current
 
-    // ── caret-driven image preview ──────────────────────────────────────
-    // Esc dismisses the preview the caret opened, before any other Esc
-    // meaning (help stays above it: the help menu is modal over the prompt).
-    if (key.escape && caretPreviewOpen && !helpOpen) {
-      event?.stopImmediatePropagation()
-      onDismissCaretPreview?.()
-      return
-    }
-
-    // ── mouse selection (drag / Shift+click / double-click) ─────────────
-    // Layered ahead of the fold-block rules: with an active selection, Esc
-    // ONLY drops the highlight (text untouched), and Backspace/Delete
-    // delete the selected span. Arrows/typing handle the selection at their
-    // own arms below.
-    if (key.escape && consumeEditingEscape()) {
+    // Share the local Esc ladder with Chat's earlier global listener.
+    if (key.escape && consumeLocalEscape()) {
       event.stopImmediatePropagation()
       return
     }
+    // Mouse selection (drag / Shift+click / double-click): Backspace/Delete
+    // remove the span; arrows/typing handle it at their own arms below.
     if ((key.backspace || key.delete) && selection) {
       // Removing a selection is atomic: it must undo in one step, not fold
       // into whatever the caret-continuity rule would otherwise see.
@@ -2209,10 +2452,6 @@ export function PromptInput({
     const clampRowEnd = (pos: number) =>
       block && cursor <= block.start ? Math.min(pos, block.start) : pos
     if (block) {
-      if (key.escape) {
-        updateFoldBlock(null)
-        return
-      }
       if ((key.backspace && cursor === block.end) || (key.delete && cursor === block.start)) {
         const next = value.slice(0, block.start) + value.slice(block.end)
         updateFoldBlock(null)
@@ -2526,6 +2765,8 @@ export function PromptInput({
         return
       }
       const line = (value + input).trim()
+      // Not ready: the line becomes the draft first, so a refused command keeps it.
+      if (channel.ready === false) setInput(line)
       if (line.startsWith('/')) {
         const matches = channel.commandCompletions(line)
         if (matches.length === 1) {
@@ -2533,7 +2774,12 @@ export function PromptInput({
           return
         }
       }
-      if (!tryRunCommand(line)) submitText(line)
+      if (tryRunCommand(line)) return
+      if (channel.ready === false) {
+        notifyNotReady()
+        return
+      }
+      submitText(line)
       return
     }
     if (key.return && isMod(key)) {
@@ -2586,6 +2832,12 @@ export function PromptInput({
     // indentation arm so the expanded editor participates in the cycle too —
     // the parser reports backtab as key.tab + key.shift.
     if (key.tab && key.shift) {
+      // A backend without native modes has nothing to cycle (capability
+      // snapshots absent on test stubs = DSH).
+      if ((channel.backendCapabilities as Channel['backendCapabilities'] | undefined)?.modes === false) {
+        channel.notify(t('capability-unavailable-backend', { name: 'mode' }), { color: 'warning', timeoutMs: 4000 })
+        return
+      }
       // The key is consumed either way. `cycleMode` is best-effort inside the
       // channel, but a dropped rejection here would be an unhandledRejection
       // (the process guard rethrows everything that is not React #185), and
@@ -2613,7 +2865,7 @@ export function PromptInput({
     }
     if (key.tab && overlayOpen) {
       const command = suggestions[selectedCommand]
-      if (command) {
+      if (command && value === completionInput) {
         updateFoldBlock(null)
         setInput(command.replacement, command.replacement.length, 'step')
       }
@@ -2666,6 +2918,17 @@ export function PromptInput({
       return
     }
     if (key.upArrow) {
+      // The docked-queue selector owns ↑ while a row is highlighted
+      // (Claude Code parity: "Press up to select a queued message to
+      // edit"); the walk wraps around the dock. The REF drives it: one
+      // stdin read can carry several ↑ (key repeat / a coalescing
+      // terminal), and the state value would pin every handler in the
+      // batch to the same row — N presses collapsing to one step.
+      if (dockSelectedRef.current !== null) {
+        const current = dockSelectedRef.current
+        setDockSelected(current <= 0 ? dockCount - 1 : current - 1)
+        return
+      }
       // A history walk owns the arrows until it returns to the draft: a
       // recalled entry can itself open the @ menu or the slash menu (e.g.
       // `/model`), and letting the overlay navigate here strands the stashed
@@ -2712,6 +2975,16 @@ export function PromptInput({
         )
         return
       }
+      // An EMPTY draft while idle with a docked queue takes ↑ into the dock
+      // selector, ahead of the history walk (Claude Code parity). Any draft
+      // keeps ↑ as cursor movement; the menus above keep their priority.
+      if (
+        value === '' && !channel.working && !expandedRef.current
+        && !overlayOpen && !fileOverlayOpen && dockCount > 0
+      ) {
+        setDockSelected(dockCount - 1)
+        return
+      }
       // A workspace switch mid-walk keeps the draft that walk started from:
       // the composer shows the previous project's entry, not a new draft.
       const interrupted = seedHistory()
@@ -2739,6 +3012,13 @@ export function PromptInput({
       return
     }
     if (key.downArrow) {
+      // The docked-queue selector owns ↓ too (wraps down around the dock;
+      // the REF, so a batch of ↓ advances one row per press — see ↑).
+      if (dockSelectedRef.current !== null) {
+        const current = dockSelectedRef.current
+        setDockSelected(current >= dockCount - 1 ? 0 : current + 1)
+        return
+      }
       // Same history-walk ownership as ↑ above.
       if (fileOverlayOpen && historyIndex.current < 0) {
         setFileSelected(index =>
@@ -2824,7 +3104,7 @@ export function PromptInput({
       }
       return
     }
-    if (isMod(key) && key.leftArrow) {
+    if ((isMod(key) || key.meta) && key.leftArrow) {
       // Jump to the previous word boundary (readline alt+b). Must precede the
       // bare-arrow arms: Ctrl+Left arrives as leftArrow + ctrl. An active
       // selection collapses to its START edge first (editor semantics).
@@ -2832,15 +3112,15 @@ export function PromptInput({
       setInput(value, sel ? sel.start : wordBoundaryLeft(value, cursor))
       return
     }
-    if (isMod(key) && key.rightArrow) {
+    if ((isMod(key) || key.meta) && key.rightArrow) {
       // Jump to the next word boundary (readline alt+f).
       const sel = selectionRef.current
       setInput(value, sel ? sel.end : wordBoundaryRight(value, cursor))
       return
     }
     if (key.leftArrow) {
-      // ← on an EMPTY prompt backgrounds this session
-      // and opens the agent view; with text it moves the caret as usual.
+      // ← on an EMPTY prompt opens the session manager; the caller decides
+      // whether the backend can background the session first.
       // (The command/file overlays both imply non-empty text, so no extra
       // gate beyond the help menu is needed.)
       if (value.length === 0 && !helpOpen) {
@@ -2859,7 +3139,7 @@ export function PromptInput({
       setInput(value, sel ? sel.end : nextGraphemeBoundary(bounds, cursor))
       return
     }
-    if (key.backspace) {
+    if (key.backspace && !key.meta) {
       if (cursor === 0) return
       const start = previousGraphemeBoundary(bounds, cursor)
       deleteInputRange(start, cursor)
@@ -2914,17 +3194,12 @@ export function PromptInput({
       undoDraft()
       return
     }
-    if (isMod(key) && input === 'w') {
+    if ((isMod(key) && input === 'w') || (key.meta && key.backspace)) {
       // Delete the word before the cursor: readline's whitespace-delimited
       // rule (skip trailing whitespace, then the word). The ICU/CJK
       // alternative is a separate editor-UX change, not part of draft undo.
       // The deletion start never crosses into the block.
-      const before = value.slice(0, cursor)
-      let end = before.length
-      while (end > 0 && /\s/.test(before[end - 1]!)) end--
-      let start = end
-      while (start > 0 && !/\s/.test(before[start - 1]!)) start--
-      deleteInputRange(clampRowStart(start), cursor)
+      deleteInputRange(clampRowStart(wordBoundaryLeft(value, cursor)), cursor)
       return
     }
     // ── vim mode (`/vim`) ──────────────────────────────────────────────
@@ -3190,44 +3465,13 @@ export function PromptInput({
     }
 
     if (key.escape) {
-      if (helpOpen) {
-        onToggleHelp()
-        return
-      }
-      // A single Esc closes the open command menu first;
-      // the double-tap-clear semantics only apply to ordinary input.
-      if (overlayOpen) {
-        clearDraftUndoably()
-        return
-      }
-      // File overlay: Esc dismisses the menu for THIS token only — clearing
-      // the input would nuke a mid-message `@` mention's surrounding text.
-      if (fileOverlayOpen) {
-        fileEscRef.current = mention?.start ?? -1
-        return
-      }
-      // With pending messages while working, Esc = interrupt and deliver
-      // them right away (Codex's "interrupt and send immediately"): the
-      // turn is aborted and each message is re-queued once it settles.
+      // With pending messages while working, Esc = interrupt and DOCK the
+      // queue (Claude Code parity): the previews park channel-side and the
+      // dock hint offers ↑ to edit one / ⏎ to send them all — nothing
+      // auto-sends. A queue already fully docked docks nothing new; the
+      // turn still needs its plain abort.
       if (channel.working && channel.pending.length > 0) {
-        const count = channel.interruptAndDeliver(channel.pending.map(item => ({
-          text: item.text,
-          images: item.images ?? [],
-        })))
-        channel.notify(t('interrupt-delivered', { n: count }), {
-          timeoutMs: 2500,
-        })
-        return
-      }
-      // "Send to Chat" chips peel before the draft: the first Esc drops the
-      // contexts panels staged and leaves the typed text untouched, so a second
-      // Esc then clears the input as usual. The press is CONSUMED — this rung
-      // has exactly one meaning, and a running turn must not be interrupted by
-      // the same key that only dropped a chip.
-      const stagedContexts = channel.attachedContexts ?? []
-      if (stagedContexts.length > 0) {
-        event?.stopImmediatePropagation()
-        for (const staged of [...stagedContexts]) channel.detachContext(staged.id)
+        if (channel.interruptAndDock() === 0) channel.cancel()
         return
       }
       // A single Esc clears the current input (if any); the double-tap
@@ -3270,8 +3514,11 @@ export function PromptInput({
       return
     }
     if (input && !key.ctrl && !key.meta && !key.super && !key.tab && !key.escape) {
-      // Typing anything else dismisses the help menu.
+      // Typing anything else dismisses the help menu…
       if (helpOpen) onToggleHelp()
+      // …and leaves the docked-queue selector: the draft is no longer empty,
+      // so ↑ goes back to cursor movement.
+      if (dockSelectedRef.current !== null) setDockSelected(null)
       // An active selection is REPLACED by the typed text, caret after it.
       const sel = selectionRef.current
       const at = sel ? sel.start : cursor
@@ -3285,6 +3532,17 @@ export function PromptInput({
       setFileSelected(0)
     }
   }, { isActive: !suspended })
+  // Readiness follows the listener's own gate. Announcing on mount regardless
+  // lets the owner drain a replay queue into a handler that drops every key
+  // while suspended (plugin dialog, approval, …), and a `[]` effect never
+  // re-fires once the panel closes. The callback goes through a ref so an
+  // inline closure from the parent cannot re-trigger the replay per render.
+  const onInputReadyRef = React.useRef(onInputReady)
+  React.useLayoutEffect(() => { onInputReadyRef.current = onInputReady })
+  React.useEffect(() => {
+    if (suspended) return
+    onInputReadyRef.current?.()
+  }, [suspended])
 
   // === Render: hard-wrap every logical line at the input width, then show
   // the window of visual lines with the caret row always visible.
@@ -3459,26 +3717,25 @@ export function PromptInput({
     : visualLineRanges(value, inputWidth)
 
   /**
-   * Inverse runs for one rendered row, shared by the inline prompt and the
-   * expanded editor: the selection's intersection (if any) and the caret
-   * cluster on the caret's row. Both render <Text inverse>; overlapping
-   * intervals merge so a caret inside the selection stays one continuous
-   * highlight. The caret row inverts the WHOLE cluster at the caret column
-   * (solid block) — [col, next boundary) covers a surrogate pair or ZWJ
-   * emoji as one glyph; at the text end it shows a blank inverse cell like
-   * the empty-input caret (appended after everything, so a selection
-   * ending there cannot swallow it).
+   * Highlight runs for one rendered row, shared by the inline prompt and the
+   * expanded editor: selection and image-token focus stay painted. A native
+   * caret leaves ordinary glyphs unchanged; snapshots paint the whole caret
+   * grapheme using the theme fill or inverse video. The trailing blank is
+   * retained in both modes so the terminal has a cell for an end-of-line caret.
    */
   const rowHighlightPieces = (
     text: string,
     absoluteLine: number,
-  ): Array<{ text: string; inverse: boolean; chip: boolean }> => {
+  ): Array<{ text: string; inverse: boolean; chip: boolean; caret: boolean }> => {
     const [rowStart] = lineRanges[absoluteLine] ?? [0, 0]
     // Per-character style: 0 plain, 1 chip (a staged token), 2 inverse
-    // (selection or caret cluster). Inverse wins over chip.
+    // (selection, or caret when the palette has no `cursor`), 3 caret.
+    // Later fills win: chip < selection < caret.
     const PLAIN = 0
     const CHIP = 1
     const INVERSE = 2
+    const CARET = 3
+    const caretKind = cursorColor === '' ? INVERSE : CARET
     const kinds = new Uint8Array(text.length)
     const fill = (lo: number, hi: number, kind: number): void => {
       for (let i = Math.max(lo, 0); i < Math.min(hi, text.length); i++) kinds[i] = kind
@@ -3496,21 +3753,39 @@ export function PromptInput({
       const clusterEnd = tokenAtCaret !== undefined
         ? Math.min(tokenAtCaret.end - rowStart, text.length)
         : nextGraphemeBoundary(graphemeBoundaries(text), col)
-      if (clusterEnd > col) fill(col, clusterEnd, INVERSE)
-      else endBlankCaret = col === text.length
+      if (clusterEnd > col) {
+        if (!nativeCursor || tokenAtCaret !== undefined) fill(col, clusterEnd, caretKind)
+      } else endBlankCaret = col === text.length
     }
-    const pieces: Array<{ text: string; inverse: boolean; chip: boolean }> = []
+    const pieces: Array<{ text: string; inverse: boolean; chip: boolean; caret: boolean }> = []
     let pos = 0
     while (pos < text.length) {
       const kind = kinds[pos]!
       let end = pos + 1
       while (end < text.length && kinds[end] === kind) end++
-      pieces.push({ text: text.slice(pos, end), inverse: kind === INVERSE, chip: kind === CHIP })
+      pieces.push({
+        text: text.slice(pos, end),
+        inverse: kind === INVERSE,
+        chip: kind === CHIP,
+        caret: kind === CARET,
+      })
       pos = end
     }
-    if (endBlankCaret) pieces.push({ text: ' ', inverse: true, chip: false })
+    if (endBlankCaret) {
+      pieces.push({ text: ' ', inverse: !nativeCursor && caretKind === INVERSE, chip: false, caret: !nativeCursor && caretKind === CARET })
+    }
     return pieces
   }
+
+  /**
+   * One caret cell: the palette's `cursor` fill with the glyph in whichever
+   * palette ink contrasts with it, or the inverse-video block it replaces when
+   * the palette predates the key.
+   */
+  const caretCell = (key: React.Key, text: string): React.ReactNode =>
+    cursorColor === ''
+      ? <Text key={key} inverse>{text}</Text>
+      : <Text key={key} backgroundColor={cursorColor as Color} color={cursorGlyph}>{text}</Text>
 
   const rendered = visibleLines.map((line, index) => {
     const absoluteLine = windowStart + index
@@ -3543,7 +3818,9 @@ export function PromptInput({
       <Text key={absoluteLine} wrap="truncate-end">
         {prefix}
         {pieces.length === 0 ? ' ' : pieces.map((piece, pieceIndex) =>
-          piece.inverse ? (
+          piece.caret ? (
+            caretCell(pieceIndex, piece.text)
+          ) : piece.inverse ? (
             <Text key={pieceIndex} inverse>
               {piece.text}
             </Text>
@@ -3596,7 +3873,9 @@ export function PromptInput({
               {`${gutterLabel} │ `}
             </Text>
             {pieces.map((piece, pieceIndex) =>
-              piece.inverse ? (
+              piece.caret ? (
+                caretCell(pieceIndex, piece.text)
+              ) : piece.inverse ? (
                 <Text key={pieceIndex} inverse>
                   {piece.text}
                 </Text>
@@ -3672,19 +3951,15 @@ export function PromptInput({
     // (padding + gutter included), so those columns ride along and the
     // clamp grows with them.
     //
-    // The declared column is relative to the VALUE BOX, and `caretVisualCol`
-    // is already measured in that box's cell space: the text box IS the text
-    // run, so nothing that renders before it — the session entry, the `❯ `
-    // glyph, the fold prefix — shifts a cell inside it. Adding any of those
-    // back double-counts them and parks the hardware cursor to the RIGHT of
-    // the inverted caret cell (a 2-column miss shows up as a displaced IME
-    // preedit target). Only the expanded editor declares against a wider box
-    // (gutter + padding), so only that branch adds columns.
+    // Session entry and `❯ ` sit outside the value box. The inline fold
+    // prefix is inside its first row; the expanded editor instead includes
+    // a gutter and padding. Add only the columns inside the declared node.
     column: Math.min(
-      caretVisualCol + (expanded ? editorGutterCols + 1 : 0),
+      caretVisualCol + (expanded ? editorGutterCols + 1 : caretVisualLine === 0 ? prefixCols : 0),
       expanded ? editorGutterCols + 1 + inputWidth : inputWidth,
     ),
-    active: !suspended && !selectionActive,
+    active: cursorParking && !suspended && !selectionActive && caretVisualLine >= windowStart && caretVisualLine < windowStart + visibleLines.length,
+    visible: nativeCursor,
   })
 
   /**
@@ -3896,6 +4171,33 @@ export function PromptInput({
   // 的 style.position，常驻浮层 + 移除普通子节点不会触发 blit 解毒，被
   // 覆盖的转录行会留空（见 Chat.tsx dialogOverlayOpen 注释）。展开态由
   // 全屏编辑器接管，内联浮层全部撤下。
+  // The dock rows are windowed, never rendered in full: OverlayAbove clips
+  // overflow from the top without scrolling, so a long dock would push the
+  // highlighted row off-screen while Enter still retracts by index. The
+  // window keeps the focused row
+  // visible (listWindow centers on it); Enter and the row click both
+  // operate on the absolute dock index, so they always name the row the
+  // user SEES highlighted. The budget subtracts every other row the
+  // pending block paints (steer/followup previews, labels, hints, padding)
+  // so the window always fits the overlay's effective height.
+  const steerPreviewCount = channel.pending.filter(
+    item => item.placement === 'steer' && item.docked !== true,
+  ).length
+  const followupPreviewCount = channel.pending.filter(
+    item => item.placement === 'followup' && item.docked !== true,
+  ).length
+  const dockWindowRows = useOverlayListRows(
+    (steerPreviewCount > 0 ? 1 + steerPreviewCount : 0)
+    + (followupPreviewCount > 0 ? 1 + followupPreviewCount : 0)
+    + 1 /* dock label */ + 1 /* dock hint row */ + 1 /* Alt+↑ hint */ + 1 /* block paddingBottom */,
+  )
+  const dockFocus = dockSelected ?? Math.max(dockCount - 1, 0)
+  const { start: dockStart, end: dockEnd } = listWindow(
+    dockedPending.map(() => 1),
+    dockFocus,
+    dockWindowRows,
+  )
+
   const floatersOpen =
     !suspended &&
     !expanded &&
@@ -3961,8 +4263,8 @@ export function PromptInput({
   // ── 全屏草稿编辑节点 ────────────────────────────────────────────────
   // 每次渲染构造新鲜闭包（value/caret/handlers），经 module store 发布给
   // Chat 根部末尾的 PromptEditorLayer（树序最后 → 盖住全部后绘兄弟）。
-  // useInsertionEffect 发布：sink 的同步重渲染发生在 layout 阶段之前，
-  // useDeclaredCursor（layout effect）读到的新 ref 已指向编辑区 Box。
+  // useInsertionEffect 发布：sink 经 store 独立提交，useDeclaredCursor
+  // 在 layout effect 与 ref 挂载时声明，编辑区稍后挂载也能接管光标。
   // 点击/拖拽坐标以内容区为原点（localCol 去掉行号槽宽度）。
   const editorNode = editorVisible ? (
     <Box
@@ -4098,11 +4400,11 @@ export function PromptInput({
         )}
         {!helpOpen && channel.pending.length > 0 && (
           <Box flexDirection="column" paddingLeft={2} paddingBottom={1}>
-            {channel.pending.some(item => item.placement === 'steer') && (
+            {channel.pending.some(item => item.placement === 'steer' && item.docked !== true) && (
               <Box flexDirection="column">
                 <Text dimColor>⚡ {t('input-pending-steer-label')}</Text>
                 {channel.pending
-                  .filter(item => item.placement === 'steer')
+                  .filter(item => item.placement === 'steer' && item.docked !== true)
                   .map(item => (
                     <Text key={item.id} dimColor wrap="truncate">
                       {'  '}↳ {item.text}
@@ -4110,11 +4412,11 @@ export function PromptInput({
                   ))}
               </Box>
             )}
-            {channel.pending.some(item => item.placement === 'followup') && (
+            {channel.pending.some(item => item.placement === 'followup' && item.docked !== true) && (
               <Box flexDirection="column">
                 <Text dimColor>⏳ {t('input-pending-queue-label')}</Text>
                 {channel.pending
-                  .filter(item => item.placement === 'followup')
+                  .filter(item => item.placement === 'followup' && item.docked !== true)
                   .map(item => (
                     <Text key={item.id} dimColor wrap="truncate">
                       {'  '}↳ {item.text}
@@ -4122,7 +4424,34 @@ export function PromptInput({
                   ))}
               </Box>
             )}
-            <Text dimColor>Alt+↑ {t('input-pending-actions-hint')}</Text>
+            {dockCount > 0 && (
+              <Box flexDirection="column">
+                <Text dimColor>⏸ {t(dockedPending.every(item => item.orphaned === true) ? 'input-pending-orphan-label' : 'input-pending-dock-label')}</Text>
+                {dockedPending.slice(dockStart, dockEnd).map((item, index) => {
+                  // The window maps to absolute dock indices: the click and
+                  // the highlight name the same row the user sees.
+                  const absoluteIndex = dockStart + index
+                  return (
+                    <Box
+                      key={item.id}
+                      // 点击停靠行 = 撤回该条进输入框编辑（与选择器 ⏎ 同路径）
+                      onClick={() => { editDocked(absoluteIndex) }}
+                    >
+                      <Text wrap="truncate" dimColor={dockSelected === null || dockSelected !== absoluteIndex} color={dockSelected === absoluteIndex ? promptAccent : undefined}>
+                        {'  '}{dockSelected === absoluteIndex ? '❯' : '↳'} {item.text}
+                      </Text>
+                    </Box>
+                  )
+                })}
+                <Box
+                  // 点击提示行 = 全部发送（与空输入 ⏎ 同路径）
+                  onClick={() => { sendDocked() }}
+                >
+                  <Text dimColor>{' '}{t(channel.status === 'disposed' ? 'input-pending-dock-hint-disposed' : channel.working ? 'input-pending-dock-hint-working' : 'input-pending-dock-hint')}</Text>
+                </Box>
+              </Box>
+            )}
+            <Text dimColor>Alt+↑ {t(channel.status === 'disposed' ? 'input-pending-actions-hint-disposed' : 'input-pending-actions-hint')}</Text>
           </Box>
         )}
         {fileOverlayOpen && (
@@ -4150,10 +4479,11 @@ export function PromptInput({
             columns={columns}
             query={value}
             accent={promptAccent}
+            holdFrom={suggestionsHoldFrom}
             // 点击行 = 运行该命令（与 Enter 同路径）
             onPick={(index) => {
               const command = suggestions[index]
-              if (command) tryRunCommand(command.commandLine)
+              if (command) tryRunCommand(valueRef.current === completionInput ? command.commandLine : valueRef.current)
             }}
             // 滚轮 = 移动选中行（与 ↑/↓ 同路径，窗口跟随）
             onWheelStep={(step) => {
@@ -4250,7 +4580,6 @@ export function PromptInput({
         effort={channel.reasoningEffort}
         levels={channel.effortLevels}
         columns={columns}
-        onLight={isLightThemeActive(themeName)}
         idleColor={promptAccent}
         topRightLabel={topRightLabel}
       >
@@ -4300,11 +4629,11 @@ export function PromptInput({
             onDragEnd={handleDragEnd}
           >
             {value.length === 0 ? (
-              // Solid block caret on a BLANK cell: the terminal paints the
+              // Reserve a BLANK caret cell: the terminal paints the
               // IME preedit (pinyin) at the physical cursor, which is parked
               // right here, so nothing else may occupy this cell.
               <>
-                <Text inverse> </Text>
+                {nativeCursor ? <Text>{' '}</Text> : caretCell('empty', ' ')}
                 {/* 三幕点焰第二幕：空输入行居中短暂浮现档名大写（纯文
                     本流自带偏移空格——不引入嵌套 Box，行数恒定；有文字
                     时不显示）。3 = 行内 `❯ `（2 列）+ 空输入块光标（1
@@ -4312,7 +4641,6 @@ export function PromptInput({
                 <EffortTierBadge
                   effort={channel.reasoningEffort}
                   levels={channel.effortLevels}
-                  onLight={isLightThemeActive(themeName)}
                   columns={columns}
                   leadingColumns={3 + homeButtonCols}
                 />

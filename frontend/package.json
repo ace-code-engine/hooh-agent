@@ -4,9 +4,11 @@
   "private": true,
   "description": "HooH 的主前端（TypeScript + Ink）。与 Python 引擎通过 `ace --serve` 的 NDJSON 协议对话。",
   "type": "module",
-  "//": "`imports`：迁入的 dsh-ui 用包级别名 `#tui-profile/*`（上游 package.json 里定义的）。",
+  "//": "`imports`：迁入的 dsh-ui 用包级别名 `#tui-profile/*`（0.17.0 上游 package.json 的三条，逐字对齐）。",
   "imports": {
-    "#tui-profile/*": "./dsh-ui/tui-profile/protocols/*.js"
+    "#tui-profile/tui-channel": "./dsh-ui/tui-profile/protocols/tui-channel.js",
+    "#tui-profile/profile-definitions": "./dsh-ui/tui-profile/protocols/profile-definitions.js",
+    "#tui-profile/tui-contributions": "./dsh-ui/tui-profile/protocols/tui-contributions.js"
   },
   "engines": {
     "node": ">=18"
@@ -40,6 +42,7 @@
     "semver": "^7.8.5",
     "signal-exit": "^4.1.0",
     "supports-hyperlinks": "^4.6.0",
+    "tsx": "^4.19.2",
     "usehooks-ts": "^3.1.0",
     "yaml": "^2.9.1"
   },
@@ -47,7 +50,6 @@
     "@types/node": "^22.10.2",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
-    "tsx": "^4.19.2",
     "typescript": "^5.6.3",
     "vitest": "^2.1.8"
   }

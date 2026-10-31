@@ -391,7 +391,9 @@ def _install_executor() -> bool:
         print(c("dim", f"  <- {url}"))
         try:
             req = urllib.request.Request(url, headers={"User-Agent": "ace-install-executor"})
-            with urllib.request.urlopen(req, timeout=60) as r, open(tmp, "wb") as f:
+            # nosec B310 —— URL 来自 GitHub Release 的固定清单（https-only），下载后
+            # 立刻跑 `--version` 探针验身份（上面 B103 的 chmod 也在此链路上）。
+            with urllib.request.urlopen(req, timeout=60) as r, open(tmp, "wb") as f:  # nosec B310
                 shutil.copyfileobj(r, f)
             last_err = None
             break
@@ -403,7 +405,7 @@ def _install_executor() -> bool:
         print(c("dim", "  可设 ACE_EXECUTOR_BASE_URL 指向镜像后重试；或手工 go build。"))
         return False
     if os.name != "nt":
-        os.chmod(tmp, 0o755)
+        os.chmod(tmp, 0o755)  # nosec B103 —— 发布产物就是可执行位；0o755 是 Go 执行器二进制的标准权限，目录权限不变。
     try:
         out = subprocess.run([str(tmp), "--version"], capture_output=True,
                              text=True, encoding="utf-8", errors="replace", timeout=15)
@@ -4880,7 +4882,10 @@ class AgentCLI(_AtCommands, _SlashCommands, _LandingUI):
             return True
         try:
             print(c("dim", t("review_opening", editor=editor)))
-            subprocess.run(f'{editor} "{patch_path}"', shell=True, check=False)
+            # nosec B602 —— editor 是**用户自己的**环境变量（$EDITOR / 配置），
+            # 不是模型输出；patch_path 由本仓生成、引号包裹。用户显式选择让
+            # shell 解析自己的编辑器命令行（如 `code -w`），这正是功能语义。
+            subprocess.run(f'{editor} "{patch_path}"', shell=True, check=False)  # nosec B602
         except Exception as e:  # noqa: BLE001 —— 编辑器起不来不该崩会话
             print(c("red", t("review_editor_failed", err=e)))
             return True
@@ -9096,7 +9101,13 @@ def _run_serve(cli: "AgentCLI", srv) -> int:
             # 会在每次交错时重复出现（实测：`group_session` 出现了两次、
             # 而 `/perm` 排在 `/model` 后面）。分组顺序的权威在 `COMMAND_GROUPS`，
             # 只在这里派生一次，前端不自己猜。
-            "commands": {_n: AgentCLI.COMMANDS[_n]
+            #
+            # 值**就地翻译**（t(cmd_*)）：dsh-TUI 本尊的 LocalCommand.description
+            # 要的是**文案**不是键——它自己的 localizedDescription 只认
+            # `cmd-desc-<name>` 这一套自家键，认不出就把原文打出来（实测：
+            # 命令面板整列显示 `cmd_context` 裸键）。ace 的词典（locales/*.json）
+            # 是这些键的单一真源，引擎知道自己语言，翻好再发，前端零逻辑。
+            "commands": {_n: t(AgentCLI.COMMANDS[_n])
                          for _g, _ns in AgentCLI.grouped_commands() for _n in _ns},
             "command_groups": {n: AgentCLI.command_group(n)
                                for n in AgentCLI.COMMANDS},
@@ -9867,6 +9878,13 @@ def main() -> None:
                         help="关闭上下文压缩，退回纯硬截断（会丢早期对话，"
                              "包括第一条用户消息里的任务说明）")
     parser.add_argument("--input", help="单次对话（非交互）")
+    parser.add_argument("--no-tui", action="store_true",
+                         help="显式声明「这次不要界面」：与 --input 组合时是多余但无害的"
+                              "别名（--input 本来就不进界面）；裸用时等价于提示语。"
+                              "存在是为了让 ace.cmd 的脚本路径（ace --mock --no-tui "
+                              "--input ...）与 e2e/rel03_native_smoke.ps1 的场景 A "
+                              "始终有效——启动器原样转发这个旗标（2026-10-31 整壳"
+                              "默认入口之后，脚本路径需要一个不依赖 TTY 的显式出口）")
     parser.add_argument("--json", action="store_true",
                         help="机器可读事件流（一行一个 JSON 对象）：给脚本/CI/其它前端用。"
                              "人看的输出会转成 notice 事件，不含 ANSI 与进度条")

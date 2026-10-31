@@ -25,7 +25,9 @@ const SNAP: AceSnapshot = {
   effort: 'max',
   preset: 'code',
   lastSessionTitle: '把 dsh-TUI 的 UI 迁到 ace 这边',
-  commands: ['/help', '/model', '/permission', '/resume', '/status', '/tools'],
+  commands: ['/help', '/model', '/permission', '/resume', '/status', '/tools'].map((name) => ({
+    name: name.slice(1), description: name, replacement: name, commandLine: name,
+  })),
 }
 
 const CONTROL = /\u001b(?:\[[0-9:;<=>?]*[ -/]*[@-~]|\][^\u0007\u001b]*(?:\u0007|\u001b\\)?|[@-Z\\-_])/g

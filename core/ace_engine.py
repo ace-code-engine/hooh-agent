@@ -202,7 +202,8 @@ def _python_events(lines: List[str]) -> Dict[str, Any]:
         content = "\x01".join(
             str(val) for key, val in ev.items()
             if key not in ("seq", "ts") and isinstance(val, str))
-        digest = hashlib.md5(content.encode("utf-8")).hexdigest()
+        # nosec B324 —— 去重指纹（内容是否出现过），非密码学用途；无碰撞对抗需求。
+        digest = hashlib.md5(content.encode("utf-8")).hexdigest()  # nosec B324
         total_bytes += nbytes
         if digest in seen:
             dup_lines += 1

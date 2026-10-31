@@ -54,7 +54,10 @@ def simhash(text: str) -> int:
     """64 位 SimHash 指纹"""
     weights = [0] * SIMHASH_BITS
     for tok in _tokenize(text):
-        h = int.from_bytes(hashlib.md5(tok.encode("utf-8")).digest()[:8], "big")
+        # nosec B324 —— MD5 在这里是**相似度指纹的哈希底座**（SimHash 位折叠），
+        # 不是密码学用途：输入是分词后的片段，无攻击面；快照完整性用的是 HMAC-SHA256
+        #（见 guardian.py），与此无关。
+        h = int.from_bytes(hashlib.md5(tok.encode("utf-8")).digest()[:8], "big")  # nosec B324
         for i in range(SIMHASH_BITS):
             weights[i] += 1 if (h >> i) & 1 else -1
     fp = 0

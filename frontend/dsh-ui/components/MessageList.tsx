@@ -3,15 +3,16 @@ import { getLang, subscribeLang, t, type Lang } from '../i18n.js'
 import { Box, Text, useTerminalSize, type ScrollBoxHandle } from '../ui.js'
 import type { ClickEvent } from '../ink/events/click-event.js'
 import type { ChatRow, ToolRow, ToolCallView, ToolResultView, SubagentRow, JobGroupRow, JobRow } from '../dsh-adapter/channel.js'
+import type { TurnUsageSummary } from '../adapter/ports/channel-view.js'
 import type { JobGroupFoldMode } from '../tuiDisplayPrefs.js'
 import { normalizeIdePath } from '../dsh-adapter/ide-channel.js'
 import type { TranscriptImage } from '../dsh-adapter/transcript-images.js'
 import type { DOMElement } from '../ink/dom.js'
 import { Divider } from './design-system/Divider.js'
 import { UserPromptMessage } from './messages/UserPromptMessage.js'
-import { AssistantTextMessage } from './messages/AssistantTextMessage.js'
-import { AssistantThinkingMessage } from './messages/AssistantThinkingMessage.js'
-import { AssistantToolUseMessage } from './messages/AssistantToolUseMessage.js'
+import { TeamMessageBubble } from './messages/TeamMessageBubble.js'
+import { AssistantTextLeafRow, ThinkingLeafRow, ToolLeafRow } from './messages/TranscriptLeaves.js'
+import { liveOutputMaxLines, liveOutputRows } from './messages/liveOutputLines.js'
 import { SubagentMessage } from './Chat/SubagentMessage.js'
 import { JobCard } from './Chat/JobCard.js'
 import { JobGroupHeader } from './Chat/JobGroupHeader.js'
@@ -19,7 +20,9 @@ import { isMinimalUiMode } from '../minimalUiMode.js'
 import { noteFrameCause, noteListGeometry } from '../ink/geometry-trace.js'
 import { getTerminalFlushTick } from '../ink/flush-tick.js'
 import { TurnInterruptedRow } from './TurnInterruptedRow.js'
+import { TurnUsageRow } from './TurnUsageRow.js'
 import { LogoV2 } from './LogoV2.js'
+import type { Brand } from '../branding.js'
 import { StreamingMarkdown } from './StreamingMarkdown.js'
 import { MessageMetadata } from './messages/MessageMetadata.js'
 import { stripNarration } from '../utils/narration.js'
@@ -89,8 +92,29 @@ const NOOP_TOGGLE_STREAM_VIEW = (_rowId: number): void => {}
 // until it catches up — settling mid-reveal must not snap (that is the
 // "non-streaming delivery becomes a smooth flow" contract).
 
+/** A row that opens a turn on the rail and the pinned header: a user row,
+ *  but not an Agent Teams peer message (never the human's prompt). */
+function isTurnRow(row: ChatRow): boolean {
+  return row.kind === 'user' && row.label !== 'team-message'
+}
+
+/** The sender a team-message row shows (empty when the event named none);
+ *  undefined for every other row, which renders as the human's prompt. */
+function teamSenderOf(row: ChatRow): string | undefined {
+  return row.label === 'team-message' ? row.sender ?? '' : undefined
+}
+
+/** Keep a settled text-only reply visible when narration is its whole body. */
+function assistantDisplayText(row: ChatRow): string {
+  const text = row.text ?? ''
+  const stripped = stripNarration(text)
+  return row.streaming !== true && (row.images?.length ?? 0) === 0 && stripped.trim() === ''
+    ? text
+    : stripped
+}
+
 function assistantRevealText(row: ChatRow, enabled: boolean): string {
-  const stripped = stripNarration(row.text)
+  const stripped = assistantDisplayText(row)
   return revealTextOf(`a${row.id}`, stripped, {
     enabled,
     active: row.streaming === true || row.fresh === true,
@@ -104,7 +128,7 @@ function reasoningRevealText(row: ChatRow, enabled: boolean): string {
 /** Display length only (layout signature; no slice allocation). */
 function revealDisplayLen(row: ChatRow, enabled: boolean): number {
   if (row.kind === 'assistant') {
-    const stripped = stripNarration(row.text)
+    const stripped = assistantDisplayText(row)
     return revealLengthOf(`a${row.id}`, stripped, {
       enabled,
       active: row.streaming === true || row.fresh === true,
@@ -210,6 +234,7 @@ function signatureParts(
   failureHint: string | undefined,
   displayTextLen: number,
   sessionCwd: string | undefined,
+  fullscreen: boolean,
 ): Array<string | number | boolean> {
   signatureScratch.length = 0
   // Universal height inputs: width reflows every row; kind switches height
@@ -248,7 +273,18 @@ function signatureParts(
         tool?.resultText?.length ?? 0,
         tool?.resultFull?.length ?? 0,
         tool?.errorText?.length ?? 0,
+        // Source-fold disclosure and the uncapped terminal exit/signal tail
+        // change the card's height when they (dis)appear — the window fold
+        // drops payloads and a settled terminal view adds its verdict lines.
+        row.folded === true,
+        tool?.resultView?.card ?? '',
         row.id === failureHintRowId ? failureHint ?? '' : '',
+        // Live output rows of a running call (omitted header + lines): the
+        // count saturates once the tail fills the card's window, so a
+        // steady stream stops invalidating the cached height.
+        tool?.status === 'running'
+          ? liveOutputRows(tool.liveOutput, tool.liveOutputDropped ?? 0, liveOutputMaxLines(expanded || expandedRows.has(row.id), fullscreen))
+          : 0,
       )
       break
     }
@@ -264,20 +300,15 @@ function signatureParts(
       )
       break
     case 'job': {
-      // Card height inputs: the group decoration reshapes the row wholesale
-      // (the head adds the summary line, a folded run collapses into it, the
-      // rail shifts the body two columns right), the waterfall grows and
-      // shrinks with mirrored output, and settling drops the progress chip
-      // and the waterfall while it may add the detail tail. Missing any of
-      // them leaves an offscreen card's cached height stale → blank band /
-      // unreachable scroll bottom (the subagent card's lesson).
+      // Command expansion and group folding change the row height; output
+      // stays within a fixed two-row tail, independent of command expansion.
       const group = row.jobGroup
       signatureScratch.push(
+        expanded,
+        expandedRows.has(row.id),
         row.job?.status ?? '',
-        // The label drives the card's height: it wraps inside its column and
-        // the rail is painted per line, so a label that lands later (the
-        // kernel fills it in after launch) must invalidate the cached height.
-        row.job?.label?.length ?? 0,
+        // Script text, including blank-line changes, determines expanded height.
+        row.job?.label ?? '',
         row.job?.outputLines.length ?? 0,
         row.job?.detail?.length ?? 0,
         row.job?.progress?.length ?? 0,
@@ -285,13 +316,10 @@ function signatureParts(
         // text those tail lines carry decides how many rows actually paint.
         row.job === undefined
           ? ''
-          : row.job.outputLines.slice(-4).map(line => line.text.length).join(','),
-        // Grouped members all render with the same 2-cell rail, so the only
-        // shape inputs are "is it a member", "is it the head" and "is the run
-        // folded" (a folded head paints the summary alone).
+          : row.job.outputLines.slice(-2).map(line => `${line.text.length}:${line.gapBefore === true}`).join(','),
+        // The group head adds a summary; folded groups hide their card bodies.
         group !== undefined,
         group?.head === true,
-        group?.last === true,
         group?.folded === true,
       )
       break
@@ -299,6 +327,10 @@ function signatureParts(
     case 'compact':
       // Folded one-liner vs full summary text.
       signatureScratch.push(expanded, expandedRows.has(row.id))
+      break
+    case 'turn-summary':
+      // Immutable payload, single truncate-end line: the kind switch alone
+      // covers the height semantics (content never changes after creation).
       break
     case 'user':
       // T06: the selection indicator line above the bubble adds one rendered
@@ -316,6 +348,8 @@ function signatureParts(
         row.selectionAttached === undefined ? 0 : 1,
         stringWidth(displaySelectionPath(row.selectionAttached?.path ?? '', sessionCwd)),
         String(row.selectionAttached?.lines ?? ''),
+        // A team message adds its sender line above the body.
+        teamSenderOf(row) ?? '',
       )
       // Long-line fold: expanding a folded row swaps the folded preview for
       // the raw line (thousands of rows), so both expansion switches are
@@ -350,13 +384,16 @@ export function MessageList({
   jobGroupFold = 'auto',
   toolBackground = 'none',
   foldTerminalCommand = false,
+  turnUsageRow = false,
   smoothStreaming = false,
   activityFrames,
   showAll,
   onToggleAll,
   onLoadOlder,
+  olderHistory,
   thinkingVisible = true,
   historyPaintEnabled = true,
+  fullscreen = false,
   registerRowRef,
   scrollHandle,
   forceMountRowId,
@@ -366,7 +403,9 @@ export function MessageList({
   failureHintRowId,
   failureHint,
   onOpenSubagent,
+  onOpenSubagentView,
   onOpenJobs,
+  onWatchJobOutput,
   onOpenFile,
   sessionCwd,
   onPreviewImage,
@@ -394,6 +433,11 @@ export function MessageList({
   toolBackground?: ToolBackground
   /** Terminal-card header folding from the live channel settings. */
   foldTerminalCommand?: boolean
+  /** Turn-usage ledger row from the live channel settings (default off):
+   *  off filters the rows out of the visible window BEFORE virtualization —
+   *  the ledger itself keeps feeding `turnUsage`, /tokens, /status and the
+   *  footer hover. */
+  turnUsageRow?: boolean
   /** Smooth streaming reveal from the live channel settings (default off at
    *  this layer — embedders and verify harnesses keep exact-paint behavior;
    *  Chat passes the channel's `dsh-tui.smoothStreaming` value). */
@@ -404,8 +448,14 @@ export function MessageList({
   showAll: boolean
   onToggleAll: () => void
   /** Restore folded-away older rows from the session log; shown only when
-   *  rows were folded. */
+   *  rows were folded (or `olderHistory` says more exists before them). */
   onLoadOlder?: () => void
+  /** The session has history older than the first row (a compaction cut it
+   *  off before a resume): the "load earlier" divider shows without any
+   *  folded row. */
+  olderHistory?: boolean
+  /** A job card on screen keeps its output tail fresh (returns the unwatch). */
+  onWatchJobOutput?: (id: string) => () => void
   thinkingVisible?: boolean
   /**
    * Whether rows outside the virtualization window must still be painted
@@ -416,6 +466,8 @@ export function MessageList({
    * seconds of lex/highlight/layout before first paint).
    */
   historyPaintEnabled?: boolean
+  /** Fullscreen layout: running tool cards show more live output lines. */
+  fullscreen?: boolean
   /** Transcript search: register each row's DOM element for scroll-to-match. */
   registerRowRef?: (rowId: number, el: DOMElement | null) => void
   /** Scroll viewport the list virtualizes against. */
@@ -460,6 +512,8 @@ export function MessageList({
   failureHint?: string
   /** 打开子代理详情场景（transcript 内点击子代理卡）。 */
   onOpenSubagent?: (agentId: string) => void
+  /** 从转录里的子代理卡打开主屏只读 Agent View。 */
+  onOpenSubagentView?: (agentId: string, rowId: number) => void
   /** 打开 /jobs 后台任务面板（transcript 内点击任务卡）。 */
   onOpenJobs?: (focusId?: string) => void
   /** 点击工具卡内的文件路径（打开文件操作菜单）。 */
@@ -501,6 +555,9 @@ export function MessageList({
     /** Job-status/toggle fingerprint (see below): job cards settle IN PLACE,
      *  and a settling run changes how — and whether — its members render. */
     jobsSig: number
+    /** Turn-usage row toggle: flipping it adds/removes turn-summary rows
+     *  from the visible window without touching the row array. */
+    turnRowOn: boolean
   } | null>(null)
   /** Generation counter for the visibleRows cache (timeline memo key). */
   const visGenRef = React.useRef(0)
@@ -536,6 +593,7 @@ export function MessageList({
     visibleCache.showAll !== (showAll || hiddenCount <= 0) ||
     visibleCache.thinkingVisible !== thinkingVisible ||
     visibleCache.jobsSig !== jobsSig ||
+    visibleCache.turnRowOn !== turnUsageRow ||
     !streamBitsSame
   ) {
     const sliced = showAll || hiddenCount <= 0
@@ -550,16 +608,13 @@ export function MessageList({
     // that is STILL STREAMING keeps its place even with empty text — the
     // live dot is the "model is answering" affordance and content may yet
     // arrive.
-    // The emptiness test must match what RENDERING shows: the `⏵`
-    // self-narration line (dsh-working-activity narrate contract) is
-    // stripped at render (stripNarration below), so a narration-only step —
-    // thinking, `⏵ …` line, straight to a tool call — has non-empty raw
-    // text but RENDERS as that same lone `●`. Test the stripped text, or
-    // the raw-text check lets the dot through forever.
+    // Filtering, measurement and rendering share the same display text.
+    // A settled narration-only reply has real content; only truly empty
+    // text-only rows disappear. Image-only rows retain their own content.
     const rendersEmptyAssistant = (row: ChatRow): boolean =>
       row.kind === 'assistant' &&
       row.streaming !== true &&
-      stripNarration(row.text ?? '').trim() === '' &&
+      assistantDisplayText(row).trim() === '' &&
       (row.images?.length ?? 0) === 0
     let hasEmptyAssistant = false
     for (const row of sliced) {
@@ -577,7 +632,7 @@ export function MessageList({
     // objects (an in-place write throws on a frozen row and takes the TUI
     // down at startup — the resume/replay first frame delivers exactly
     // that shape).
-    const out: ChatRow[] = hasEmptyAssistant
+    let out: ChatRow[] = hasEmptyAssistant
       ? sliced.filter(row =>
           !rendersEmptyAssistant(row) &&
           (thinkingVisible || row.kind !== 'reasoning'),
@@ -585,6 +640,11 @@ export function MessageList({
       : thinkingVisible
         ? sliced.slice()
         : sliced.filter(row => row.kind !== 'reasoning')
+    // Turn-usage rows (settings `dsh-tui.turnUsageRow`, default off): a
+    // pure PRESENTATION gate — filtering here (not render-null) keeps the
+    // row out of the window entirely, so no cached height or mounted node
+    // survives the toggle. The ledger data itself is collected regardless.
+    if (!turnUsageRow) out = out.filter(row => row.kind !== 'turn-summary')
     // --- consecutive-job groups ------------------------------------------
     // A batch of run_in_background calls lands as N adjacent job cards (the
     // projection pushes the whole roster in one sync) and EVERY card pays
@@ -705,6 +765,7 @@ export function MessageList({
       margins,
       streamBits,
       jobsSig,
+      turnRowOn: turnUsageRow,
     }
     visGenRef.current++
   }
@@ -815,9 +876,10 @@ export function MessageList({
   // change feeds topPad/bottomPad spacers, the offsets scan, and the
   // ScrollBox clamps with geometry that no longer exists — blank bands,
   // overlapping rows, wrong scrollTop after toggles (the audit's stale
-  // height cache). Track the inputs that decide each row's height; when
-  // one changes, drop the cached height. The window extension further
-  // down remounts invalidated rows so useLayoutEffect re-measures them.
+  // height cache). Track the inputs that decide each row's height; changes
+  // invalidate the cache, except text-only growth of an active stream keeps
+  // its last measured estimate until the mounted row is re-measured. The
+  // window extension remounts invalidated rows for useLayoutEffect to measure.
   // Text identity uses length as an O(1) proxy — per-frame full-text
   // hashing over every row would defeat virtualization's budget, and a
   // same-length miss only degrades to the previous behavior.
@@ -828,6 +890,7 @@ export function MessageList({
   // render was O(rows) garbage per tick (3200-row session ⇒ several MB/s
   // into minor GC; the GC share of the scroll profile).
   const sigRef = React.useRef(new Map<number, Array<string | number | boolean>>())
+  let growingStreamNeedsMeasure = false
   {
     const sigs = sigRef.current
     for (let i = 0; i < visibleRows.length; i++) {
@@ -853,6 +916,7 @@ export function MessageList({
         failureHint,
         revealDisplayLen(row, smoothStreaming),
         sessionCwd,
+        fullscreen,
       )
       const cachedParts = sigs.get(row.id)
       let same = false
@@ -869,7 +933,19 @@ export function MessageList({
       }
       // Copy out of the module-level scratch buffer — the next row reuses it.
       sigs.set(row.id, parts.slice())
-      heightsRef.current.delete(row.id)
+      // Keep a streaming row's last measured extent when only its text grows.
+      // If it leaves the mount window before the next measurement, falling
+      // back to DEFAULT_ROW_HEIGHT would manufacture a content collapse.
+      const growingStream = row.streaming === true && cachedParts !== undefined &&
+        parts.length === cachedParts.length &&
+        typeof parts[2] === 'number' && typeof cachedParts[2] === 'number' && parts[2] >= cachedParts[2] &&
+        parts.every((part, index) => index === 2 || part === cachedParts[index])
+      // Keep a mounted row's estimate until the fresh Yoga read: falling back
+      // here could eject still-visible rows from this render's mount window.
+      // An unmounted row really paints the fallback spacer until it remounts.
+      // Retaining an estimate must never skip the next fresh measurement.
+      if (localRefs.current.has(row.id)) growingStreamNeedsMeasure = true
+      else if (!growingStream) heightsRef.current.delete(row.id)
       heightsVersionRef.current++
     }
   }
@@ -901,11 +977,31 @@ export function MessageList({
     total += heightOf(visibleRows[i])
   }
 
-  const scrollTop = scrollHandle?.getScrollTop() ?? 0
+  // Predict the anchor's signed offset delta before scanning the mount window.
+  // A remeasured offscreen spacer must return its provisional shrink, not leave
+  // the reader permanently over-corrected. Scan against the corrected position
+  // so the anchor stays mounted; the layout effect refines that prediction
+  // from fresh Yoga before paint. Never fight following, wheel debt, or a
+  // position the user changed. A row below the viewport top (the header's
+  // fallback pick) does not own the reader's position.
+  const anchorRef = React.useRef<{ id: number; index: number; top: number; scrollTop: number } | null>(null)
+  const scrollTopRaw = scrollHandle?.getScrollTop() ?? 0
   const pending = scrollHandle?.getPendingDelta() ?? 0
   const viewport = scrollHandle?.getViewportHeight() ?? 24
   const sticky = scrollHandle?.isSticky() ?? true
   const base = baseRef.current ?? DEFAULT_HEADER_LINES
+  const prevAnchor = anchorRef.current
+  let anchorCorrection = 0
+  if (
+    scrollHandle && prevAnchor !== null && prevAnchor.top <= prevAnchor.scrollTop &&
+    !sticky && pending === 0 && scrollTopRaw === prevAnchor.scrollTop
+  ) {
+    const anchored = visibleRows[prevAnchor.index]
+    if (anchored !== undefined && anchored.id === prevAnchor.id) {
+      anchorCorrection = prevAnchor.top - (base + (offsets[prevAnchor.index] ?? 0))
+    }
+  }
+  const scrollTop = Math.max(0, scrollTopRaw - anchorCorrection)
 
   // Mount the union of the committed position and any in-flight pending
   // delta, plus overscan; when sticky, always reach the tail (streaming row).
@@ -1181,7 +1277,7 @@ export function MessageList({
       const measuredTops = new Map<number, number>()
       for (let i = 0; i < visibleRows.length; i++) {
         const row = visibleRows[i]!
-        if (row.kind !== 'user') continue
+        if (!isTurnRow(row)) continue
         measuredTops.set(row.id, base + offsets[i]! + (margins.get(row.id) === true ? 1 : 0))
       }
       // Walk ALL rows (not the fold window): the rail must cover the whole
@@ -1193,7 +1289,7 @@ export function MessageList({
       // click goes through the reveal path, not scrollTo).
       const turns: TimelineTurn[] = []
       for (const row of rows) {
-        if (row.kind !== 'user') continue
+        if (!isTurnRow(row)) continue
         let cached = previewCache.get(row.id)
         const imageCount = row.images?.length ?? 0
         if (cached === undefined || cached.len !== row.text.length || cached.imageCount !== imageCount || cached.lang !== lang) {
@@ -1280,6 +1376,7 @@ export function MessageList({
     onTimeline?.(timeline)
   })
 
+  // Scroll anchoring, commit half of the render-time pass above.
   // Post-commit: measure mounted rows, derive the content-space base from
   // the first mounted row's Yoga top, and clamp render-time scrollTop to the
   // mounted coverage so burst scrolls never show blank spacer.
@@ -1314,6 +1411,14 @@ export function MessageList({
       }
     }
     if (scrollHandle) {
+      // Fresh bounds must move with a prefix's real height, too: an estimated
+      // max can otherwise clamp away a positive correction larger than overscan.
+      const mountedTop = top ?? base + topPad
+      const lastMounted = visibleRows[end - 1]
+      const lastYoga = lastMounted ? localRefs.current.get(lastMounted.id)?.yogaNode : undefined
+      const mountedEnd = lastYoga === undefined
+        ? base + mountedBottom
+        : lastYoga.getComputedTop() + lastYoga.getComputedHeight()
       if (sticky || (start === 0 && end >= visibleRows.length)) {
         // Sticky still needs the MIN clamp: the first wheel-up breaks sticky
         // on the DOM (ScrollBox.scrollBy) several frames before React
@@ -1323,10 +1428,11 @@ export function MessageList({
         // behavior as the steady-state scroll path. The MAX clamp stays
         // disabled: sticky follow pushes scrollTop to each frame's new
         // maxScroll, which a stale mounted max would clamp away.
-        const min = start > 0 ? Math.max(0, base + topPad - viewport) : undefined
+        const min = start > 0 ? Math.max(0, mountedTop - viewport) : undefined
         scrollHandle.setClampBounds(min, undefined)
       } else {
-        const min = Math.max(0, base + topPad - viewport)
+        // With no top spacer, the mounted header must remain reachable at Home.
+        const min = start > 0 ? Math.max(0, mountedTop - viewport) : 0
         // Upper clamp only while unmounted content remains below the window
         // (bottomPad spacer): it exists to pin the paint to the mounted edge
         // during burst scrolls that outrun React's window re-render. Once the
@@ -1339,11 +1445,48 @@ export function MessageList({
         // still caps at the frame's real maxScroll.
         scrollHandle.setClampBounds(
           min,
-          bottomPad <= 0 ? undefined : Math.max(min, base + mountedBottom - viewport),
+          bottomPad <= 0 ? undefined : Math.max(min, mountedEnd - viewport),
         )
       }
+      // Yoga is fresh even when this render retained an old height estimate.
+      // Refine the prediction before paint, not on the later measure tick, and
+      // recheck input intent in case scrolling moved between render and commit.
+      const anchorBase = baseRef.current ?? base
+      let anchoredTop = scrollHandle.getScrollTop()
+      if (
+        prevAnchor !== null && prevAnchor.top <= prevAnchor.scrollTop &&
+        visibleRows[prevAnchor.index]?.id === prevAnchor.id &&
+        !scrollHandle.isSticky() && scrollHandle.getPendingDelta() === 0 &&
+        anchoredTop === prevAnchor.scrollTop
+      ) {
+        const measuredTop = localRefs.current.get(prevAnchor.id)?.yogaNode?.getComputedTop()
+        const correction = measuredTop === undefined ? anchorCorrection : prevAnchor.top - measuredTop
+        if (correction !== 0) {
+          scrollHandle.anchorBy(-correction)
+          anchoredTop = scrollHandle.getScrollTop()
+        }
+      } else if (anchorCorrection !== 0) {
+        changed = true
+      }
+      // Pick and record in the same fresh coordinates as the correction.
+      // Recording old offsets after a fresh read would consume that delta again.
+      let pick = start
+      let pickedTop = anchorBase + (offsets[start] ?? 0)
+      for (let i = start; i < end; i++) {
+        const row = visibleRows[i]!
+        const rowTop = localRefs.current.get(row.id)?.yogaNode?.getComputedTop() ?? anchorBase + (offsets[i] ?? 0)
+        if (i === start || rowTop <= anchoredTop) {
+          pick = i
+          pickedTop = rowTop
+        }
+        if (rowTop > anchoredTop) break
+      }
+      const picked = visibleRows[pick]
+      anchorRef.current = picked === undefined
+        ? null
+        : { id: picked.id, index: pick, top: pickedTop, scrollTop: anchoredTop }
     }
-    if (changed && measureTimerRef.current === null) {
+    if ((changed || growingStreamNeedsMeasure) && measureTimerRef.current === null) {
       // Layout corrections can cascade for many rows. Yield to the next
       // macrotask so React does not count the valid convergence as nested
       // updates when a streaming/reveal commit is already in flight.
@@ -1380,7 +1523,7 @@ export function MessageList({
 
   return (
     <>
-      {rows.some(row => row.folded) && (
+      {(olderHistory === true || rows.some(row => row.folded)) && (
         <ClickableDivider title={t('load-earlier')} onClick={onLoadOlder} />
       )}
       {!showAll && hiddenCount > 0 && (
@@ -1408,14 +1551,14 @@ export function MessageList({
           let displayText = row.text
           let displayStreaming = row.streaming === true
           if (row.kind === 'assistant' && smoothStreaming) {
-            const stripped = stripNarration(row.text)
+            const stripped = assistantDisplayText(row)
             displayText = revealTextOf(`a${row.id}`, stripped, {
               enabled: true,
               active: displayStreaming || row.fresh === true,
             })
             displayStreaming = displayStreaming || displayText.length !== stripped.length
           } else if (row.kind === 'assistant') {
-            displayText = stripNarration(row.text)
+            displayText = assistantDisplayText(row)
           } else if (row.kind === 'reasoning' && smoothStreaming) {
             displayText = revealTextOf(`r${row.id}`, row.text, { enabled: true, active: displayStreaming })
           }
@@ -1425,13 +1568,16 @@ export function MessageList({
               rowId={row.id}
               kind={row.kind}
               text={displayText}
+              interruptBackend={row.interruptBackend}
               images={row.images}
               textFull={row.kind === 'reasoning' ? row.text : undefined}
               executionTarget={row.executionTarget}
               selectionAttached={row.selectionAttached}
+              sender={teamSenderOf(row)}
               streaming={displayStreaming}
               thinkingOpen={row.thinkingOpen === true}
               durationMs={row.durationMs}
+              reasoningTokens={row.reasoningTokens}
               time={row.time}
               marginTopOnTurn={marginTopOnTurn}
               isSelected={selectedId === row.id}
@@ -1460,6 +1606,11 @@ export function MessageList({
               toolResultView={tool?.resultView}
               toolStartedAt={tool?.startedAt}
               toolDurationMs={tool?.durationMs}
+              toolSourceFolded={row.folded === true}
+              toolLiveOutput={tool?.liveOutput}
+              toolLiveOutputDropped={tool?.liveOutputDropped}
+              fullscreen={fullscreen}
+              turnUsage={row.turnUsage}
               subagent={subagent}
               job={job}
               jobGroup={jobGroup}
@@ -1467,7 +1618,9 @@ export function MessageList({
               onToggleStreamView={onToggleStreamView}
               streamViewToggled={streamViewToggledRows.has(row.id)}
               onOpenSubagent={onOpenSubagent}
+          onOpenSubagentView={onOpenSubagentView}
               onOpenJobs={onOpenJobs}
+              onWatchJobOutput={onWatchJobOutput}
               onOpenFile={onOpenFile}
               sessionCwd={sessionCwd}
               onPreviewImage={onPreviewImage}
@@ -1494,6 +1647,7 @@ type MemoRowProps = {
   rowId: number
   kind: ChatRow['kind']
   text: string
+  interruptBackend?: string
   images: readonly TranscriptImage[] | undefined
   /** Reasoning rows: the FULL un-revealed text — the live three-line preview
    *  ticker follows the newest arrived content (never the reveal), while the
@@ -1502,11 +1656,14 @@ type MemoRowProps = {
   executionTarget: string | undefined
   /** IDE selection indicator (user rows): rendered above the prompt bubble. */
   selectionAttached: ChatRow['selectionAttached']
+  sender: ChatRow['sender']
   /** Session cwd for the indicator's display-path relativization (T-FIX-01). */
   sessionCwd: string | undefined
   streaming: boolean
   thinkingOpen: boolean
   durationMs: number | undefined
+  /** Estimated thinking tokens of a count-only reasoning row. */
+  reasoningTokens: number | undefined
   time: number | undefined
   marginTopOnTurn: boolean
   isSelected: boolean
@@ -1546,6 +1703,18 @@ type MemoRowProps = {
   toolResultView: ToolResultView | undefined
   toolStartedAt: number | undefined
   toolDurationMs: number | undefined
+  /** Row-level source fold (window cap dropped full payloads): the expanded
+   *  card discloses preview-only instead of passing it off as full text. */
+  toolSourceFolded: boolean
+  /** Live output tail of a running call (a string: every new chunk is a
+   *  new value, so only that card's memo misses) and its dropped count. */
+  toolLiveOutput: string | undefined
+  toolLiveOutputDropped: number | undefined
+  /** Fullscreen layout (running cards show more live output lines). */
+  fullscreen: boolean
+  /** Turn-summary payload (kind === 'turn-summary'); set-once immutable
+   *  ref created at turn.end, so a plain ref compare is complete. */
+  turnUsage: TurnUsageSummary | undefined
   // SubagentRow, stable ref (subagent lifecycle events update the store, not
   // the row ref itself, so a plain ref compare stays correct).
   subagent: SubagentRow | undefined
@@ -1559,7 +1728,9 @@ type MemoRowProps = {
   /** 是否反转该流式行的 thinkingFold 默认视图。 */
   streamViewToggled: boolean
   onOpenSubagent: ((agentId: string) => void) | undefined
+  onOpenSubagentView: ((agentId: string, rowId: number) => void) | undefined
   onOpenJobs: ((focusId?: string) => void) | undefined
+  onWatchJobOutput: ((id: string) => () => void) | undefined
   onOpenFile: ((path: string) => void) | undefined
   onPreviewImage: ((image: TranscriptImage) => void) | undefined
   suppressImageGraphics: boolean
@@ -1587,14 +1758,17 @@ function TranscriptRow({
   rowId,
   kind,
   text,
+  interruptBackend,
   images,
   textFull,
   executionTarget,
   selectionAttached,
+  sender,
   sessionCwd,
   streaming,
   thinkingOpen,
   durationMs,
+  reasoningTokens,
   time,
   marginTopOnTurn,
   isSelected,
@@ -1623,6 +1797,11 @@ function TranscriptRow({
   toolResultView,
   toolStartedAt,
   toolDurationMs,
+  toolSourceFolded,
+  toolLiveOutput,
+  toolLiveOutputDropped,
+  fullscreen,
+  turnUsage,
   subagent,
   job,
   jobGroup,
@@ -1630,7 +1809,9 @@ function TranscriptRow({
   onToggleStreamView,
   streamViewToggled,
   onOpenSubagent,
+  onOpenSubagentView,
   onOpenJobs,
+  onWatchJobOutput,
   onOpenFile,
   onPreviewImage,
   suppressImageGraphics,
@@ -1706,7 +1887,15 @@ function TranscriptRow({
               })}
             </Text>
           )}
-          {text !== '' && (
+          {text !== '' && sender !== undefined && (
+            <TeamMessageBubble
+              sender={sender}
+              text={displayText}
+              marginTopOnTurn={marginTopOnTurn}
+              isSelected={isSelected}
+            />
+          )}
+          {text !== '' && sender === undefined && (
             <UserPromptMessage
               text={displayText}
               marginTopOnTurn={marginTopOnTurn}
@@ -1735,10 +1924,8 @@ function TranscriptRow({
             <Text color="text">●</Text>
           </Box>
           <Box flexDirection="column">
-            {/* The ⏵ self-narration line (working-activity narrate contract)
-              is stripped here: the live working line on the status bar
-              already shows it. */}
-            <StreamingMarkdown>{stripNarration(displayText)}</StreamingMarkdown>
+            {/* Narration was handled before reveal and measurement. */}
+            <StreamingMarkdown>{displayText}</StreamingMarkdown>
             {images !== undefined && <TranscriptImages images={images} indent={0} onPreview={onPreviewImage} suppressGraphics={suppressImageGraphics} />}
           </Box>
         </Box>
@@ -1760,8 +1947,8 @@ function TranscriptRow({
               <MessageMetadata timestamp={time} model={model} />
             </Box>
           )}
-          <AssistantTextMessage
-            text={stripNarration(displayText)}
+          <AssistantTextLeafRow
+            text={displayText}
             marginTopOnTurn={marginTopOnTurn}
             isSelected={isSelected}
             isExpanded={isExpanded}
@@ -1777,7 +1964,7 @@ function TranscriptRow({
         (streamViewToggled ? thinkingFold === 'full' : thinkingFold === 'preview')
       return (
         <Box flexDirection="column" ref={ref}>
-          <AssistantThinkingMessage
+          <ThinkingLeafRow
             thinking={text}
             textFull={textFull}
             marginTopOnTurn={marginTopOnTurn}
@@ -1787,6 +1974,7 @@ function TranscriptRow({
             // expandedRows/Ctrl+O; a current-turn row is preview or full.
             verbose={isExpanded || expanded || (turnOpen && !streamPreview)}
             durationMs={durationMs}
+            reasoningTokens={reasoningTokens}
             isSelected={isSelected}
             onClick={turnOpen ? streamViewOnClick : foldOnClick}
           />
@@ -1818,10 +2006,12 @@ function TranscriptRow({
         resultView: toolResultView,
         startedAt: toolStartedAt,
         durationMs: toolDurationMs,
+        ...(toolLiveOutput === undefined ? {} : { liveOutput: toolLiveOutput }),
+        ...(toolLiveOutputDropped === undefined ? {} : { liveOutputDropped: toolLiveOutputDropped }),
       }
       return (
         <Box flexDirection="column" ref={ref}>
-          <AssistantToolUseMessage
+          <ToolLeafRow
             tool={tool}
             marginTopOnTurn={marginTopOnTurn}
             verbose={isExpanded || expanded}
@@ -1836,8 +2026,12 @@ function TranscriptRow({
             foldTerminalCommand={foldTerminalCommand}
             onClick={foldOnClick}
             onOpenFile={onOpenFile}
+            images={images}
+            onPreviewImage={onPreviewImage}
+            suppressImageGraphics={suppressImageGraphics}
+            sourceFolded={toolSourceFolded}
+            fullscreen={fullscreen}
           />
-          {images !== undefined && <TranscriptImages images={images} indent={4} onPreview={onPreviewImage} suppressGraphics={suppressImageGraphics} />}
         </Box>
       )
     }
@@ -1850,7 +2044,19 @@ function TranscriptRow({
     case 'interrupt':
       return (
         <Box marginTop={1} ref={ref}>
-          <TurnInterruptedRow />
+          <TurnInterruptedRow backendLabel={interruptBackend} />
+        </Box>
+      )
+    case 'turn-summary':
+      // The turn's closing ledger: a quiet RIGHT-aligned
+      // emblem — metadata does not lead the reading flow. No top margin, it
+      // belongs to the block above. width="100%" is what makes flex-end mean
+      // the transcript's right margin (an auto-width row has nothing to push
+      // against).
+      if (turnUsage === undefined) return null
+      return (
+        <Box paddingLeft={2} width="100%" flexDirection="row" justifyContent="flex-end" ref={ref}>
+          <TurnUsageRow usage={turnUsage} />
         </Box>
       )
     case 'local':
@@ -1901,6 +2107,7 @@ function TranscriptRow({
             activityFrames={activityFrames}
             isExpanded={isExpanded}
             onClick={openSubagent}
+            onOpenView={onOpenSubagentView === undefined ? undefined : () => onOpenSubagentView(subagent.agentId, rowId)}
           />
         </Box>
       )
@@ -1923,13 +2130,12 @@ function TranscriptRow({
           {groupHead && jobGroup.folded ? null : (
             <JobCard
               job={job}
+              expanded={isExpanded !== expanded}
+              onToggle={toggleJobGroup}
               marginTopOnTurn={groupHead ? false : marginTopOnTurn}
-              // The bracket hugs the CARDS: the summary line above stays
-              // outside it, and the head/last member round the two ends in
-              // place (no extra cap row) — see JobCard's `rail` prop.
-              rail={jobGroup === undefined ? undefined : { open: jobGroup.head, close: jobGroup.last }}
               // Clicking a card opens the panel focused on THAT job, not the roster head.
               onClick={onOpenJobs === undefined ? undefined : () => onOpenJobs(job.id)}
+              onWatchOutput={onWatchJobOutput}
             />
           )}
         </Box>
@@ -1962,6 +2168,7 @@ export function LogoHeader({
   whale = true,
   whaleIdle = true,
   whaleGirl = false,
+  brand,
   starred = false,
   onStarClick,
   working = false,
@@ -1978,6 +2185,8 @@ export function LogoHeader({
   whaleIdle?: boolean
   /** Maid portrait swap (passed through to LogoV2; settings `dsh-tui.whaleGirl`). */
   whaleGirl?: boolean
+  /** 品牌档（当前后端 → `resolveBrand`；见 `branding.ts`）。 */
+  brand?: Brand
   /** 求 star 标语行被点击（一键 star；host 不传则不可点）。 */
   onStarClick?: () => void
   /** 本次会话已 star（彩蛋换「捡到星星」版）。 */
@@ -1992,7 +2201,7 @@ export function LogoHeader({
   if (isMinimalUiMode()) return null
   return (
     <Box flexDirection="column" marginBottom={1}>
-      <LogoV2 model={model} effort={effort} cwd={cwd} fontId={fontId} whale={whale} whaleIdle={whaleIdle} whaleGirl={whaleGirl} starred={starred} onStarClick={onStarClick} working={working} skipIntro={skipIntro} />
+      <LogoV2 model={model} effort={effort} cwd={cwd} fontId={fontId} whale={whale} whaleIdle={whaleIdle} whaleGirl={whaleGirl} brand={brand} starred={starred} onStarClick={onStarClick} working={working} skipIntro={skipIntro} />
     </Box>
   )
 }

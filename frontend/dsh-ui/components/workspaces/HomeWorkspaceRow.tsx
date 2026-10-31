@@ -4,6 +4,7 @@ import { t } from '../../i18n.js'
 import type { ClickEvent } from '../../ink/events/click-event.js'
 import type { ContextMenuEvent } from '../../ink/events/context-menu-event.js'
 import { formatProject, spreadRow, truncateWidth } from '../../sessions/format.js'
+import { useDeclaredCursor, useNativeCursor } from '../../ink/hooks/use-declared-cursor.js'
 
 /**
  * One workspace in the home screen's left rail.
@@ -27,6 +28,7 @@ export function HomeWorkspaceRow({
   present,
   selected,
   focused,
+  declareCursor = false,
   width,
   onSelect,
   onMenu,
@@ -45,6 +47,8 @@ export function HomeWorkspaceRow({
   selected: boolean
   /** Keyboard cursor. */
   focused: boolean
+  /** Park the native caret on this row while the rail owns it. */
+  declareCursor?: boolean
   /** Columns available to the row. */
   width: number
   /** Left click: show this workspace's sessions (same path as Enter). */
@@ -53,15 +57,14 @@ export function HomeWorkspaceRow({
   onMenu?(event: ContextMenuEvent): void
 }): React.ReactNode {
   const [hovered, setHovered] = useState(false)
+  const nativeCursor = useNativeCursor()
+  const cursorRef = useDeclaredCursor({ line: 0, column: 0, active: focused && declareCursor, visible: nativeCursor, hideOnIdle: true })
   const body = Math.max(8, width - 4)
-  // The presence marker leads the badge on purpose: `spreadRow` may truncate
-  // the right-hand segment, and "this directory is gone" is the one fact that
-  // must never be the part that gets cut (the session count is also visible in
-  // the pane, the missing directory is not).
-  const count = t('home-sessions-count', { n: sessionCount })
-  const badge = present ? count : `${t('home-workspace-missing')} · ${count}`
+  // The pane already labels the count; keep the rail's badge numeric and use
+  // its selected ring rather than a second check mark for the same state.
+  const badge = present ? String(sessionCount) : `${t('home-workspace-missing')} · ${sessionCount}`
   const name = historyOnly ? `${t('supervisor-history-only')} · ${title}` : title
-  const heading = spreadRow(`${selected ? '▣' : '▢'} ${name}`, `${selected ? '✓ ' : ''}${badge}`, body)
+  const heading = spreadRow(`${selected ? '▣' : '▢'} ${name}`, badge, body)
   const detail = formatProject(path, home)
   // The cursor (green) outranks the selection ring (green); both outrank the
   // idle colour. Blue is not part of this ladder at all — see the background.
@@ -81,7 +84,7 @@ export function HomeWorkspaceRow({
       // in the text, which is why this row draws no box while selected.
       backgroundColor={hovered && !focused ? 'userMessageBackgroundHover' : undefined}
     >
-      <Box height={1} flexShrink={0} overflow="hidden">
+      <Box ref={cursorRef} height={1} flexShrink={0} overflow="hidden">
         <Text color={focused ? 'success' : 'subtle'}>{focused ? '❯ ' : '  '}</Text>
         <Text color={headingColor} bold={focused || selected}>
           {heading.left}

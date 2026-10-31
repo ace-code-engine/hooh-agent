@@ -64,15 +64,52 @@ export interface AttachedContext {
 }
 
 /**
+ * One working-activity line value a backend publishes for its own session.
+ * Same shape as the DSH `dsh-working-activity` plugin's session projection,
+ * so a backend without that plugin (Claude folds its own) can serve the same
+ * working line. Consumers narrow with `asActivityView` before rendering, so
+ * a malformed value is dropped rather than shown half-formed.
+ */
+export interface WorkingActivityView {
+  /** Which phase the line is in; `idle` means "render nothing". */
+  readonly phase: 'idle' | 'waiting' | 'thinking' | 'tool' | 'done'
+  /** The line as the backend rendered it at `updatedAt`. */
+  readonly line: string
+  /** Whether `line` counts elapsed time (this port publishes settled copy,
+   *  so a backend-authored value is `false` unless it re-renders the line). */
+  readonly live: boolean
+  /** Tool action verb, when the line describes a running tool. */
+  readonly label?: string
+  /** Tool detail fragment (path / command / pattern), when there is one. */
+  readonly detail?: string
+  /** The playful phrase or `⏵` self-narration currently shown, when any. */
+  readonly phrase?: string
+  /** Tools completed in the current turn. */
+  readonly toolCount: number
+  /** Wall clock the current phase began. */
+  readonly phaseStartedAt: number
+  /** Wall clock the current turn began (0 when no turn has started). */
+  readonly turnStartedAt: number
+  /** Timestamp of the last folded event (how fresh the value is). */
+  readonly updatedAt: number
+  /** Language the line was rendered in. */
+  readonly lang: 'zh' | 'en'
+}
+
+/**
  * One rendered transcript row. The DSH session log is the source of truth:
  * rows are derived from `session/event` records (and the initial
  * `agent.session.events` replay), never from optimistic local state.
  */
 export interface ChatRow {
   id: number
-  kind: 'user' | 'assistant' | 'tool' | 'notice' | 'reasoning' | 'interrupt' | 'local' | 'local-output' | 'compact' | 'subagent' | 'job'
+  kind: 'user' | 'assistant' | 'tool' | 'notice' | 'reasoning' | 'interrupt' | 'local' | 'local-output' | 'compact' | 'subagent' | 'job' | 'turn-summary'
   /** Extra label for non-human user rows (e.g. `steering`). */
   label?: string
+  /** `user` rows another agent sent (an Agent Teams peer message): its name. */
+  sender?: string
+  /** Interrupt rows: backend name, kept separate from localized transcript text. */
+  interruptBackend?: string
   /** Actual execution location for `!command` rows. */
   executionTarget?: string
   text: string
@@ -84,6 +121,8 @@ export interface ChatRow {
   thinkingOpen?: boolean
   /** Present on `tool` rows; the card model. */
   tool?: ToolRow
+  /** Present on `turn-summary` rows; the turn's usage ledger. */
+  turnUsage?: TurnUsageSummary
   /** Present on `subagent` rows; the subagent state snapshot. */
   subagent?: SubagentRow
   /** Present on `job` rows; the background-job state snapshot. */
@@ -98,9 +137,19 @@ export interface ChatRow {
   time?: number
   /** Present on `reasoning` rows once settled: thinking wall-clock duration. */
   durationMs?: number
+  /** Present on `reasoning` rows of a backend that reports thinking only as
+   *  an estimated token count (no thinking text): the latest estimate. The
+   *  text, when any arrives, still wins over the count. */
+  reasoningTokens?: number
   /** Source session event seq — present on every log-derived row (rewind
    *  fork anchor on user rows; window-floor bookkeeping for the rest). */
   seq?: number
+  /** The backend's own durable anchor of a row when it is not the row's
+   *  `seq`: a `user` row's rewind anchor (a Claude message uuid), an
+   *  `assistant`/`reasoning` row's message (a Claude API message id, which
+   *  "load earlier" uses to find the record a folded row came from); absent
+   *  on DSH rows, whose anchor is the seq itself. */
+  anchor?: string
   /** True when the row's full text was folded to keep the transcript window
    *  bounded (see MAX_ROWS); the session log still holds the full content
    *  and loadOlder() restores it. */
@@ -142,25 +191,59 @@ export interface ToolRow {
   startedAt: number
   /** Settled wall-clock duration, written by tool/result. */
   durationMs?: number
+  /**
+   * Live output of the running call (`tool.output`): the bounded tail the
+   * projector keeps (at most 200 lines / 16 KiB), raw — ANSI and carriage
+   * returns included; the card sanitizes the few lines it shows. Absent
+   * when the call printed nothing live; removed when the result settles.
+   */
+  liveOutput?: string
+  /** Whole lines dropped from the head of `liveOutput` to keep it bounded. */
+  liveOutputDropped?: number
 }
 
 /** Pending-call render intent (structural subset of dsh-tools ToolCallView). */
-export type ToolCallView =
+export type ToolCallView = ToolViewMeta & (
   | { readonly card: 'generic'; readonly title: string; readonly kind?: string }
   | { readonly card: 'terminal'; readonly title: string; readonly description?: string; readonly cwd?: string }
   | { readonly card: 'diff'; readonly title: string; readonly diffs: readonly ToolFileDiff[] }
+)
 
-/** One file change in a tool presentation (dsh-tools FileDiff). */
-export interface ToolFileDiff {
-  readonly path: string
-  /** Prior content, or null for a new file / no before-image. */
-  readonly oldText: string | null
-  readonly newText: string
+/**
+ * Optional backend decoration of a tool view: the i18n key of the tool's
+ * display name (`tool-name-*`; absent = the card localizes the raw tool id)
+ * and its colour family (absent = derived from the tool id).
+ */
+export interface ToolViewMeta {
+  readonly displayKey?: string
+  readonly category?: 'mutate' | 'exec' | 'other'
 }
+
+/**
+ * One file change in a tool presentation: the before/after texts
+ * (dsh-tools FileDiff; the diff is computed for display), or — for a
+ * backend that only has the patch — one file's unified diff hunks, whose
+ * real line numbers the card shows (`@@ -1,3 +1,3 @@\n one\n-two\n+TWO\n three\n`;
+ * file headers optional). `change` marks an added / deleted file;
+ * `movePath` the destination of a moved one.
+ */
+export type ToolFileDiff =
+  | {
+      readonly path: string
+      /** Prior content, or null for a new file / no before-image. */
+      readonly oldText: string | null
+      readonly newText: string
+    }
+  | {
+      readonly path: string
+      readonly patch: string
+      readonly change?: 'add' | 'delete' | 'update'
+      readonly movePath?: string
+    }
 
 /** Completed-call render intent (structural subset of dsh-tools
  *  ToolResultView). `web` results and unknown shapes fall back to raw text. */
-export type ToolResultView =
+export type ToolResultView = ToolViewMeta & (
   | { readonly card: 'generic'; readonly title?: string; readonly content?: ReadonlyArray<{ readonly type: string; readonly text?: string }> }
   | { readonly card: 'terminal'; readonly title?: string; readonly output?: string; readonly exitCode?: number; readonly signal?: string }
   | { readonly card: 'diff'; readonly title?: string; readonly diffs: readonly ToolFileDiff[] }
@@ -174,6 +257,7 @@ export type ToolResultView =
       readonly total: number
     }
   | { readonly card: 'search'; readonly shape: 'paths'; readonly title?: string; readonly paths: readonly string[]; readonly truncated: boolean; readonly total: number }
+)
 
 export interface SubagentRow {
   agentId: string
@@ -195,6 +279,10 @@ export interface SubagentRow {
   summary?: string
   stopReason?: string
   error?: string
+  /** Runs in the background (the delegating call returned at launch). */
+  background?: boolean
+  /** Spawn nesting: 1 = spawned by the main loop, N+1 = by a depth-N agent. */
+  depth?: number
 }
 
 export interface SubagentState {
@@ -221,7 +309,25 @@ export interface SubagentState {
   outputEvents: SubagentOutputLine[]
   toolCalls: SubagentToolCall[]
   tokens?: SubagentTokenUsage
+  /** The backend's own tool-count report (`usage.tool_uses`). Preferred
+   *  over the locally kept records, which miss lane frames. */
+  reportedToolUses?: number
+  /** The backend's own duration report (`usage.duration_ms`), free of the
+   *  host's receive delay; per run (a resumed run reports its own). */
+  reportedDurationMs?: number
+  /** The tool the backend last saw the subagent run (`task_progress`). */
+  lastTool?: string
   summary?: string
+  /** Runs in the background (the delegating call returned at launch). */
+  background?: boolean
+  /** Spawn nesting: 1 = spawned by the main loop, N+1 = by a depth-N agent. */
+  depth?: number
+  /** The agent that spawned this child, when the backend stated it as a
+   *  fact (Claude resume back-fill: `parent_agent_id` / the delegating
+   *  transcript). Absent = parent unknown: depth 1 still means a main-loop
+   *  child, but no deeper tree is inferred from depth alone. Drives the
+   *  workbench parent/sibling panel. */
+  parentAgentId?: string
 }
 
 /** Unified subagent activity domain model used by the adapter and every view. */
@@ -383,6 +489,46 @@ export interface CostTokenBuckets {
   idle: TokenBucket
 }
 
+/** One completed turn's usage ledger: the sum of that turn's
+ * assistant-message usages. Each message reports its own request, so the sum
+ * is the turn total and stays separate from the cumulative `tokens` (a
+ * turn-level report from the backend must not be added on top). Absent wire
+ * fields stay absent: `cacheKnown` tells "the route reported zero cache"
+ * from "the route reports no cache at all", so the UI never shows a made-up
+ * zero. */
+/**
+ * How one turn ended, in the shared vocabulary every backend maps its own
+ * close reason onto: `completed` ran to the end, `interrupted` was cancelled
+ * by the user (or orphaned by a crash), `error` failed.
+ */
+export type TurnOutcome = 'completed' | 'interrupted' | 'error'
+
+export interface TurnUsageSummary {
+  readonly input: number
+  readonly output: number
+  readonly cacheRead: number
+  readonly cacheWrite: number
+  /** True when any cache field was present on the wire this turn. */
+  readonly cacheKnown: boolean
+  /** Attempts within the turn that failed and were superseded (API
+   * retries); 0 means no retry segment renders. */
+  readonly retries: number
+  /** turn.start → turn.end wall-clock span (ms). */
+  readonly durationMs: number
+  /** Model id the turn's last request ran on, when the backend reported
+   * one; absent rather than guessed from the session model. */
+  readonly model?: string
+  /** True when `model` differs from the previous turn's (or is the first
+   * turn with a model). The row names the model only then, since repeating
+   * an unchanged model every turn is noise; the commands still see it. */
+  readonly noteModel?: boolean
+  /** Reasoning effort the turn's requests pinned, when known. */
+  readonly effort?: string
+  /** How the turn ended; an interrupted turn's ledger is partial and the
+   * row says so. */
+  readonly outcome: TurnOutcome
+}
+
 /**
  * 本会话主会话用量按模型分桶（费用估算输入，见 estimateCostFromBucketsCny）。
  * `channel.tokens` 的语义与既有显示不变；本字段只服务计价，会话中途换模型时
@@ -451,6 +597,13 @@ export interface ChannelGoal {
   roundsStarted: number
   /** Present exactly while `phase` is `blocked`. */
   blockedReason?: { code: string; message: string }
+  /**
+   * A backend that budgets its goals by tokens and time (Codex) reports
+   * the spend here; the goal panel and status line then show it instead of
+   * the round count. DSH goals carry no budget (rounds stay the readout).
+   * `tokenBudget: null` = no cap.
+   */
+  budget?: { tokensUsed: number; tokenBudget: number | null; timeUsedSeconds: number }
 }
 
 /** One entry of the latest todo-list snapshot (mirrors dsh-tool-todo's
@@ -515,14 +668,161 @@ export interface PendingMessage {
   text: string
   images: readonly ComposerImageRef[]
   placement: 'steer' | 'followup'
+  /** Parked channel-side by an interrupt (Esc, as in Claude Code): the
+   *  backend dropped its queued copy with the aborted turn, this preview is
+   *  the only remaining copy, and nothing delivers it until the user sends
+   *  the dock (⏎ / deliverDocked) or retracts it (Alt+↑ / the ↑ editor). */
+  docked?: boolean
+  /** Docked because its session ended or its backend dropped it on its own:
+   *  no backend holds a copy, so it outlives the switch to the next session. */
+  orphaned?: boolean
 }
 
 /**
  * Subagent row: displays a subagent's lifecycle (started → running → completed/failed).
  * Derived from agent.task events and history events.
  */
+/**
+ * One page of a subagent's own transcript (the agent capability's return;
+ * aliased here so the UI port stays free of module imports).
+ */
+export type SubagentTranscriptView = import('../../agent/capabilities.js').SubagentTranscriptPage
 export interface SubagentControl {
   interrupt(agentId: string): boolean
+  /** The child's full transcript source (Claude's on-disk child lane, or
+   *  the DSH child's own session log when the composition serves session
+   *  persistence). Absent = no transcript source: the transcript UI is not
+   *  rendered, and a degraded tail with its retained-range note shows
+   *  instead. Null = no such child. */
+  history?(agentId: string, window?: import('../../agent/capabilities.js').SubagentTranscriptWindow): Promise<SubagentTranscriptView | null>
+  /** The user→agent message capability, present only when the bound
+   *  session's backend actually serves one; when the member is absent the
+   *  composer does not render. Backed by real transports only: Claude's
+   *  parent-mediated relay, DSH's direct continuable prompt control plane. */
+  message?: AgentMessageControl
+}
+
+// ── agent-team message domain ───────────────────────────────────────────
+
+/** How one message to an agent travelled. The backend states the
+ *  transport; it is never guessed:
+ *  'parent-mediated' — the parent model relays through its own SendMessage tool;
+ *  'direct-continuable' — the human prompt control plane sends to a
+ *  continuable child's inbox;
+ *  'agent-relay' — a model-authored relay between adjacent agents. */
+export type AgentMessageVia = 'parent-mediated' | 'direct-continuable' | 'agent-relay'
+
+/** Delivery state of one message. The fold is monotone: a view only ever
+ *  advances, 'unknown' is a valid final state (no delivery fact was ever
+ *  observable), and nothing goes past 'queued' without an explicit backend
+ *  fact. An accepted inbox is 'queued', not read or executed. */
+export type AgentMessageState = 'issued' | 'queued' | 'delivered' | 'held' | 'refused' | 'expired' | 'unknown'
+
+/** Backend-neutral identity of one agent in a team: the stable id
+ *  its backend addresses it by (a Claude task/call id, a DSH durable child
+ *  session id) plus the presentation facts that are actually known. */
+export interface AgentIdentity {
+  readonly agentId: string
+  readonly parentAgentId?: string
+  readonly sessionId?: string
+  /** A stable name the parent can address the child by. Absent = no name
+   *  addressing: disambiguate by id or hide the submit affordance. */
+  readonly name?: string
+  /** Creation label (the delegation's description). */
+  readonly label?: string
+  readonly mode?: 'one-shot' | 'continuable' | 'unknown'
+  readonly status?: SubagentStatus
+}
+
+/** One observed or submitted message to an agent. */
+export interface AgentMessageView {
+  /** The durable inbox/session message id of the accepted message, never
+   *  the local submission id (that is intentId; keep the two apart).
+   *  Claude's SendMessage observation has no child inbox id: the parent tool
+   *  call id (durable in the parent transcript) names it. */
+  readonly messageId: string
+  /** The channel-minted submission id, present when this view originated
+   *  from a local composer submit. */
+  readonly intentId?: string
+  /** Sender: an agent id / session id, the reserved 'user', or absent when
+   *  only the lane is known (a parent-lane observation renders as the
+   *  parent). */
+  readonly from?: string
+  /** Target: an agent id / session id, or the name the parent was asked to
+   *  address (Claude parent-mediated, before resolution). */
+  readonly to?: string
+  readonly via: AgentMessageVia
+  readonly text: string
+  readonly state: AgentMessageState
+  /** Back-reference to the fact this view came from: a parent tool call id,
+   *  a durable session seq, or a prompt receipt's message id. */
+  readonly sourceRef?: string
+  readonly observedAt: number
+  /** The parent session the observation rode; absent when unknown. */
+  readonly parentSessionId?: string
+}
+
+/** One composer submission to an agent. */
+export interface AgentMessageSubmitInput {
+  /** Stable child id (the AgentIdentity the picker chose). */
+  readonly targetId: string
+  /** Display name, when the transport addresses by name (Claude). */
+  readonly targetName?: string
+  readonly text: string
+  /** Enter = 'queue'; Ctrl+Enter = 'steer' only where the control says so. */
+  readonly delivery: 'queue' | 'steer'
+  /** Caller cancellation before acceptance. */
+  readonly signal?: AbortSignal
+}
+
+/** The stable outcome of one submission. ok means the transport accepted
+ *  the message (`state` says how far it got, never past 'queued' without a
+ *  backend fact). The failure reasons are the fixed vocabulary the notices
+ *  render, so no raw provider error text is needed. */
+export type AgentMessageSubmitResult =
+  | { readonly ok: true; readonly intentId: string; readonly messageId?: string; readonly state: AgentMessageState }
+  | { readonly ok: false; readonly reason: 'not-resumable' | 'unauthorized' | 'delivery-unavailable' | 'parent-unavailable' | 'target-ambiguous' | 'unavailable' | 'cancelled' | 'failed'; readonly message?: string }
+
+/** The user→agent message capability a channel may serve. Present only
+ *  when the backend has a real transport; without it the composer is not
+ *  rendered. */
+export interface AgentMessageControl {
+  readonly via: AgentMessageVia
+  /** Whether steer delivery (Ctrl+Enter) is supported here (DSH direct:
+   *  yes; Claude parent-mediated is always a followup and never interrupts
+   *  the parent turn). */
+  readonly steer: boolean
+  /** Addressable children, in roster order. Only children the transport may
+   *  actually take (DSH: direct continuable catalog entries; Claude: the
+   *  known subagent roster) are listed. Rejects when the backend's roster
+   *  read fails, so a failed read is never mistaken for an empty roster. */
+  listTargets(): Promise<readonly AgentIdentity[]>
+  /** Submit one composer text. Resolves once the transport accepted it or
+   *  failed with a stable reason (the draft stays with the caller). */
+  submit(input: AgentMessageSubmitInput): Promise<AgentMessageSubmitResult>
+  /** Observed relay facts of this session, oldest first (from → to
+   *  summaries, the Messages page). Only messages with a real source: a DSH
+   *  AgentMessageSource relay or a Claude SendMessage observation. */
+  messages(): readonly AgentMessageView[]
+}
+
+
+
+/** One bounded timeline occurrence of a tracked job: lifecycle and
+ * output-drain observations in arrival order, wall-clock stamped at receipt.
+ * The store keeps a bounded ring per job, so this is an observation log, not
+ * a complete history: entries older than the ring are gone and the panel
+ * says "latest" rather than implying completeness. */
+export interface JobTimelineEvent {
+  readonly kind: 'started' | 'progress' | 'output' | 'gap' | 'stopping' | 'settled'
+  readonly at: number
+  /** The progress line (progress) or terminal detail (settled), when the
+   *  event carries text. */
+  readonly text?: string
+  /** Bytes observed in this output drain (output events). */
+  readonly bytes?: number
+  /** The drain's channel label, when the kernel chunk carried one. */
+  readonly channel?: BackgroundJobOutputChannel
 }
 
 /** One tracked job as the UI renders it. */
@@ -554,6 +854,22 @@ export interface BackgroundJobState {
   outputDropped?: boolean
   /** Producer-retained spill files holding the complete output stream. */
   spillPaths?: readonly string[]
+  /** Where the backend writes the job's output (as the backend reported
+   *  it); the output tail is read from it while the job is on screen. */
+  outputFile?: string
+  /** Last producer progress line seen. The live `progress` is cleared at
+   *  settle, but the focused detail keeps showing what the producer last
+   *  said (with its observation time and the producer kind as the source). */
+  lastProgress?: string
+  /** When `lastProgress` was observed (receipt wall-clock). */
+  lastProgressAt?: number
+  /** Output discontinuities observed for this job (ring evictions and
+   *  producer gaps). A count only: the bytes behind a gap are gone and are
+   *  never estimated. */
+  gapCount?: number
+  /** Bounded observation timeline; undefined/empty for jobs
+   *  whose history predates the store's lifetime (a resumed roster). */
+  timeline?: readonly JobTimelineEvent[]
 }
 
 /**
@@ -563,6 +879,12 @@ export interface BackgroundJobState {
  */
 export interface JobControl {
   kill(id: string): boolean
+  /**
+   * The job's card or panel entry is on screen: keep its output tail fresh
+   * (a backend whose output is read on demand polls at most once a second
+   * while watched). Returns the unwatch; absent = the output is pushed.
+   */
+  watchOutput?(id: string): () => void
 }
 
 export interface StagedImageInput {
@@ -646,7 +968,7 @@ export type ResumeResult =
   | { readonly ok: false; readonly reason: 'working' }
   | { readonly ok: false; readonly reason: 'unavailable' }
   | { readonly ok: false; readonly reason: 'cancelled' }
-  | { readonly ok: false; readonly reason: 'failed'; readonly error: string }
+  | { readonly ok: false; readonly reason: 'failed'; readonly error: string; readonly code?: 'owned-elsewhere' }
   /**
    * Another TUI process currently has this session mounted. Two processes
    * driving one session would interleave writes into a single append-only
@@ -677,6 +999,9 @@ export interface PermissionPresetSnapshot {
   readonly availability: PermissionPresetAvailability
   readonly options: readonly PermissionPresetOption[]
   readonly current?: PermissionPresetCurrent
+  /** The session already selected the experimental `auto` preset, so its
+   *  session-scoped risk confirmation is spent (the Shift+Tab rule). */
+  readonly autoConfirmed?: boolean
 }
 
 export type PermissionPresetAvailability = 'runtime' | 'legacy' | 'unavailable'
@@ -692,6 +1017,57 @@ export interface PermissionPresetCurrent {
   readonly name: string
   readonly description?: string
   readonly kind: 'preset' | 'custom'
+}
+
+/**
+ * One backend-native permission mode (the typed `modes` capability a
+ * non-DSH session may declare). The port restates the capability's own
+ * {id, label} so the UI layer never imports the agent domain.
+ */
+export interface BackendModeOption {
+  readonly id: string
+  readonly name: string
+  /** The one-line explanation the picker shows under the name (absent when
+   *  the backend declares none). */
+  readonly description?: string
+}
+
+/**
+ * One relay channel profile (the typed `channels` capability a Claude
+ * session declares; the store is backends/claude/channels.json). The port
+ * restates the capability's own view so the UI layer never imports the
+ * agent domain. The picker's rows and the mapping view both render from
+ * these entries.
+ */
+export interface BackendChannelOption {
+  readonly id: string
+  readonly name: string
+  /** Exact requested-id → actual model entries, in file order. */
+  readonly models: readonly { readonly from: string; readonly to: string }[]
+  /** Tier keyword → actual model entries, in file order (`default` = the
+   *  any-model rule). */
+  readonly tiers: readonly { readonly tier: string; readonly to: string }[]
+  /** The connection fields (never a token literal); absent on
+   *  mapping-only channels. Equal fingerprints = the same connection, so
+   *  the backend host can decide restart-vs-refresh without the secret. */
+  readonly connection?: {
+    readonly baseUrl?: string
+    readonly hasToken: boolean
+    readonly envKeys: readonly string[]
+    readonly fingerprint: string
+  }
+}
+
+/** A relay profile write; omitted fields keep their stored values. */
+export interface BackendChannelInput {
+  readonly id: string
+  readonly name: string
+  readonly baseUrl?: string
+  /** Undefined = keep; '' removes the stored token and its ref. */
+  readonly token?: string
+  readonly env?: Readonly<Record<string, string>>
+  readonly models?: Readonly<Record<string, string>>
+  readonly tiers?: Readonly<Record<string, string>>
 }
 
 /** @internal */
@@ -771,13 +1147,123 @@ export type BackgroundResult =
   | { readonly ok: true; readonly backgroundedSessionId: string }
   | { readonly ok: false }
 
+/**
+ * Plain readonly capability snapshot of the bound backend session, for UI
+ * decisions (which commands to offer, which affordances to render). It is
+ * data, never a capability handle: the channel owns the actions.
+ */
+export interface ChannelCapabilities {
+  /** Backend id of the bound session (`dsh`, `claude`, `acp:<agent>`). */
+  readonly backendId: string
+  /** User-facing backend name (status notices, `cmd-unavailable-backend`). */
+  readonly backendLabel: string
+  /** Local slash-command names this backend supports (menu, Tab, dispatch). */
+  readonly commands: readonly string[]
+  /** Queued inputs can be withdrawn synchronously (Alt+Up). */
+  readonly retractPending: boolean
+  readonly permissions: boolean
+  readonly models: boolean
+  readonly modelRoutes: 'backend' | 'providers'
+  readonly effort: boolean
+  readonly modes: boolean
+  readonly compact: boolean
+  /** `/init` initializes project instructions (DSH: its existing template). */
+  readonly init: boolean
+  readonly rewind: boolean
+  readonly fork: boolean
+  readonly resume: boolean
+  /** Catalog removal keeps the transcript when explicitly marked as archive. */
+  readonly deleteAction?: 'archive'
+  readonly subagents: boolean
+  readonly tasks: boolean
+  readonly mcp: boolean
+  /** `/context` reads a backend-measured context report. */
+  readonly context: boolean
+  /** `/login` signs the backend session in (DSH: the DSH credentials). */
+  readonly login: boolean
+  /** `/btw` and `/recap` run a side call over the conversation. */
+  readonly sideQuery: boolean
+  /** `/rename` renames the session. */
+  readonly rename: boolean
+  /** `/color` keeps a per-session accent. */
+  readonly color: boolean
+  /** `/channel` manages the backend's relay channel profiles (Claude's
+   *  channels.json). False on every other backend, DSH included: the only
+   *  flag a DSH session does not get by default. */
+  readonly channels: boolean
+  /** `/goal` is served: DSH through its command registry row, another
+   *  backend through its typed `goals` capability. False = `/goal` is
+   *  refused as unavailable on this backend. */
+  readonly goals: boolean
+}
+
+/**
+ * Cross-backend session identity as the UI sees it. Structurally the Agent
+ * Domain's `AgentSessionRef` (src/agent/refs.ts); restated here because the
+ * ports never import outside their own directory.
+ */
+export interface ChannelSessionRef {
+  readonly backendId: string
+  readonly sessionId: string
+}
+
+/** Subscription usage windows (`five_hour`, `seven_day`, …): utilization
+ *  0–1 and the reset time (epoch seconds) when known. */
+export interface ChannelRateLimit {
+  readonly windows: readonly { readonly name: string; readonly utilization: number; readonly resetsAt?: number }[]
+}
+
+/** A backend-reported (or locally estimated) session cost. */
+export interface ChannelCostReport {
+  readonly currency: string
+  readonly amount: number
+  readonly source: 'backend' | 'estimate'
+}
+
 export type AgentStatus = 'idle' | 'running'
 export interface LlmModelInfo { provider: string; id: string; name: string; description?: string; inputModalities?: readonly string[] }
 export interface LlmProviderInfo { id: string; name: string }
-export interface LlmDiscoveredModel { id: string; name?: string; contextWindow?: number; maxTokens?: number }
+export interface LlmDiscoveredModel { id: string; name?: string; contextWindow?: number; maxTokens?: number; inputModalities?: readonly string[] }
 export type ChannelImageMediaType = 'image/png' | 'image/jpeg' | 'image/webp' | 'image/gif'
 export interface ChannelSceneMetadata { readonly id: string; readonly title?: string }
 export interface RawTrajEvent { readonly type: string; readonly seq: number; readonly time: number; readonly data: unknown }
+
+/**
+ * What the channel's trajectory source reports. A composition either mounted
+ * a trajectory source or it did not, and that is decided by what was mounted
+ * (the backend-neutral core mounts the AgentEvent fold; the DSH extension
+ * replaces it with its raw history), never by a backendId lookup.
+ *
+ *   'supported'    a source is mounted and has events (the DSH raw view;
+ *                  Claude via the AgentEvent fold);
+ *   'empty'        a source is mounted, the session just has no events yet;
+ *                  the only state that may promise "data once turns happen";
+ *   'unsupported'  no source is mounted at all: surfaces say so instead of
+ *                  posing as an empty session, promise no future data, and
+ *                  keep the fullscreen outlet disabled.
+ */
+export type TrajectorySource = 'supported' | 'empty' | 'unsupported'
+
+/**
+ * One trajectory drilldown lane (cross-agent drilldown): a subagent whose
+ * child-lane events the mounted source folded into their own raw-event log.
+ * The scope filter (当前 Agent / 父回合 / 全部后代) refolds those logs on
+ * demand; a source that attributes no lanes reports none and the filter is
+ * not offered.
+ */
+export interface TrajectoryLane {
+  /** The subagent's id (the lane log's lookup key). */
+  readonly agentId: string
+  /** The delegating tool call that anchors this lane (the lane router's key). */
+  readonly callId?: string
+  /** The subagent's description, when the start event carried one. */
+  readonly label?: string
+  readonly model?: string
+  /** The lane this agent was spawned from (undefined = the main session). */
+  readonly parentAgentId?: string
+  /** Spawn nesting: 1 = spawned by the main loop. */
+  readonly depth: number
+}
 
 /**
  * The ONE context-occupancy reading every occupancy surface shares: the
@@ -796,10 +1282,76 @@ export interface ContextOccupancy {
   /** Window to divide by; `undefined` when no route advertised a capacity. */
   readonly contextWindow: number | undefined
   /**
-   * Which source answered: `projection` is DSH's own `contextPressure`
-   * projection (the number the Web UI shows); `sample` is this TUI's fallback,
-   * the last settled request's billed usage, used only when the composition
-   * mounts no token meter.
+   * Which source answered: DSH's `contextPressure` projection, the backend's
+   * measured occupancy, or the last settled request's billed usage when
+   * neither occupancy source has a reading.
    */
-  readonly source: 'projection' | 'sample'
+  readonly source: 'projection' | 'backend' | 'sample'
+}
+
+/**
+ * What the context is made of, as DSH's own token meter prices it: the heuristic
+ * composition half of the same unit that publishes {@link ContextOccupancy}
+ * (`contextBreakdown`: system prompt / the newest request envelope's tool
+ * schemas / every other visible surface node, injected context included).
+ *
+ * The three are a COMPOSITION, never a total — the meter's own contract says so,
+ * because its fixed density estimator underprices CJK text and JSON schemas.
+ * Only the occupancy numerator answers "how full is the window"; these numbers
+ * split that answer (and whatever this app estimates on top of them) across the
+ * bar's fills. Absent when the mounted meter predates the projection.
+ */
+export interface ContextBreakdown {
+  /** Heuristic tokens of the last nonempty surviving system prompt. */
+  readonly systemTokens: number
+  /** Heuristic tokens of the newest request envelope's tool schemas. */
+  readonly toolsTokens: number
+  /** Heuristic tokens of every other visible surface node (superseded system
+   *  prompts and injected context included). */
+  readonly messageTokens: number
+}
+
+/** One durable roster row of an Agent Team. */
+export interface TeamMember {
+  /** The member's session id (the Lead's is the team id). */
+  readonly id: string
+  /** Permanent model-facing name; the Lead is always `lead`. */
+  readonly name: string
+  readonly role: 'lead' | 'teammate'
+  /** Durable lifecycle only; whether a turn is running comes from the
+   *  member's own session (the subagent row for a teammate). */
+  readonly phase: 'provisioning' | 'active' | 'failed'
+  readonly error?: string
+}
+
+/** One non-deleted shared task of an Agent Team. */
+export interface TeamTask {
+  readonly id: string
+  readonly revision: number
+  readonly subject: string
+  readonly description: string
+  readonly status: 'pending' | 'in_progress' | 'completed'
+  readonly blockedBy: readonly string[]
+  readonly writeScopes: readonly string[]
+  readonly ownerName?: string
+  /** Every blocker is complete, so the task can be claimed. */
+  readonly ready: boolean
+  /** Advisory overlaps with in-progress tasks' write scopes. */
+  readonly writeScopeWarnings: readonly string[]
+}
+
+/**
+ * The Agent Team rooted at the Lead session of the session on screen, as its
+ * backend publishes it. Present only when there is a team to show: at least
+ * one teammate, a task, or a projection failure — a session's implicit
+ * one-member team (just the Lead) reads as none.
+ */
+export interface TeamView {
+  /** The Lead session id; differs from the bound session inside a teammate. */
+  readonly leadSessionId: string
+  readonly members: readonly TeamMember[]
+  readonly tasks: readonly TeamTask[]
+  /** The first rejected persisted record; members and tasks are then the
+   *  last valid state. */
+  readonly failure?: string
 }

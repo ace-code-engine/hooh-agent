@@ -434,6 +434,10 @@ export type Styles = {
    * doesn't pick up leading whitespace from middle rows.
    */
   readonly noSelect?: boolean | 'from-left-edge'
+  /** Stable copy ownership for a pane; metadata is one span per visible row. */
+  readonly selectionPane?: string
+  /** A pane wrapping scroll viewports keeps its geometry while contents move. */
+  readonly selectionPaneViewport?: boolean
 
   /**
    * This one-row box continues the line of the row above it: the break
@@ -441,9 +445,64 @@ export type Styles = {
    * two rows (as it does for wrapped <Text>). The value is the width of the
    * row above, in columns from this box's left edge — where that row's
    * content ends. For rows laid out outside <Text> (a paragraph with inline
-   * images); selection-only, no effect on painting.
+   * images); selection-only, no effect on painting. A negative width marks
+   * an omitted separator space that copy must restore.
    */
   readonly softWrapContinuation?: number
+
+  /**
+   * Paint-time decoration for a text leaf: a header row, a per-row
+   * prefix, or a hanging indent on wrapped continuations, painted as part
+   * of the text instead of as extra Yoga nodes. Decorated columns go into
+   * Screen.noSelect and prefixed rows keep their softWrap flags, so
+   * selection and copy need nothing new. Undefined on plain text, which
+   * takes the usual paint path. Only the wrap modes are supported: under a
+   * truncate mode decorated text is not truncated.
+   */
+  readonly decoration?: TextDecoration
+}
+
+/**
+ * Paint-time decoration for one text leaf. See Styles.decoration.
+ * Producers must reuse one object while it is unchanged: the measure and
+ * paint caches compare it by reference.
+ */
+export type TextDecoration = {
+  /**
+   * One row painted above the first row (the code frame's top edge). The
+   * whole row is excluded from selection. A header wider than the node is
+   * cut to it.
+   */
+  readonly header?: string
+
+  /**
+   * Single-cell unit repeated after `header` up to the node's painted
+   * width (the wide code frame's divider). The paint pads, because only
+   * layout knows the final width.
+   */
+  readonly headerFill?: string
+
+  /**
+   * Prefix painted before every row (the code frame's rail and padding).
+   * `width` is its display width; the wrap budget shrinks by it. The
+   * first `noSelect` columns are excluded from selection. Soft-wrapped
+   * rows may exclude a different width via `continuationNoSelect`.
+   */
+  readonly prefix?: {
+    readonly text: string
+    readonly width: number
+    readonly noSelect?: number
+    /** Defaults to noSelect; excludes injected padding on continuations. */
+    readonly continuationNoSelect?: number
+  }
+
+  /**
+   * Hang wrapped continuations of a source line under the line's leading
+   * structure: quote rails repeat, list markers, checkboxes and indents
+   * become spaces. Hard rows are untouched. The injected columns are
+   * excluded from selection, so a copy matches the unwrapped line.
+   */
+  readonly hang?: boolean
 }
 
 const applyPositionStyles = (node: LayoutNode, style: Styles): void => {

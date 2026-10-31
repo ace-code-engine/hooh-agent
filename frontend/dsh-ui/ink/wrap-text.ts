@@ -2,8 +2,31 @@ import sliceAnsi from '../utils/sliceAnsi.js'
 import { stringWidth } from './stringWidth.js'
 import type { Styles } from './styles.js'
 import { wrapAnsi } from './wrapAnsi.js'
+import { noteWrapCompute } from './render-stats.js'
+import stripAnsi from 'strip-ansi'
 
 const ELLIPSIS = '…'
+
+/** Pre-wrapped display rows; keep source newlines and omitted copy separators. */
+export function wrapTextLines(
+  text: string,
+  maxWidth: number,
+  wrapLine: (line: string) => string = line => wrapText(line, maxWidth, 'wrap'),
+): { text: string; continuation: boolean; gap: boolean }[] {
+  return text.split('\n').flatMap(sourceLine => {
+    const pieces = wrapLine(sourceLine).split('\n')
+    return pieces.map((line, index) => {
+      // Blank rows keep their width for copy joins and trailing trim.
+      const gap = index > 0 && stringWidth(pieces[index - 1]!) === maxWidth
+        && stripAnsi(line).startsWith(' ') && stringWidth(stripAnsi(line).trim()) > 0
+      return {
+        text: gap ? sliceAnsi(line, 1, stringWidth(line)) : line,
+        continuation: index > 0,
+        gap,
+      }
+    })
+  })
+}
 
 // --- cross-mount wrap cache ------------------------------------------------
 // wrapText is pure: (text, maxWidth, wrapType) deterministically maps to one
@@ -38,10 +61,14 @@ function cachedWrap(
   wrapType: Styles['textWrap'],
   compute: () => string,
 ): string {
-  if (text.length < WRAP_CACHE_MIN_LENGTH) return compute()
+  if (text.length < WRAP_CACHE_MIN_LENGTH) {
+    noteWrapCompute()
+    return compute()
+  }
   const key = `${maxWidth}\u0000${wrapType}\u0000${text}`
   const hit = wrapCache.get(key)
   if (hit !== undefined) return hit
+  noteWrapCompute()
   const result = compute()
   if (wrapCache.size >= WRAP_CACHE_MAX_ENTRIES || wrapCacheChars + text.length > WRAP_CACHE_MAX_CHARS) {
     wrapCache.clear()

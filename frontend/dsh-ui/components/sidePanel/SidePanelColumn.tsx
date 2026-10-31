@@ -1,14 +1,7 @@
 /**
- * SidePanelColumn: the right surface's chrome — PanelBar on top, PanelHost
- * in the middle, and a 1-row key hint at the bottom (design doc §6.1).
- *
- * The hint row swaps text with focus: unfocused it advertises Ctrl+B,
- * focused it lists the panel keys. The two thin rules frame the host and
- * brighten to 'accent' together with the divider when the column has the
- * focus — the whole seam lights up as one surface.
- *
- * Tabs come from the PanelStore (enabled ∩ registered, badge included);
- * builtin registrations arrive via registerBuiltinPanels on module import.
+ * SidePanelColumn: PanelBar, the active panel surface and a one-row key hint.
+ * The hint follows focus, and the rules brighten with the divider as one surface.
+ * Tabs follow the enabled registration order and carry each panel's icon and badge.
  */
 import React from 'react'
 import { Box, Text, useTerminalSize } from '../../ui.js'
@@ -89,7 +82,24 @@ export function SidePanelColumn({ width, controller, channel, activity, attentio
   // ⤢ 只对「活动面板 + 声明了整屏形态 + 宿主接了出口」出现：能力位是
   // 声明的唯一真源，没有整屏对应物的面板（info/companion）不画。
   const activeEntry = entries.find(entry => entry.definition.id === controller.activePanelId)
-  const canExpand = activeEntry?.definition.capabilities?.fullscreen === true && onExpand !== undefined
+  // 没有轨迹来源（unsupported）时收起轨迹的 ⤢：全屏只会放大同一句「不支
+  // 持」，面板自己的文案说明了原因。channel 不报告来源（旧夹具/部分
+  // channel）时照旧显示。
+  // oxlint-disable-next-line typescript/no-unnecessary-condition -- runtime guard: partial fixture channels
+  const trajectoryUnsupported = controller.activePanelId === 'trajectory' && channel.trajectorySource?.() === 'unsupported'
+  const canExpand = activeEntry?.definition.capabilities?.fullscreen === true && onExpand !== undefined && !trajectoryUnsupported
+  // 底栏拼序 = 重要性：导航 → 面板自己绑的键 → 列控制。宿主不点名任何面板：
+  // 面板经 panelStore 广告自己此刻的键位（例如 btw 在编辑层只说「↑ 回标题」、
+  // 在列表层才说 s/c），没广告过的才退回能力位那一段。窄面板从尾部截断，所以
+  // 面板键排在列控制前；未聚焦时面板收不到按键，那一格继续只说怎么把焦点拿过来。
+  const panelSegment = activeEntry === undefined
+    ? ''
+    : activeEntry.hint !== undefined
+      ? activeEntry.hint
+      : activeEntry.definition.capabilities?.sendToChat === true ? t('panel-hint-send-to-chat') : ''
+  const focusedHint = t('panel-hint-focused')
+    + (panelSegment === '' ? '' : ' · ' + panelSegment)
+    + ' · ' + t('panel-hint-zoom-width')
   // 标签点击与 ←/→ 宿主键走同一条路（openPanel 会顺带把焦点给右栏）。
   const onSelectPanel = React.useCallback(
     (id: string) => { controller.openPanel(id, { focus: true }) },
@@ -130,7 +140,7 @@ export function SidePanelColumn({ width, controller, channel, activity, attentio
       <Rule focused={focused} />
       <Box height={1} flexShrink={0} paddingX={1} overflow="hidden">
         <Text dimColor wrap="truncate-end">
-          {focused ? t('panel-hint-focused') : t('panel-hint-unfocused')}
+          {focused ? focusedHint : t('panel-hint-unfocused')}
         </Text>
       </Box>
     </Box>

@@ -122,8 +122,8 @@ if (-not $py) {
     $currentTime = [string]([char]0x5F53 + [char]0x524D + [char]0x65F6 + [char]0x95F4)
 
     $cases = @(
-        @{ n = 'version';      a = @('--version');                           m = 'ACE ' },
-        @{ n = 'preview';      a = @('--preview', '--preview-width', '80');  m = 'ACE ' },
+        @{ n = 'version';      a = @('--version');                           m = 'HooH ' },
+        @{ n = 'preview';      a = @('--preview', '--preview-width', '80');  m = 'HooH ' },
         @{ n = 'mock_turn';    a = @('--mock', '--no-tui', '--permission', 'readonly',
                                      '--project-root', $ws, '--input', 'what time is it'); m = $currentTime },
         @{ n = 'native_tools'; a = @('--mock', '--no-tui', '--tools', '--permission', 'full',
@@ -158,9 +158,10 @@ if ((Test-Path $versionFile) -and (Test-Path $changelog)) {
     $heading = "## [$tag]"
     Check ("CHANGELOG has a heading '$heading' (what the release step greps for)") ($cl.Contains($heading))
     # And every heading in the file should follow the same shape, so this cannot
-    # quietly become "mostly v-prefixed".
+    # quietly become "mostly v-prefixed". `Unreleased` is the Keep-a-Changelog
+    # staging heading and lives at the top between releases -- exempt it.
     $headings = [regex]::Matches($cl, '(?m)^## \[([^\]]+)\]') | ForEach-Object { $_.Groups[1].Value }
-    $odd = @($headings | Where-Object { $_ -notmatch '^v\d' -and $_ -ne 'v1.0' })
+    $odd = @($headings | Where-Object { $_ -notmatch '^v\d' -and $_ -ne 'v1.0' -and $_ -ne 'Unreleased' })
     Check "every CHANGELOG heading uses the v-prefixed form" ($odd.Count -eq 0) (($odd | Select-Object -First 4) -join ', ')
 } else {
     Write-Host "  SKIP  version.py or CHANGELOG.md not found"

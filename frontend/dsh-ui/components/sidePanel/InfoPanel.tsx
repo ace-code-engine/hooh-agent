@@ -19,9 +19,9 @@ import { formatTokens } from '../../terminal-utils/format.js'
 import { formatContextUsage } from '../../tuiDisplayPrefs.js'
 import { modeDisplayName, type SessionModeSpec } from '../../sessionModes.js'
 import { estimateSessionCostSnapshotCny, isDeepSeekOfficialProvider, isPeakHour } from '../../deepseekPricing.js'
-import { formatCacheHitRate } from '../../screens/StatusLine.js'
+import { formatCacheHitRate, formatCostReport } from '../../screens/StatusLine.js'
 import { contextPressureStep, speedColor } from '../../screens/StatusMetrics.js'
-import { formatProject } from '../../sessions/format.js'
+import { displayWorkingDirectory, formatProject } from '../../sessions/format.js'
 import { homeDir } from '../../utils/paths.js'
 import { Divider } from '../design-system/Divider.js'
 import { useSidePanelChannel } from './SidePanelRuntimeContext.js'
@@ -71,9 +71,10 @@ export function InfoPanel({ width, height, focused, visible }: PanelProps): Reac
 
   const usage = channel.lastUsage
   const used = contextUsedOf(channel)
+  const currentCwd = displayWorkingDirectory(channel)
   const displayCwd = channel.displayCwd === channel.cwd
-    ? formatProject(channel.displayCwd, homeDir())
-    : channel.displayCwd
+    ? formatProject(currentCwd, homeDir())
+    : currentCwd
 
   // --- 值构造（全部复用状态栏口径） -------------------------------------
   const none = t('info-value-none')
@@ -85,8 +86,11 @@ export function InfoPanel({ width, height, focused, visible }: PanelProps): Reac
     : undefined
   const contextStep = contextPct !== undefined ? contextPressureStep(contextPct) : undefined
   const cacheText = formatCacheHitRate(usage) ?? none
-  // 花费：与状态栏同门控——官方 DeepSeek 路由 + 有计价金额或未计价 token。
-  const estimate = isDeepSeekOfficialProvider(channel.provider)
+  // 花费：与状态栏同一规则——后端自报的会话花费（Claude `total_cost_usd`）
+  // 优先；否则官方 DeepSeek 路由 + 有计价金额或未计价 token。
+  // oxlint-disable-next-line typescript/no-unnecessary-condition -- partial embedder channels omit the report
+  const costReport = channel.costReport
+  const estimate = costReport === undefined && isDeepSeekOfficialProvider(channel.provider)
     ? estimateSessionCostSnapshotCny({
         provider: channel.provider,
         main: channel.mainCost ?? {},
@@ -95,7 +99,9 @@ export function InfoPanel({ width, height, focused, visible }: PanelProps): Reac
         fallbackModel: channel.model,
       })
     : undefined
-  const costText = estimate !== undefined && (estimate.total > 0 || estimate.unpricedTokens > 0)
+  const costText = costReport !== undefined
+    ? formatCostReport(costReport)
+    : estimate !== undefined && (estimate.total > 0 || estimate.unpricedTokens > 0)
     ? estimate.total > 0
       ? '¥' + estimate.total.toFixed(2) + ' ' + t(isPeakHour() ? 'cost-now-peak' : 'cost-now-idle')
       : t('cost-unpriced', { tokens: formatTokens(estimate.unpricedTokens) })

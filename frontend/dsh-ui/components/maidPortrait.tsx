@@ -17,13 +17,43 @@ import { loadSharp } from '../dsh-adapter/sharp.js'
  * the setting never leaves the header worse than the whale it replaces.
  */
 
-/** 两张立绘：`normal` 是安静版，`happy` 是「高兴鲸娘」（点击她 / star 成功
- *  时替换）。资产候选同时覆盖两种目录深度：`lib/types/components`（发布形态）
- *  比 `src/components`（仓库形态）深一层。 */
-const ASSET_FILES = {
+/** 一套立绘资产：`assets/` 下的目录 + `normal`/`happy` 两张变体。 */
+export interface PortraitAssets {
+  readonly dir: string
+  readonly normal: string
+  readonly happy: string
+}
+
+/** 鲸鱼娘（DeepSeek 品牌，settings `dsh-tui.whaleGirl`）。 */
+export const MAID_ASSETS: PortraitAssets = {
+  dir: 'whale-girl',
   normal: 'whale-girl.png',
   happy: 'whale-girl-happy.png',
-} as const
+}
+
+/** Claude 娘（claude 品牌，见 `branding.ts`）：取自 cc-bridge 的开发期占位
+ * 素材（1024×1024 透明底×2）。授权注记：那边的 assets/README 标注授权未
+ * 确认——本仓库自用没问题，再分发前需确认或替换。 */
+export const CLAUDE_GIRL_ASSETS: PortraitAssets = {
+  dir: 'claude-girl',
+  normal: 'claude-girl.png',
+  happy: 'claude-girl-happy.png',
+}
+
+/** 恶魔精灵（codex 品牌，见 `branding.ts`）：用户提供的淡紫像素立绘 ×2
+ * （628×628 透明底，Lanczos 自 1254² 重采样）——常态 = 淡紫恶魔精灵头像，
+ * 点击后切「按下红色按钮的紫月龙裔少女」几秒（与鲸鱼娘/claude 娘同一套
+ * reactMaid 交互）。 */
+export const CODEX_GIRL_ASSETS: PortraitAssets = {
+  dir: 'codex-girl',
+  normal: 'codex-girl.png',
+  happy: 'codex-girl-happy.png',
+}
+
+/** 品牌档 → 立绘资产集（LogoV2 的立绘槽选这一份；deepseek 走鲸鱼娘）。 */
+export function portraitAssetsOf(brand: 'deepseek' | 'claude' | 'codex'): PortraitAssets {
+  return brand === 'claude' ? CLAUDE_GIRL_ASSETS : brand === 'codex' ? CODEX_GIRL_ASSETS : MAID_ASSETS
+}
 
 /** 一台机器上的两张立绘都解好、并补齐到**同一像素画布**上——几何完全一致，
  *  换图时宿主是「擦旧 + 画新」一次写入，不会留残影。 */
@@ -32,27 +62,33 @@ export interface MaidPortraits {
   readonly happy: TerminalImageSource
 }
 
-const assetPath = (file: string): string | undefined =>
-  [`../../../assets/whale-girl/${file}`, `../../assets/whale-girl/${file}`]
+const assetPath = (dir: string, file: string): string | undefined =>
+  [`../../../assets/${dir}/${file}`, `../../assets/${dir}/${file}`]
     .map(relative => fileURLToPath(new URL(relative, import.meta.url)))
     .find(candidate => existsSync(candidate))
 
-let loadOnce: Promise<MaidPortraits | undefined> | undefined
+// 每套资产一份进程内缓存（键 = 资产目录）；失败缓存成 `undefined`，坏安装
+// 不会每次渲染都重试。
+const loadCache = new Map<string, Promise<MaidPortraits | undefined>>()
 
 /**
- * 解码两张立绘一次（进程内缓存；失败缓存成 `undefined`，坏安装不会每次
- * 渲染都重试）。两张都裁掉透明边后**居中补到同一张透明画布**（取两者
- * 较大的宽高）——所以它们的像素尺寸与单元格盒完全一致。
+ * 解码一套立绘的两张变体（每套缓存一次）。两张都裁掉透明边后**居中补到
+ * 同一张透明画布**（取两者较大的宽高）——所以它们的像素尺寸与单元格盒
+ * 完全一致。资产候选同时覆盖两种目录深度：`lib/types/components`（发布
+ * 形态）比 `src/components`（仓库形态）深一层。
+ * @param assets - 资产集（默认鲸鱼娘；claude 品牌传 `CLAUDE_GIRL_ASSETS`）。
  * @returns 两张 RGBA 源；任一张缺失/解码失败时整体 `undefined`。
  */
-export function loadMaidPortraits(): Promise<MaidPortraits | undefined> {
-  loadOnce ??= (async () => {
+export function loadMaidPortraits(assets: PortraitAssets = MAID_ASSETS): Promise<MaidPortraits | undefined> {
+  let loadOnce = loadCache.get(assets.dir)
+  if (loadOnce === undefined) {
+    loadOnce = (async () => {
     try {
       const sharp = await loadSharp()
       if (sharp === undefined) return undefined
       const trimmed: Record<'normal' | 'happy', TerminalImageSource> = { normal: undefined as never, happy: undefined as never }
       for (const variant of ['normal', 'happy'] as const) {
-        const path = assetPath(ASSET_FILES[variant])
+        const path = assetPath(assets.dir, assets[variant])
         if (path === undefined) return undefined
         const decoded = await sharp(readFileSync(path), { failOn: 'error' })
           .toColourspace('srgb')
@@ -74,7 +110,9 @@ export function loadMaidPortraits(): Promise<MaidPortraits | undefined> {
     } catch {
       return undefined
     }
-  })()
+    })()
+    loadCache.set(assets.dir, loadOnce)
+  }
   return loadOnce
 }
 
@@ -133,18 +171,19 @@ function trimTransparent(source: TerminalImageSource, pad = 4): TerminalImageSou
 /**
  * 两张立绘，终端图像能力确认后解码（一次把两张都备好，点击换图不等待）。
  * @param enabled - `useTerminalImages()` 的结果；为假时根本不解码。
+ * @param assets - 资产集（默认鲸鱼娘；claude 品牌传 `CLAUDE_GIRL_ASSETS`）。
  * @returns 两张 RGBA 源；未就绪/不可用时为 `undefined`。
  */
-export function useMaidPortraits(enabled: boolean): MaidPortraits | undefined {
+export function useMaidPortraits(enabled: boolean, assets: PortraitAssets = MAID_ASSETS): MaidPortraits | undefined {
   const [sources, setSources] = React.useState<MaidPortraits | undefined>(undefined)
   React.useEffect(() => {
     if (!enabled) return
     let live = true
-    void loadMaidPortraits().then(next => {
+    void loadMaidPortraits(assets).then(next => {
       if (live && next !== undefined) setSources(next)
     })
     return () => { live = false }
-  }, [enabled])
+  }, [enabled, assets])
   return enabled ? sources : undefined
 }
 

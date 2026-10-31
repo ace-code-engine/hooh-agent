@@ -1,12 +1,15 @@
 import React from 'react'
 import { marked, type Token, type Tokens } from 'marked'
-import { Box, Text } from '../ui.js'
-import { configureMarked, formatToken, stripPromptXMLTags } from '../terminal-utils/markdown.js'
+import { Box, Text, useTheme } from '../ui.js'
+import type { TextDecoration } from '../ink/styles.js'
+import { getTheme } from '../theme.js'
+import { appendBlockText, configureMarked, formatToken, stripPromptXMLTags } from '../terminal-utils/markdown.js'
 import { getCliHighlightPromise, type CliHighlight } from '../terminal-utils/cliHighlight.js'
 import { isMermaidLang } from '../terminal-utils/mermaid.js'
 import { isMathBlockToken, isMathToken } from '../terminal-utils/math.js'
 import { getMathRendering, subscribeMathRendering } from '../tuiDisplayPrefs.js'
 import { MarkdownTable } from './MarkdownTable.js'
+import { CodeBlockFrame } from './CodeBlockFrame.js'
 import { MermaidDiagram } from './MermaidDiagram.js'
 import { InlineMathParagraph } from './InlineMathParagraph.js'
 import { MathBlock } from './MathBlock.js'
@@ -36,7 +39,23 @@ type Props = {
    * mid-stream would re-wrap under the reader; the settled message switches.
    */
   inlineMathImages?: boolean
+  /**
+   * Whether to strip the model-internal prompt-analysis tag blocks
+   * (`<commit_analysis>`, `<context>`, `<function_analysis>`, `<pr_analysis>`)
+   * before lexing. Chat prose keeps the default; the plugin panel's
+   * `ui.CodeBlock` passes false so its raw code reaches the screen line for
+   * line (that API promises raw code, not the chat's pre-processing).
+   */
+  stripPromptTags?: boolean
 }
+
+/**
+ * Hang decoration for the ANSI text runs: a terminal-wrapped continuation
+ * lines up under its line's quote rails, list marker or indentation
+ * instead of falling back to column 0. One shared object, because the
+ * style diff and the measure/paint caches compare it by reference.
+ */
+const HANG_DECORATION: TextDecoration = { hang: true }
 
 // ---- token 缓存 ----
 //
@@ -113,10 +132,16 @@ function lexWithCache(content: string, allowCache: boolean): Token[] {
  * Tokens that render as their own layout node (a width-aware component)
  * instead of joining the ANSI text run. StreamingMarkdown consults the same
  * predicate: a standalone node has a fixed one-row gap to its neighbours
- * rather than the newline-derived spacing of text blocks.
+ * rather than the newline-derived spacing of text blocks. Top-level
+ * fenced code is one too (CodeBlockFrame).
  */
 export function isStandaloneToken(token: Token): boolean {
-  return token.type === 'table' || isMermaidToken(token) || isMathBlockToken(token)
+  return (
+    token.type === 'table' ||
+    token.type === 'code' ||
+    isMermaidToken(token) ||
+    isMathBlockToken(token)
+  )
 }
 
 /** Whether a paragraph holds inline math anywhere in its inline tokens. */
@@ -149,7 +174,7 @@ function renderTokensToNodes(
   const flushAnsiText = (): void => {
     if (!ansiText && textParts.length === 0) return
     if (textParts.length === 0) {
-      nodes.push(<Text key={nodes.length} dimColor={dimColor}>{ansiText.trim()}</Text>)
+      nodes.push(<Text key={nodes.length} dimColor={dimColor} decoration={HANG_DECORATION}>{ansiText.trim()}</Text>)
     } else {
       textParts.push(ansiText)
       let first = 0
@@ -163,7 +188,7 @@ function renderTokensToNodes(
       nodes.push(
         <Box key={nodes.length} flexDirection="column">
           {textParts.slice(first, last + 1).map((part, index) => (
-            <Text key={index} dimColor={dimColor}>{index + first < last ? part.slice(0, -1) : part}</Text>
+            <Text key={index} dimColor={dimColor} decoration={HANG_DECORATION}>{index + first < last ? part.slice(0, -1) : part}</Text>
           ))}
         </Box>,
       )
@@ -205,8 +230,19 @@ function renderTokensToNodes(
           dimColor={dimColor}
         />,
       )
+    } else if (token.type === 'code') {
+      // Top-level fences get the CodeBlockFrame (header/rail/padding);
+      // the mermaid branch above keeps diagram fences routed to
+      // MermaidDiagram (whose fallback re-enters the frame), and code
+      // nested in lists/quotes keeps formatToken's ANSI path.
+      flushAnsiText()
+      nodes.push(
+        <CodeBlockFrame key={nodes.length} token={token as Tokens.Code} highlight={highlight} dimColor={dimColor} />,
+      )
     } else {
-      ansiText += formatToken(token, 0, null, null, highlight)
+      // appendBlockText inserts the row break after the (newline-free) hr
+      // divider when the next block does not open its own line.
+      ansiText = appendBlockText(ansiText, formatToken(token, 0, null, null, highlight))
       // A top-level token boundary keeps inline formatting and code fences
       // intact while letting the painter cull finished offscreen text blocks.
       if (ansiText.length >= TEXT_BLOCK_BUDGET && ansiText.endsWith('\n')) {
@@ -231,11 +267,17 @@ function renderTokensToNodes(
  * block — the dominant long-output stall (string-width via wrap-ansi, 60%+
  * of CPU in streaming profiles).
  */
-function MarkdownImpl({ children, dimColor = false, cacheTokens = true, inlineMathImages = true }: Props): React.ReactNode {
+function MarkdownImpl({ children, dimColor = false, cacheTokens = true, inlineMathImages = true, stripPromptTags = true }: Props): React.ReactNode {
   const [highlight, setHighlight] = React.useState<CliHighlight | null>(null)
   // Inline math is baked into the ANSI text, so the switch must invalidate
   // the memo below (MathBlock nodes subscribe on their own).
   const mathRendering = React.useSyncExternalStore(subscribeMathRendering, getMathRendering)
+  // 渲染结果把主题色烤进 ANSI（链接 accent、行内代码 permission、列表点…）。
+  // 消费主题上下文让这个 memo 组件在换主题时也重渲染（context 更新绕过
+  // React.memo）；memo 依赖取**调色板身份**而非名字——`auto` 明暗翻转时名字
+  // 不变但色板换了，只按名字会漏。
+  const [themeName] = useTheme()
+  const palette = getTheme(themeName)
 
   React.useEffect(() => {
     let mounted = true
@@ -250,7 +292,7 @@ function MarkdownImpl({ children, dimColor = false, cacheTokens = true, inlineMa
   configureMarked()
 
   const renderedNodes = React.useMemo(() => {
-    const source = stripPromptXMLTags(children)
+    const source = stripPromptTags ? stripPromptXMLTags(children) : children
     return renderTokensToNodes(
       lexWithCache(source, cacheTokens),
       highlight,
@@ -258,7 +300,7 @@ function MarkdownImpl({ children, dimColor = false, cacheTokens = true, inlineMa
       // Dimmed text (thinking) cannot dim an image, so it keeps Unicode.
       inlineMathImages && mathRendering === 'image' && !dimColor,
     )
-  }, [children, dimColor, highlight, cacheTokens, mathRendering, inlineMathImages])
+  }, [children, dimColor, highlight, cacheTokens, mathRendering, inlineMathImages, palette, stripPromptTags])
 
   return (
     <Box flexDirection="column" gap={1}>
@@ -277,5 +319,6 @@ export const Markdown = React.memo(
     prev.children === next.children &&
     prev.dimColor === next.dimColor &&
     prev.cacheTokens === next.cacheTokens &&
-    prev.inlineMathImages === next.inlineMathImages,
+    prev.inlineMathImages === next.inlineMathImages &&
+    prev.stripPromptTags === next.stripPromptTags,
 )

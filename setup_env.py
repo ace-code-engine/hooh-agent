@@ -96,7 +96,12 @@ def candidate_interpreters(root: Optional[Path] = None) -> List[Tuple[str, str]]
     if local is not None:
         out.append(("项目内 .ace_env", str(local)))
     if os.name == "nt":
-        for p in (r"C:\aider_env\Scripts\python.exe",
+        # 可移植性纪律：这里只探测**机器无关**的位置（官方安装器默认根、
+        # 当前用户的 Python 安装目录）。写死任何个人的 venv 绝对路径都会
+        # 跟着包走到别人的机器上——探测失败倒是无害，但泄露路径、且会让
+        # "这台机器为什么找得到 Python"变成悬案。
+        for p in (r"C:\Program Files\Python312\python.exe",
+                  r"C:\Program Files\Python311\python.exe",
                   os.path.expanduser(r"~\AppData\Local\Programs\Python")):
             if os.path.isfile(p):
                 out.append(("本机常见环境", p))

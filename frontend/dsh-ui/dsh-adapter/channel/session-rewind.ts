@@ -1,19 +1,23 @@
 import type { AgentHandle, CreateAgentOptions } from '@deepseek-ai/dsh-agent'
+import type { AgentSession } from '../../agent/session.js'
 import type { Context } from '@deepseek-ai/cordis'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { randomUUID } from 'node:crypto'
 import { t } from '../../i18n.js'
+import { createDshSession, dshHandleOf } from '../backend/session.js'
 import { liveSessionCreateOptions, liveSessionOffset, sliceLiveSessionSeed, snapshotLiveSessionEvents } from '../compat/index.js'
+import { createFreshAgent, isUnstoredFreshSession } from '../fresh-agent.js'
 import { dispatchTuiDecision } from '../extension-events.js'
 import { normalizeRewindDoneSummary } from './decisions.js'
 import { composePreset, runningPresetOf } from '../presets.js'
+import { holdsNoConversation, latestPolicyFacts, replayPolicyFacts } from '../session-seed.js'
 import { attachSessionToWorkspace } from '../workspace.js'
 import { reserveNewSession } from '../../sessionMounts.js'
-import type { createChannelBinding } from './binding.js'
+import type { DshChannelBinding } from './binding.js'
 import type { ChannelOwner } from './owner.js'
 import type { ChannelState, ChatRow } from './types.js'
 
-type Binding = ReturnType<typeof createChannelBinding>
+type Binding = DshChannelBinding
 type RewindState = Pick<ChannelState, 'working' | 'cwd' | 'provider' | 'model'>
 
 async function waitForTurnEnd(
@@ -36,10 +40,10 @@ export function createRewindToAction(
   state: RewindState,
   deps: {
     owner: Pick<ChannelOwner, 'current'>
-    binding: Pick<Binding, 'agent' | 'capture' | 'prepare' | 'isCurrent' | 'abandon'>
+    binding: Pick<Binding, 'agent' | 'session' | 'capture' | 'prepare' | 'isCurrent' | 'abandon'>
     settleCompaction(): Promise<void>
     notify: ChannelState['notify']
-    adoptForkedAgent(handle: AgentHandle, capture: ReturnType<Binding['capture']>, seed: readonly SessionEvent[], agentPreset: string | undefined, childId: SessionId): string
+    adoptForkedAgent(candidate: AgentSession, capture: ReturnType<Binding['capture']>, seed: readonly SessionEvent[], agentPreset: string | undefined, childId: SessionId): string
     notifySessionSwitched(kind: 'rewind', sessionId: string, previousSessionId: string): void
   },
 ) {
@@ -53,7 +57,9 @@ export function createRewindToAction(
     }
     const wasWorking = state.working
     const cancelSeq = liveSessionOffset(deps.binding.agent.session)
-    if (wasWorking) deps.binding.agent.cancel({ kind: 'user' })
+    // Through the session: the queue it drops is this client's own discard,
+    // not inputs the backend lost (those the channel would keep for the user).
+    if (wasWorking) void deps.binding.session.cancel('switch')
     if (wasWorking && !await waitForTurnEnd(deps.binding.agent.session, cancelSeq, 30000)) {
       deps.notify(t('rewind-settling'), { color: 'error' })
       return null
@@ -68,60 +74,71 @@ export function createRewindToAction(
       if (event.type === 'turn/start') { boundary = event.seq - 1; break }
       if (event.type === 'turn/end') break
     }
+    const source = deps.binding.agent.session
     let seed: readonly SessionEvent[]
+    let cut: readonly SessionEvent[]
+    const neverUsed = isUnstoredFreshSession(source)
     try {
       if (boundary < 0) throw new Error('cannot rewind to the very first message')
-      // Slice the SOURCE snapshot through an inclusive seq. Never
-      // sessions.fork(): that registers a real child whose snapshot includes
-      // child-owned session/end-seed, so snapshot.length is not the inherited
-      // cut. agents.create owns the new session id.
-      seed = sliceLiveSessionSeed(deps.binding.agent.session, boundary)
+      cut = neverUsed ? snapshotLiveSessionEvents(source) : sliceLiveSessionSeed(source, boundary)
+      seed = neverUsed || holdsNoConversation(cut) ? [] : cut
     } catch (error) {
       deps.notify(t('rewind-fork-failed', { err: error instanceof Error ? error.message : String(error) }), { color: 'error' })
       return null
     }
-    const composed = await composePreset(ctx, runningPresetOf(deps.binding.agent.session))
+    // A policy-only cut starts fresh; seeded creation would publish it immediately.
+    const cutHoldsNoConversation = seed.length === 0
+    const policyFacts = cutHoldsNoConversation ? latestPolicyFacts(cut) : []
+    const composed = await composePreset(ctx, runningPresetOf(source))
     // Announce the id before the factory: the rewind creates the child's log
     // here, and the publisher only learns the id from the registry on its next
     // beat.
     const { reservation } = await reserveNewSession(String(childId))
-    let handle: AgentHandle
+    let candidate: AgentSession
     try {
-      handle = await deps.binding.prepare(adoption, () => agents.create(liveSessionCreateOptions({
-        sessionId: childId,
-        seed,
-        runtimeSession: deps.binding.agent.session,
-        inheritedCount: seed.length,
-        cwd: state.cwd,
-        parentSession: deps.binding.agent.session.id,
-        agentPreset: composed.agentPreset,
-        agentOptions: { provider: state.provider, model: state.model },
-        setup: async (agentCtx, agent) => {
-          // The cut keeps pre-turn inbox insertions but drops their claims.
-          // Newer hosts replay those inherited splices, so cancel the restored
-          // queue durably in the CHILD before publication or preset setup.
-          // Clearing only state.pending would hide, not revoke, the old work.
-          agent.inbox.clear()
-          return composed.setup?.(agentCtx, agent)
-        },
-      })))
+      const create = (): Promise<AgentHandle> => cutHoldsNoConversation
+        ? createFreshAgent(ctx, agents, {
+          sessionId: childId,
+          meta: { cwd: state.cwd, ...(composed.agentPreset === undefined ? {} : { agentPreset: composed.agentPreset }) },
+          agentOptions: { provider: state.provider, model: state.model },
+          setup: composed.setup,
+        })
+        : agents.create(liveSessionCreateOptions({
+          sessionId: childId,
+          seed,
+          runtimeSession: source,
+          inheritedCount: seed.length,
+          cwd: state.cwd,
+          parentSession: source.id,
+          agentPreset: composed.agentPreset,
+          agentOptions: { provider: state.provider, model: state.model },
+          setup: async (agentCtx, agent) => {
+            agent.inbox.clear()
+            return composed.setup?.(agentCtx, agent)
+          },
+        }))
+      candidate = await deps.binding.prepare(adoption, async () => {
+        const handle = await create()
+        if (cutHoldsNoConversation) replayPolicyFacts(handle.agent.session, policyFacts)
+        return createDshSession(ctx, handle)
+      })
     } catch {
       reservation.abandon()
       deps.notify(t('rewind-create-failed'), { color: 'error' })
       return null
     }
-    if (!deps.binding.isCurrent(adoption)) { await deps.binding.abandon(handle); reservation.abandon(); return null }
+    if (!deps.binding.isCurrent(adoption)) { await deps.binding.abandon(candidate); reservation.abandon(); return null }
     try {
       await attachSessionToWorkspace(ctx, state.cwd, childId)
     } catch (error) {
       deps.notify(t('rewind-attach-failed', { err: error instanceof Error ? error.message : String(error) }), { color: 'warning', timeoutMs: 8000 })
     }
-    if (!deps.owner.current()) { await deps.binding.abandon(handle); reservation.abandon(); return null }
+    if (!deps.owner.current()) { await deps.binding.abandon(candidate); reservation.abandon(); return null }
     // `adoptForkedAgent` is the commit: the child is the session this process
     // now drives, so the reservation hands over to the registry. It THROWS when
     // the adoption transaction revokes the candidate, so it is guarded.
     try {
-      const sourceSessionId = deps.adoptForkedAgent(handle, adoption, snapshotLiveSessionEvents(handle.agent.session), composed.agentPreset, childId)
+      const sourceSessionId = deps.adoptForkedAgent(candidate, adoption, snapshotLiveSessionEvents(dshHandleOf(candidate).agent.session), composed.agentPreset, childId)
       reservation.settle()
       try {
         void dispatchTuiDecision(ctx, 'tui/rewind-done', {

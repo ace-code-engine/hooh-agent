@@ -305,7 +305,10 @@ def make_handler(pool: Pool, model: str, api_key: str = "",
             allowed = {f"127.0.0.1:{port}", f"localhost:{port}", f"[::1]:{port}",
                        f"::1:{port}"}
             bind = str(self.server.server_address[0]).lower()
-            if bind not in ("", "0.0.0.0", "::"):
+            # nosec B104 —— 这不是绑定调用，是 **Host 允许清单**：把实际绑定地址
+            #（含用户显式选的 0.0.0.0 场景）加进"谁的 Host 头算合法"的集合，
+            # 是 DNS rebinding 防御本身的一部分。
+            if bind not in ("", "0.0.0.0", "::"):  # nosec B104
                 allowed.add(f"{bind}:{port}")
             return host in allowed
 
@@ -442,8 +445,12 @@ def main(argv: Optional[List[str]] = None) -> int:
 
     api_key = load_or_create_key(args.project_root, args.api_key)
     pool = Pool(args)
-    srv = ThreadingHTTPServer((args.host, args.port),
-                              make_handler(pool, args.model, api_key, args.max_body))
+    # nosec B104 —— 绑定面受三道闸保护（文件头注释 §闸门）：① 每请求 Bearer token
+    #（启动时生成、落盘 0600）；② Host 头只认环回名（DNS rebinding → 403）；
+    # ③ --allow（无人值守放行审批）与非环回 --host 的组合被显式拒绝（上方 438 行）。
+    # 默认 --host 是 127.0.0.1；绑 0.0.0.0 是用户显式选择（如容器内），闸门照常生效。
+    srv = ThreadingHTTPServer((args.host, args.port),  # nosec B104 —— 三道闸：Bearer token / Host 环回校验 / --allow×非环回组合显式拒绝（见下方说明与文件头）
+                              make_handler(pool, args.model, api_key, args.max_body))  # nosec B104
     sys.stderr.write("[ace-proxy] http://%s:%d/v1  model=%s  root=%s  permission=%s%s\n"
                      % (args.host, args.port, args.model, args.project_root,
                         args.permission, "  MOCK" if args.mock else ""))

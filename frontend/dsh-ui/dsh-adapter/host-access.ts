@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 import { Context, Fiber } from '@deepseek-ai/cordis'
+import { logForDebugging } from '../utils/debug.js'
 
 /**
  * Recover the concrete Cordis service for host-only adapters.
@@ -171,7 +172,53 @@ function trackCompositionRoot(root: Context): void {
     // Minimal embedders may expose Context without an event helper. The
     // shape/lifecycle checks below remain as a conservative fallback.
   }
-  guardRootCapabilities(root)
+  if (!deferredGuardRoots.has(root as object)) guardRootCapabilities(root)
+}
+
+/** Roots whose capability guard waits for their composition (below). */
+const deferredGuardRoots = new WeakSet<object>()
+
+/**
+ * Hold the root-capability guard back on `root` until the returned release
+ * runs. The entry mounts the TUI before composing the profile into the same
+ * root, and DSH's plugins use root capabilities while they activate, which
+ * the guard would refuse. Fiber tracking starts at once either way.
+ */
+export function deferRootCapabilityGuard(root: Context): () => void {
+  // Too late: a root seen undeferred already carries the guard for good.
+  if (trackedRoots.has(root as object)) logForDebugging('dsh-tui: the root-capability guard was deferred after the composition root was resolved; it is already installed')
+  deferredGuardRoots.add(root as object)
+  return () => releaseDeferredGuard(root)
+}
+
+function releaseDeferredGuard(root: Context): void {
+  armedGuardRoots.delete(root as object)
+  if (!deferredGuardRoots.delete(root as object)) return
+  if (trackedRoots.has(root as object)) guardRootCapabilities(root)
+}
+
+/** Deferred roots whose guard the first TUI row activation installs (below). */
+const armedGuardRoots = new WeakSet<object>()
+
+/**
+ * The composition of a deferred root starts: the guard now arrives with the
+ * first TUI row's activation, as on the `dsh --profile` path, so every row
+ * after it (third-party ones included) is guarded. The release still installs
+ * it once the composition settles if no TUI row activated.
+ */
+export function armRootCapabilityGuard(root: Context): void {
+  if (deferredGuardRoots.has(root as object)) armedGuardRoots.add(root as object)
+}
+
+/** A plugin activation of `root` (not the root's own, not host code) is
+ * resolving its composition through the TUI's host code: a TUI row. */
+function noteTuiRowActivation(root: Context): void {
+  if (!armedGuardRoots.has(root as object)) return
+  if (hostCapabilityStorage.getStore() === true) return
+  const token = activationStorage.getStore()
+  const rootFiber = rootFibers.get(root as object)
+  if (token === undefined || token.root !== root || rootFiber === token.fiber) return
+  releaseDeferredGuard(root)
 }
 
 function invalidateActivation(fiber: object): void {
@@ -298,6 +345,13 @@ export function withHostRootCapability<T>(callback: () => T): T {
   return hostCapabilityStorage.run(true, callback)
 }
 
+/** Run host code outside the plugin activation that triggered it: an action
+ * the entry owns, which a row only sets off (the screen reopening its session
+ * when the dsh-tui row applies again), acts as the entry, not as that row. */
+export function outsideActivation<T>(callback: () => T): T {
+  return activationStorage.exit(callback)
+}
+
 function rejectRootCapability(root: Context, capability: string): void {
   if (currentActivationIsPlugin(root)) {
     throw new Error(`dsh-tui: ${capability} is unavailable from a plugin activation`)
@@ -359,6 +413,96 @@ function guardRootCapabilities(root: Context): void {
   } catch {
     // Fall through when a minimal embedder omits reflection internals.
   }
+
+  admitRootProjectionRegistrations(root)
+}
+
+const projectionRegistryRoots = new WeakSet<object>()
+const guardedProjectionRegistries = new WeakSet<object>()
+
+/**
+ * `sessionProjections.register` hangs its disposer on the receiver's context
+ * (the registry's documented ownership: the calling fiber). DSH's agent-team
+ * service reaches it through `ctx.root`, which lands that effect on the root
+ * fiber and the guard above refuses it. Admit that one call with host
+ * capability, so the registration sits where it would without the guard and
+ * the caller's disposer releases it in the caller's own order; the plugin's
+ * unload releases one it leaves behind ({@link releaseAfterUnload}). The
+ * root stays closed to everything else.
+ */
+function admitRootProjectionRegistrations(root: Context): void {
+  if (projectionRegistryRoots.has(root as object)) return
+  projectionRegistryRoots.add(root as object)
+  const wrap = (): void => withHostRootCapability(() => {
+    let registry: object
+    try {
+      const service = (root as unknown as { sessionProjections?: unknown }).sessionProjections
+      if (typeof service !== 'object' || service === null) return
+      registry = concreteService(service)
+    } catch {
+      return
+    }
+    if (guardedProjectionRegistries.has(registry)) return
+    const original = Reflect.get(registry, 'register')
+    if (typeof original !== 'function') return
+    guardedProjectionRegistries.add(registry)
+    // Configurable: Cordis's traceable proxy rebinds methods, which a frozen
+    // property would forbid. Replacing it only restores the refused path.
+    Object.defineProperty(registry, 'register', {
+      configurable: true,
+      writable: false,
+      value: function (this: unknown, ...args: unknown[]) {
+        // Through `ctx.root` the receiver is a root-derived context on the
+        // root fiber: that is the effect the guard would refuse.
+        if (callContextOf(this)?.fiber !== rootFibers.get(root as object) || !currentActivationIsPlugin(root)) {
+          return Reflect.apply(original, this, args)
+        }
+        const token = activationStorage.getStore() as ActivationToken
+        assertLiveContext(token.context, 'sessionProjections.register')
+        // On the root fiber, as without the guard: the caller orders the
+        // disposer itself (DSH's TeamService unregisters after its async
+        // runtime teardown, which still reads the key). On the caller's fiber
+        // it would be a sibling effect, and Cordis unloads siblings at once.
+        const dispose = withHostRootCapability(() => Reflect.apply(original, this, args)) as () => void
+        return releaseAfterUnload(root, token.fiber, dispose)
+      },
+    })
+  })
+  wrap()
+  try {
+    // The registry may mount after the guard (the profile composes later).
+    withHostRootCapability(() => root.on('internal/service' as never, ((name: unknown) => {
+      if (name === 'sessionProjections') wrap()
+    }) as never, { global: true }))
+  } catch {
+    // A minimal embedder without the event helper keeps the plain guard.
+  }
+}
+
+/**
+ * A root registration a plugin made through {@link admitRootProjectionRegistrations}
+ * still dies with that plugin: if the plugin never disposes it, it goes once
+ * the plugin's fiber has finished unloading (every effect settled, async
+ * teardown included), whether the fiber reloads or not.
+ * @returns the disposer handed to the plugin; calling it also drops the watch.
+ */
+function releaseAfterUnload(root: Context, fiber: object, dispose: () => void): () => void {
+  let unwatch: (() => void) | undefined
+  const release = (): void => {
+    unwatch?.()
+    unwatch = undefined
+    dispose()
+  }
+  try {
+    unwatch = withHostRootCapability(() => root.on('internal/status', (changed, oldState) => {
+      // Cordis uses 5 for UNLOADING (see rememberFiber). The event carries
+      // either the activation's fiber or the wrapper normalized to it.
+      if (oldState === 5 && (changed === fiber || rememberFiber(changed, root) === fiber)) release()
+    }, { global: true }))
+  } catch {
+    // Without the event helper only the plugin's own disposer releases it.
+  }
+  return release
 }
 
 function guardFiberMethod(target: object, method: string, root: Context, capability: string): void {
@@ -461,8 +605,15 @@ export function activationContext(ctx: Context): Context | undefined {
 
 /** Resolve a service's composition root once.  Service methods are invoked
  * through caller-bound Cordis proxies; keeping this root in host state avoids
- * resolving sibling services through an attacker-provided caller shadow. */
+ * resolving sibling services through an attacker-provided caller shadow.
+ * Also the first TUI row's activation signal for an armed deferred guard. */
 export function compositionRoot(ctx: Context): Context {
+  const root = resolveCompositionRoot(ctx)
+  noteTuiRowActivation(root)
+  return root
+}
+
+function resolveCompositionRoot(ctx: Context): Context {
   try {
     const knownFiber = contextFibers.get(ctx as object)
     const trustedRoot = knownFiber === undefined ? undefined : fiberRoots.get(knownFiber)

@@ -2,19 +2,23 @@ import type { AgentHandle, CreateAgentOptions } from '@deepseek-ai/dsh-agent'
 import type { Context } from '@deepseek-ai/cordis'
 import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { randomUUID } from 'node:crypto'
+import type { AgentSession } from '../../agent/session.js'
 import { t } from '../../i18n.js'
+import { createDshSession, dshHandleOf } from '../backend/session.js'
 import { appendInterruptedTurnEnd, liveSessionCreateOptions, liveSessionOffset, snapshotLiveSessionEvents } from '../compat/index.js'
 import { readPersistedSession, type SessionReader } from '../compat/persistence.js'
 import { closeLiveForkTurn } from '../compat/liveSession.js'
+import { createFreshAgent, isUnstoredFreshSession } from '../fresh-agent.js'
 import { composePreset, resolvePersistedPreset, runningPresetOf } from '../presets.js'
+import { holdsNoConversation, latestPolicyFacts, replayPolicyFacts } from '../session-seed.js'
 import { attachSessionToWorkspace } from '../workspace.js'
 import { reserveNewSession } from '../../sessionMounts.js'
 import { forkTarget, rewindTarget, turnUserText } from '../sessionTree.js'
-import type { createChannelBinding } from './binding.js'
+import type { DshChannelBinding } from './binding.js'
 import type { ChannelOwner } from './owner.js'
 import type { ChannelState } from './types.js'
 
-type Binding = ReturnType<typeof createChannelBinding>
+type Binding = DshChannelBinding
 type TreeRewindState = Pick<ChannelState, 'working' | 'cwd' | 'provider' | 'model'>
 
 async function waitForTurnEnd(session: unknown, fromSeq: number, timeoutMs: number): Promise<boolean> {
@@ -33,10 +37,10 @@ export function createTreeRewindAction(
   state: TreeRewindState,
   deps: {
     owner: Pick<ChannelOwner, 'current'>
-    binding: Pick<Binding, 'agent' | 'capture' | 'isCurrent' | 'prepare' | 'abandon'>
+    binding: Pick<Binding, 'agent' | 'session' | 'capture' | 'isCurrent' | 'prepare' | 'abandon'>
     settleCompaction(): Promise<void>
     notify: ChannelState['notify']
-    adoptForkedAgent(handle: AgentHandle, capture: ReturnType<Binding['capture']>, seed: readonly SessionEvent[], agentPreset: string | undefined, childId: SessionId): string
+    adoptForkedAgent(candidate: AgentSession, capture: ReturnType<Binding['capture']>, seed: readonly SessionEvent[], agentPreset: string | undefined, childId: SessionId): string
     notifySessionSwitched(kind: 'rewind' | 'fork', sessionId: string, previousSessionId: string): void
   },
 ) {
@@ -94,12 +98,19 @@ export function createTreeRewindAction(
     }
     const wasWorking = state.working
     const cancelSeq = liveSessionOffset(deps.binding.agent.session)
-    if (wasWorking) deps.binding.agent.cancel({ kind: 'user' })
+    // Through the session: the queue it drops is this client's own discard,
+    // not inputs the backend lost (those the channel would keep for the user).
+    if (wasWorking) void deps.binding.session.cancel('switch')
     if (wasWorking && !await waitForTurnEnd(deps.binding.agent.session, cancelSeq, 30000)) {
       deps.notify(t('rewind-settling'), { color: 'error' })
       return null
     }
-    const seed = sourceEvents.filter(event => event.seq <= target.boundary)
+    const cut = sourceEvents.filter(event => event.seq <= target.boundary)
+    const neverUsed = forkFromLive && isUnstoredFreshSession(entrySession)
+    const seed = neverUsed || holdsNoConversation(cut) ? [] : cut
+    // A policy-only cut starts fresh; seeded creation would publish it immediately.
+    const cutHoldsNoConversation = seed.length === 0
+    const policyFacts = cutHoldsNoConversation ? latestPolicyFacts(cut) : []
     const inheritedCount = seed.length
     const closeAfterCreate = target.closeTurn !== undefined && entrySession.header?.version >= 3
     if (target.closeTurn !== undefined && !closeAfterCreate) {
@@ -108,51 +119,57 @@ export function createTreeRewindAction(
     // Announce the id before the factory: the child's log is created here, and
     // the publisher only learns the id from the registry on its next beat.
     const { reservation } = await reserveNewSession(String(childId))
-    let handle: AgentHandle
+    let candidate: AgentSession
     try {
-      handle = await deps.binding.prepare(adoption, () => agents.create(liveSessionCreateOptions({
-        sessionId: childId,
-        seed,
-        runtimeSession: entrySession,
-        inheritedCount,
-        cwd: sourceCwd,
-        parentSession: SessionId(sessionId),
-        agentPreset: composed.agentPreset,
-        agentOptions: { provider: state.provider, model: state.model },
-        setup: closeAfterCreate || mode === 'rewind' ? async (agentCtx, agent) => {
-          // V3 requires seed.length === inheritedEventCount. The constructor
-          // inserts the inherited marker, then these closers belong to the
-          // child and persist before publication, without falsifying the cut.
-          if (closeAfterCreate) closeLiveForkTurn(agent.session, target.closeTurn!)
-          // Re-editing starts with no historical pending work. Cancel through
-          // the child's Inbox so a later resume cannot resurrect the queue.
-          // A plain fork deliberately keeps its separate semantics.
-          if (mode === 'rewind') agent.inbox.clear()
-          return composed.setup?.(agentCtx, agent)
-        } : composed.setup,
-      })))
+      const create = (): Promise<AgentHandle> => cutHoldsNoConversation
+        ? createFreshAgent(ctx, agents, {
+          sessionId: childId,
+          meta: { cwd: sourceCwd, ...(composed.agentPreset === undefined ? {} : { agentPreset: composed.agentPreset }) },
+          agentOptions: { provider: state.provider, model: state.model },
+          setup: composed.setup,
+        })
+        : agents.create(liveSessionCreateOptions({
+          sessionId: childId,
+          seed,
+          runtimeSession: entrySession,
+          inheritedCount,
+          cwd: sourceCwd,
+          parentSession: SessionId(sessionId),
+          agentPreset: composed.agentPreset,
+          agentOptions: { provider: state.provider, model: state.model },
+          setup: closeAfterCreate || mode === 'rewind' ? async (agentCtx, agent) => {
+            if (closeAfterCreate) closeLiveForkTurn(agent.session, target.closeTurn!)
+            if (mode === 'rewind') agent.inbox.clear()
+            return composed.setup?.(agentCtx, agent)
+          } : composed.setup,
+        }))
+      candidate = await deps.binding.prepare(adoption, async () => {
+        const handle = await create()
+        if (cutHoldsNoConversation) replayPolicyFacts(handle.agent.session, policyFacts)
+        return createDshSession(ctx, handle)
+      })
     } catch {
       reservation.abandon()
       deps.notify(t('rewind-create-failed'), { color: 'error' })
       return null
     }
-    if (!deps.binding.isCurrent(adoption)) { await deps.binding.abandon(handle); reservation.abandon(); return null }
+    if (!deps.binding.isCurrent(adoption)) { await deps.binding.abandon(candidate); reservation.abandon(); return null }
     try {
       await attachSessionToWorkspace(ctx, sourceCwd, childId)
     } catch (error) {
       deps.notify(t('rewind-attach-failed', { err: error instanceof Error ? error.message : String(error) }), { color: 'warning', timeoutMs: 8000 })
     }
     if (!deps.owner.current() || deps.binding.agent.session !== entrySession) {
-      await deps.binding.abandon(handle)
+      await deps.binding.abandon(candidate)
       reservation.abandon()
       deps.notify(t('rewind-session-changed'), { color: 'error' })
       return null
     }
-    const replay = closeAfterCreate || mode === 'rewind' ? snapshotLiveSessionEvents(handle.agent.session) : seed
+    const replay = closeAfterCreate || mode === 'rewind' ? snapshotLiveSessionEvents(dshHandleOf(candidate).agent.session) : seed
     // `adoptForkedAgent` is the commit, and it THROWS when the adoption
     // transaction revokes the candidate.
     try {
-      const sourceSessionId = deps.adoptForkedAgent(handle, adoption, replay, composed.agentPreset, childId)
+      const sourceSessionId = deps.adoptForkedAgent(candidate, adoption, replay, composed.agentPreset, childId)
       reservation.settle()
       deps.notifySessionSwitched(mode === 'fork' ? 'fork' : 'rewind', String(childId), sourceSessionId)
       return restoredText

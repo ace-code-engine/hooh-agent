@@ -28,7 +28,8 @@
  *      picker can paint the previous list while the fresh one loads,
  *      exactly as before.
  */
-import type { ChatRow, PermissionPresetSnapshot } from '../dsh-adapter/channel.js'
+import type { BackendModeOption, ChatRow, PermissionPresetSnapshot } from '../dsh-adapter/channel.js'
+import type { KernelBackendId } from '../kernelPrefs.js'
 import type { TranscriptImage } from '../dsh-adapter/transcript-images.js'
 import type { TuiRewindMode } from '../dsh-adapter/extension-events.js'
 import type { TuiWorkspaceCommandResult } from '../workspaces.js'
@@ -56,7 +57,7 @@ export type ChatOverlay =
       busy: boolean
       input: WorkspaceFlowInput | null
     }
-  | { kind: 'model'; index: number }
+  | { kind: 'model' }
   | { kind: 'skills'; index: number }
   | { kind: 'migrate'; index: number }
   | { kind: 'migrate-confirm' }
@@ -65,11 +66,45 @@ export type ChatOverlay =
   | { kind: 'effort'; index: number }
   | { kind: 'preset'; index: number }
   | { kind: 'theme'; index: number }
-  | { kind: 'permission'; index: number; snapshot: PermissionPresetSnapshot }
+  /** `confirm`: the `auto` risk confirmation replaces the list. */
+  | { kind: 'permission'; index: number; snapshot: PermissionPresetSnapshot; confirm?: boolean }
+  /** /permission over a backend's native permission modes (the typed
+   * modes capability; a DSH session answers none and keeps the preset
+   * variant above). The frozen mode list and the live current id ride the
+   * open because the capability read is synchronous. */
+  | { kind: 'mode'; index: number; modes: readonly BackendModeOption[]; currentId: string | undefined }
+  /** 内核选择器（/kernel 与启动页「内核」入口）。只带焦点下标——目录是
+   *  Chat 的派生值（buildKernelCatalog 的输出，含异步探测结果），每次渲染
+   *  现算，所以探测落地后选择器自己就刷新了，不需要把名册冻进 overlay。 */
+  | { kind: 'kernel'; index: number }
+  /** SDK 安装向导（内核选择器的「未安装」行 Enter 进入）。与 kernel 同为
+   *  「盖在落地页之上」的姿态；向导的步骤态（确认/安装中/结果）是异步进程
+   *  状态，按本文件头注释第 3 条的分工留在 Chat.tsx，不冻进 overlay。
+   *
+   *  只带**后端 id**：装的是哪一行、就查哪一行的安装面——安装面在打开时按 id
+   *  从宿主现查（Stage B / §6 第 12 条），与 kernel 一样不冻名册。
+   *
+   *  `foundCli` 携带检测的 hint 原文；确认面板只展示首行之后的注记。 */
+  | { kind: 'sdk-install'; backendId: KernelBackendId; foundCli?: string }
+  /** `/plugin install <spec>` 的装前决策（C-4）：装前提醒、信任确认、以及
+   *  两个「再决定」步骤（构建脚本批准 / 版本豁免）。
+   *
+   *  不冻任何东西：要装什么、服务怎么答、pnpm 进度到哪，全在流程自己的步骤态
+   *  与转录里（同样按头注释第 3 条留在 Chat.tsx）。本 variant 只表示「有一个
+   *  安装浮层开着」，因此键分派与渲染都不需要额外字段。 */
+  | { kind: 'plugin-install' }
+  /** `/plugin remove | enable | disable` 的生命周期确认（C-5）：与装链路同一个
+   *  写入骨架（`usePluginWriteFlow`），同样不冻任何东西——目标是什么、要问什么、
+   *  服务怎么答，全在流程的步骤态与转录里。 */
+  | { kind: 'plugin-manage' }
   | { kind: 'plan'; index: number }
   | { kind: 'lang'; index: number }
   /** `/panel` 无参的选择器：列出「已启用 ∩ 已注册」的面板（含插件）。 */
   | { kind: 'panel'; index: number }
+  /** `/channel` 渠道档案选择器（仅 channels 能力的后端，即 Claude）：只带
+   *  焦点下标——名册由后端渠道宿主派生，
+   *  切换/导入后选择器自己就刷新成新状态，不需要把名册冻进 overlay。 */
+  | { kind: 'channel'; index: number }
   | { kind: 'history'; query: string; cursor: number; focus: number }
   | {
       kind: 'rewind'
@@ -140,10 +175,10 @@ export type ChatOverlayAction =
    */
   | { type: 'move'; delta: 1 | -1; count: number }
   /** Set the focused row to an absolute index — an async loader landing
-   *  with the authoritative focus (model list / preset roster), or a mouse
+   *  with the authoritative focus (preset roster), or a mouse
    *  click on a row of a panel that stays open (effort slider, workspace
    *  flow). Ignored unless that panel is still up. */
-  | { type: 'set-index'; kind: 'model' | 'preset' | 'effort' | 'permission' | 'workspace-flow' | 'rewind' | 'file-actions' | 'panel'; index: number }
+  | { type: 'set-index'; kind: 'preset' | 'effort' | 'permission' | 'mode' | 'kernel' | 'workspace-flow' | 'rewind' | 'file-actions' | 'panel' | 'channel'; index: number }
   /** Edit the history-search draft (query text, caret, focused match). */
   | { type: 'history-edit'; query?: string; cursor?: number; focus?: number }
   /** Workspace flow: an action is running (keys except Esc are swallowed). */
@@ -209,7 +244,6 @@ export function chatOverlayReducer(state: ChatOverlay, action: ChatOverlayAction
         state.kind === 'workspace-picker'
         || state.kind === 'workspace-menu'
         || state.kind === 'workspace-flow'
-        || state.kind === 'model'
         || state.kind === 'skills'
         || state.kind === 'migrate'
         || state.kind === 'activity'
@@ -218,9 +252,12 @@ export function chatOverlayReducer(state: ChatOverlay, action: ChatOverlayAction
         || state.kind === 'preset'
         || state.kind === 'theme'
         || state.kind === 'permission'
+        || state.kind === 'mode'
         || state.kind === 'plan'
         || state.kind === 'lang'
         || state.kind === 'panel'
+        || state.kind === 'kernel'
+        || state.kind === 'channel'
         || state.kind === 'file-actions'
       ) {
         return { ...state, index: wrapIndex(state.index, action.delta, action.count) }
@@ -300,6 +337,12 @@ export function dialogOverlayVisible(
       return (gates.panelCount ?? 1) > 0
     case 'permission':
       return overlay.snapshot.options.length > 0
+    case 'mode':
+      return overlay.modes.length > 0
+    // The kernel roster always has at least the DSH row (the Claude row is
+    // dim while its probe is in flight), so the wrapper always mounts.
+    case 'kernel':
+      return true
     default:
       return true
   }

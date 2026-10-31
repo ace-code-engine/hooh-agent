@@ -2,8 +2,8 @@
  * Upstream compatibility contract.
  *
  * The TUI is validated against a set of upstream prerelease lines — the
- * current primary (0.2.0-rc.2) plus older lines kept in backward
- * compatibility across the 0.1.7, 0.1.5, 0.1.3, 0.1.2, 0.1.1 and 0.1.0
+ * current primary (0.2.1-rc.5) plus older lines kept in backward
+ * compatibility across the 0.2.0, 0.1.7, 0.1.5, 0.1.3, 0.1.2, 0.1.1 and 0.1.0
  * release families.
  * Every official package this adapter touches is blessed here; anything
  * else must go through upstream channels or the adapter, never the UI.
@@ -15,16 +15,19 @@
  */
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
+import { ADAPTER_TYPE_PACKAGES, HOST_TYPE_PACKAGES } from './host-contract.js'
 
 /** Primary validated upstream line (newest). */
-export const UPSTREAM_VALIDATED_VERSION = '0.2.0-rc.2'
+export const UPSTREAM_VALIDATED_VERSION = '0.2.1-rc.5'
 
 /**
  * Explicitly supported upstream prerelease lines, oldest first.
  *
- * 0.2.0-rc.2 = primary continuous-CI line; 0.2.0-rc.1 and
- * 0.1.7-rc.2/rc.1 = previous
- * family (mapped compatibility); 0.1.5-rc.1/alpha.2/alpha.1 = mapped
+ * 0.2.1-rc.5 = primary continuous-CI line; 0.2.1-rc.4/rc.3/rc.2 = earlier
+ * prereleases of the same family (published code compared with the primary);
+ * 0.2.0-rc.2/rc.1 = previous family (mapped compatibility);
+ * 0.1.7-rc.2/rc.1 = previous family (mapped compatibility);
+ * 0.1.5-rc.1/alpha.2/alpha.1 = mapped
  * compatibility lines (source-checked when the primary line moves);
  * 0.1.3-alpha.2 = compatibility line (the only 0.1.3 build on npm);
  * 0.1.2-rc.1 = previous family (full CI coverage); 0.1.2-alpha.3–alpha.5 =
@@ -54,6 +57,10 @@ export const UPSTREAM_VALIDATED_VERSIONS = [
   '0.1.7-rc.2',
   '0.2.0-rc.1',
   '0.2.0-rc.2',
+  '0.2.1-rc.2',
+  '0.2.1-rc.3',
+  '0.2.1-rc.4',
+  '0.2.1-rc.5',
 ] as const
 
 /**
@@ -69,7 +76,6 @@ export const UPSTREAM_FRAMEWORK_MAJORS: Record<string, number> = {
 export const UPSTREAM_BLESSED_PACKAGES = [
   '@deepseek-ai/cordis',
   '@deepseek-ai/schemastery',
-  '@deepseek-ai/dsh-invariants',
   '@deepseek-ai/dsh-agent',
   '@deepseek-ai/dsh-agent-instructions',
   '@deepseek-ai/dsh-agent-preset-registry',
@@ -100,6 +106,12 @@ export const UPSTREAM_BLESSED_PACKAGES = [
   '@deepseek-ai/dsh-tool-subagent',
   '@deepseek-ai/dsh-user-approval',
   '@deepseek-ai/dsh-user-questions',
+  // The packages the standalone entry's host boot takes types from
+  // (./host-contract.ts; loaded from the host by realpath).
+  ...HOST_TYPE_PACKAGES,
+  // The packages the adapter takes types from for host services it reaches
+  // through `ctx` (./host-contract.ts; the host CLI supplies them).
+  ...ADAPTER_TYPE_PACKAGES,
 ] as const
 
 export interface UpstreamDriftEntry {
@@ -116,6 +128,14 @@ const OPTIONAL_RUNTIME_PACKAGES = new Set<string>([
   '@deepseek-ai/dsh-deepseek-account',
   '@deepseek-ai/dsh-host-webserver',
   '@deepseek-ai/dsh-web-app',
+  // Never resolved from this package at run time: the standalone entry loads
+  // them from the installed dsh by realpath (./host-dsh.ts), and a profile
+  // has no copy of them (peers are not auto-installed there).
+  ...HOST_TYPE_PACKAGES,
+  // Same reason, a different route: these are reached through `ctx` inside a
+  // booted profile, where the package the dsh CLI ships resolves through the
+  // loader. The consumer answers with a degradation notice when it is absent.
+  ...ADAPTER_TYPE_PACKAGES,
 ])
 
 /** Supported upstream prerelease channels in ascending precedence order. */

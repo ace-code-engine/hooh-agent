@@ -27,12 +27,11 @@
       "@deepseek-ai/*": ["./_vendor/platform/@deepseek-ai/*"],
       "@dsh-std/*": ["./_vendor/dsh-std/*"],
       "@dsh-tui-vendor/mathjax-tex-svg": ["./_vendor/mathjax-tex-svg"],
-      // 这 4 个是上游的真 npm 依赖（本机 profile 装着）。我们只借它们的**类型**：
-      // 映射到**目录**，让各自的 package.json `types` 生效（sharp 的入口是 .d.mts）。
-      "dsh-working-activity": ["./_vendor/platform/dsh-working-activity"],
-      "dsh-working-activity/config": ["./_vendor/platform/dsh-working-activity/lib/types/config.d.ts"],
-      "dsh-working-activity/frames": ["./_vendor/platform/dsh-working-activity/lib/types/frames.d.ts"],
-      "dsh-working-activity/*": ["./_vendor/platform/dsh-working-activity/*"],
+      // 0.17.0 re-vendor：`dsh-working-activity` 改走真包（node_modules junction
+      // 到本机 profile 的 0.5.1，types/lib 都全）。不能再映射到 _vendor 的纯类型——
+      // tsx 运行时也吃 tsconfig paths，会把运行时导入解析到没有 JS 的 .d.ts 上
+      // （实测：`FEATURE_FLAGS is not provided`）。sharp/sixel/lovely-mermaid 仍
+      // 走类型垫片：运行时只在图片 Worker 里懒加载，不进启动路径。
       "sharp": ["./_vendor/platform/sharp"],
       "sixel": ["./_vendor/platform/sixel"],
       "lovely-mermaid": ["./_vendor/platform/lovely-mermaid/dist/index.d.ts"]

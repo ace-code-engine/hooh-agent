@@ -11,17 +11,55 @@
  */
 import type { TuiSettingsField } from '../adapter/ports/channel-settings.js'
 import { SPLASH_FONT_OPTIONS } from '../components/splashFonts.js'
+import { BRAND_SETTING_OPTIONS } from '../branding.js'
 import type { ShortcutActionId } from '../utils/keymap.js'
 
 export type SettingDefinition = Pick<TuiSettingsField, 'label' | 'descriptions' | 'hint' | 'hintDescriptions' | 'kind' | 'group' | 'options'>
 
 export const SETTING_DEFINITIONS = {
+  'brand': {
+    label: 'Brand look',
+    descriptions: { zh: '品牌外观' },
+    group: 'splash',
+    hint: 'Brand look of the splash and theme. Follow backend (default) switches with the active kernel — Claude boots orange (CLAUDE CODE title, Claude girl), Codex boots lavender (CODEX title, "Build anything with Codex"); the other values pin one look. Applies immediately.',
+    hintDescriptions: { zh: '开屏与主题的品牌外观。跟随后端（默认）随当前内核自动切——Claude 后端整套换橙（CLAUDE CODE 大标题、Claude 娘立绘），Codex 后端整套换薰衣草紫（CODEX 大标题、"Build anything with Codex" 标语）；选固定档则锁定一种外观。立即生效。' },
+    kind: 'select',
+    options: BRAND_SETTING_OPTIONS,
+  },
+  'btw.contextBudget': {
+    label: 'btw context budget',
+    descriptions: { zh: 'btw 上下文预算' },
+    group: 'side-panel',
+    hint: 'Total characters of recent Q/A pairs a /btw follow-up carries, 1000-200000 (default 24000). Whole older pairs drop first; the per-answer cap derives as min(8k, budget/2). The btw panel is enabled by default and can be changed in sidePanel.panels. Applies immediately.',
+    hintDescriptions: { zh: '追问携带的最近问答总字符预算，1000-200000（默认 24000）。超出时从最旧的整组开始裁剪；单条答案上限内部派生为 min(8k, 预算/2)。btw 面板默认启用，可在 sidePanel.panels 中调整。立即生效。' },
+    kind: 'number',
+  },
+  'btw.contextTurns': {
+    label: 'btw context turns',
+    descriptions: { zh: 'btw 上下文轮数' },
+    group: 'side-panel',
+    hint: 'Completed Q/A pairs a /btw follow-up explicitly carries, 1-8 (default 4). Pairs beyond the window are omitted from the ask (the thread and the panel still keep them). The btw panel is enabled by default and can be changed in sidePanel.panels. Applies immediately.',
+    hintDescriptions: { zh: '追问显式携带的最近完成问答组数，1-8（默认 4）。窗口外的旧组不进请求（线程与面板仍保留全文）。btw 面板默认启用，可在 sidePanel.panels 中调整。立即生效。' },
+    kind: 'number',
+  },
+  'codeFrameStyle': {
+    label: 'Code frame',
+    descriptions: { zh: '代码框样式' },
+    group: 'rendering',
+    hint: 'How fenced code blocks in replies frame themselves. Light (default): an open rail — corner + language label on top, a left rail with one padding column per row, no right wall or bottom edge (costs no extra height). Full: closes the box with a right wall that stays continuous across wrapped rows and a bottom edge under the block. Very narrow terminals always keep the plain fence, whatever this says. Applies immediately.',
+    hintDescriptions: { zh: '回复里代码块的边框形式。轻框（默认）：开放式栏杆——顶部角标加语言标签，每行左侧竖杆加一格内边距，无右墙无底边（不多占高度）。全框：封闭盒子——右墙在折行处保持连续，底部封边。终端太窄时恒为纯 fence（不受此设置影响）。立即生效。' },
+    kind: 'select',
+    options: [
+      { value: 'light', label: 'Light rail', descriptions: { zh: '轻框（栏杆）' } },
+      { value: 'full', label: 'Full box', descriptions: { zh: '全框（封闭）' } },
+    ],
+  },
   'companion.skin': {
     label: 'Companion skin',
     descriptions: { zh: '宠物皮肤' },
     group: 'splash',
-    hint: 'Look of the companion panel pet (enable the panel by adding \'companion\' to sidePanel.panels): deepy (default, the deepy whale kit), whale (the same layered pixel whale as the splash) or whaleGirl (the user-provided whale-girl sticker pack, 22 animations). Applies immediately.',
-    hintDescriptions: { zh: '伙伴面板里宠物的外形（面板需在 sidePanel.panels 里加入 companion 启用）：deepy（默认，deepy 小鲸鱼素材包）、whale（与开屏同款的分层像素鲸鱼）或 whaleGirl（用户提供的鲸娘表情包，22 个动画）。立即生效。' },
+    hint: 'DeepSeek brand: whale allows the maid portrait; deepy/whaleGirl replace it. Claude uses its own art; Codex uses its own raster portrait or maid character-art fallback. Look of the companion panel pet (the panel is enabled by default and can be changed in sidePanel.panels): deepy (default, the deepy whale kit), whale (the same layered pixel whale as the splash) or whaleGirl (the user-provided whale-girl sticker pack, 22 animations). Applies immediately.',
+    hintDescriptions: { zh: 'DeepSeek 品牌：whale 才能用女仆娘立绘；deepy/whaleGirl 会替换它。Claude 使用自己的图案；Codex 优先显示自己的真图，不可用时回落女仆娘字符画。伙伴面板里宠物的外形（面板默认启用，可在 sidePanel.panels 中调整）：deepy（默认，deepy 小鲸鱼素材包）、whale（与开屏同款的分层像素鲸鱼）或 whaleGirl（用户提供的鲸娘表情包，22 个动画）。立即生效。' },
     kind: 'select',
     options: [
       { value: 'deepy', label: 'Deepy', descriptions: { zh: 'Deepy 小鲸鱼' } },
@@ -46,15 +84,11 @@ export const SETTING_DEFINITIONS = {
     label: 'Default reasoning effort',
     descriptions: { zh: '默认推理强度' },
     group: 'conversation',
-    hint: 'Reasoning-effort level new sessions start on; the current session applies it to its next request too, when the model offers the tier (an unlisted level falls back to the model default). Auto = follow the cordis.yml `effort` pin, then the persisted /effort choice, then the model default.',
-    hintDescriptions: { zh: '新会话起始的推理强度档位；模型提供该档位时，当前会话的下一请求也会应用（模型不提供的档位会静默回落到模型默认）。自动 = 依次跟随 cordis.yml 的 effort 配置、持久化的 /effort 选择、模型默认档。' },
+    hint: 'Choices come from the current backend and model. A saved value absent from that catalog remains visible and stored until you change it. On DSH, Auto follows the persisted /effort choice, then cordis.yml effort, then the model default. On Claude/Codex, Auto at startup and resumed sessions preserve backend preferences; explicitly choosing Auto resets the model default. Explicit changes apply to the next request; unsupported preferences fall back only to a lower offered tier, or the model default, with a notice. While the catalog is loading or unavailable, only Auto is selectable.',
+    hintDescriptions: { zh: '选项来自当前后端和模型目录。目录没有的已存值仍显示并保留，直到你主动修改。DSH 自动依次采用持久化的 /effort 选择、cordis.yml effort 配置、模型默认。Claude/Codex 启动采用自动模式或恢复会话时保留后端偏好；在设置中主动选择自动会重置为模型默认。明确修改会作用于下一请求；不支持的偏好仅向下回落到可用档位，否则回到模型默认，并给出提示。目录加载中或不可用时仅可选自动。' },
     kind: 'select',
     options: [
-      { value: 'auto', label: 'Auto (model default)', descriptions: { zh: '自动（模型默认）' } },
-      { value: 'off', label: 'Off', descriptions: { zh: '关闭' } },
-      { value: 'low', label: 'Low', descriptions: { zh: '低' } },
-      { value: 'high', label: 'High', descriptions: { zh: '高' } },
-      { value: 'max', label: 'Max', descriptions: { zh: '最高' } },
+      { value: 'auto', label: 'Auto', descriptions: { zh: '自动' } },
     ],
   },
   'expandEditor': {
@@ -118,6 +152,14 @@ export const SETTING_DEFINITIONS = {
       { value: 'en', label: 'English', descriptions: { zh: '英文' } },
     ],
   },
+  'launchpad': {
+    label: 'Launchpad on boot',
+    descriptions: { zh: '启动页（落地页）' },
+    group: 'splash',
+    hint: 'On: an ordinary launch (no --resume, no first prompt) starts on the launchpad — the landing page where the first sentence gets typed, with the Continue / Sessions / Settings / Kernel row. Off: boots straight into the chat page. A resume target always skips the launchpad either way. On by default. Restart to apply.',
+    hintDescriptions: { zh: '开启：普通启动（不带 --resume、不带首句）先落启动页——输入第一句话的落地页，带「继续上次 / 会话与工作区 / 设置 / 内核」一行；关闭：直接进入聊天页。无论开关，指定恢复的会话总是直接打开。默认开启。重启生效。' },
+    kind: 'boolean',
+  },
   'mathImageBacking': {
     label: 'Formula image background',
     descriptions: { zh: '公式图片底色' },
@@ -172,6 +214,20 @@ export const SETTING_DEFINITIONS = {
     hint: 'Interface only: hide the header splash, emoji glyphs and decorative colors, and trim the status bar to model + cwd; code highlight and tool colors stay. NOT the agent preset — the kernel\'s own `minimal` preset is a separate, model-facing choice that decides which tools the model can use (see /preset).',
     hintDescriptions: { zh: '只精简界面：隐藏开屏头部、emoji 状态符与装饰性配色，底栏只留模型与目录；代码高亮与工具配色保留。这是界面开关，不是 Agent 预设——模型能用哪些工具由内核预设决定（见 /preset）。' },
     kind: 'boolean',
+  },
+  'notificationMethod': {
+    label: 'Notification method',
+    descriptions: { zh: '通知方式' },
+    group: 'conversation',
+    hint: 'Auto uses a native toast in local Windows sessions and the client terminal protocol over SSH. Ghostty/WezTerm use OSC 777, Kitty OSC 99, and iTerm2/Warp OSC 9 with a title prefix; other terminals ring the bell. Explicit Windows uses a toast on the Windows host, including over SSH. The first toast registers a per-user HKCU ID and can take about 3 seconds. It yields only for DSH sessions with an enabled, active cc-dsh-notifier; a failed toast falls back to the bell. Terminal settings still apply; tmux OSC notifications need allow-passthrough. Applies immediately.',
+    hintDescriptions: { zh: '自动：Windows 本地会话用系统 toast，SSH 会话改走客户端终端协议。Ghostty/WezTerm 用 OSC 777，Kitty 用 OSC 99，iTerm2/Warp 用带标题前缀的 OSC 9，其他终端响铃。显式 Windows 仍在 Windows 主机弹窗，包括 SSH。首次 toast 会注册当前用户的 HKCU 标识，约延迟 3 秒；仅 DSH 会话遇到已启用、正在运行的 cc-dsh-notifier 时让位；弹窗失败回落响铃。实际效果依终端设置；tmux 的 OSC 通知需 allow-passthrough。立即生效。' },
+    kind: 'select',
+    options: [
+      { value: 'auto', label: 'Auto', descriptions: { zh: '自动' } },
+      { value: 'osc9', label: 'OSC 9', descriptions: { zh: 'OSC 9' } },
+      { value: 'bel', label: 'Terminal bell', descriptions: { zh: '终端响铃' } },
+      { value: 'windows', label: 'Windows notification', descriptions: { zh: 'Windows 原生通知' } },
+    ],
   },
   'pageMargin': {
     label: 'Page margin',
@@ -228,16 +284,16 @@ export const SETTING_DEFINITIONS = {
     label: 'Enabled panels',
     descriptions: { zh: '启用的面板' },
     group: 'side-panel',
-    hint: 'Comma-separated panel ids in PanelBar order (default `todo,jobs,agents`). Ids are lowercase words (a-z, 0-9, _, -) or a `plugin:panel` namespace; a well-formed id no panel claims yet stays in the bar for a plugin that registers it later, while a malformed entry is refused. Add `companion` to enable the pet panel. Applies immediately.',
-    hintDescriptions: { zh: '按标签栏顺序排列的面板 id，逗号分隔（默认 `todo,jobs,agents`）。id 为小写词组（a-z、0-9、_、-）或 `plugin:panel` 命名空间；格式合法但尚无面板认领的 id 会留在标签栏，等插件稍后注册，格式非法的输入会被直接拒绝。加上 `companion` 可启用宠物面板。立即生效。' },
+    hint: 'Default `*` shows every panel — the built-ins plus plugin panels registered later. Unticking a checkbox writes an explicit list: from then on a panel registered after the fact stays off until ticked (an unlisted registered panel shows unchecked, an unlisted well-formed id stays as a checked placeholder). Temporary panels show their title and a run-local number; their checkboxes affect this run only and are never saved, and an old actN placeholder must be removed and the current panel selected again. The Advanced row edits the raw list (`*` = all, persistent ids only). Applies immediately.',
+    hintDescriptions: { zh: '默认 `*` 显示全部面板——内置面板加上之后注册的插件面板。取消勾选会写成显式列表：此后新注册的面板保持关闭，直到勾选（已注册但未列出的面板显示为未勾选；未列出但格式合法的 id 仍保留为已勾选占位行）。临时面板显示标题和本次运行编号，其勾选只影响当前运行、不保存；旧 actN 占位项应移除后重新选择当前面板。「高级」行编辑原始列表（`*` = 全部，仅持久 id）。立即生效。' },
     kind: 'text',
   },
   'sidePanel.ratio': {
     label: 'Chat column width',
     descriptions: { zh: '聊天列占比' },
     group: 'side-panel',
-    hint: 'Chat column as a fraction of the content width: 0.1-0.95, default 0.68. Type a decimal such as `0.6`; while the panel has focus the +/- shortcuts nudge it live for the current session. Applies immediately.',
-    hintDescriptions: { zh: '聊天列占内容宽度的比例：0.1-0.95，默认 0.68。输入小数如 `0.6`；面板获得焦点时可用 +/- 在会话内实时微调。立即生效。' },
+    hint: 'Chat column as a fraction of the content width: 0.1-0.95, default 0.68. Type a decimal such as `0.6`; drag the divider or use +/- while the panel has focus to resize for the current session. Applies immediately.',
+    hintDescriptions: { zh: '聊天列占内容宽度的比例：0.1-0.95，默认 0.68。输入小数如 `0.6`；拖拽分隔线，或在面板获得焦点时用 +/-，可在当前会话内实时调宽。立即生效。' },
     kind: 'number',
   },
   'sidePanel.splitEnabled': {
@@ -353,6 +409,22 @@ export const SETTING_DEFINITIONS = {
     kind: 'boolean',
     group: 'status-bar',
   },
+  'statusBar.pluginFields': {
+    label: 'Show plugin fields',
+    descriptions: { zh: '显示插件底栏字段' },
+    hint: 'Show footer fields contributed by plugins. Turning this off does not uninstall anything.',
+    hintDescriptions: { zh: '显示插件贡献的底栏字段；关闭不会卸载任何插件。' },
+    kind: 'boolean',
+    group: 'status-bar',
+  },
+  'statusBar.pluginFieldsOrder': {
+    label: 'Plugin field list',
+    descriptions: { zh: '插件底栏字段名单' },
+    hint: 'Three ";"-separated groups — left group tail; right group head; right group tail — with comma-separated keys inside: `a,b;c;d`. Empty shows nothing; "*" shows every field (default, fields registered later included). A listed key follows the group it sits in, overriding its plugin-declared slot.',
+    hintDescriptions: { zh: '用 ";" 分成三组——左组末尾；右组开头；右组末尾——组内逗号分隔：`a,b;c;d`。留空则一个都不显示；"*" 表示全部（默认，含以后注册的字段）。被列出的字段以名单里的组为准，覆盖插件声明的槽位。' },
+    kind: 'text',
+    group: 'status-bar',
+  },
   'statusBar.sessionId': {
     label: 'Show session id',
     descriptions: { zh: '显示会话 ID' },
@@ -409,6 +481,19 @@ export const SETTING_DEFINITIONS = {
     kind: 'boolean',
     group: 'status-bar',
   },
+  'taskNotifications': {
+    label: 'Task completion notifications',
+    descriptions: { zh: '任务完成通知' },
+    group: 'conversation',
+    hint: 'Notify when successful live work finishes with no queued follow-up or active goal. The title is dsh-TUI · Task complete; the body previews the latest reply as plain text in one line, with Markdown formatting removed, up to 200 characters. OSC 777/9 may shorten it further to fit a 2048-byte sequence budget without splitting characters. No reply shows only the title; BEL only rings. Default: only while the terminal is unfocused. Off disables notifications; Always also notifies while focused or when focus reporting is unavailable. Replay, cancellation and errors stay quiet. Applies immediately.',
+    hintDescriptions: { zh: '实时任务成功结束、没有排队的后续输入或活动目标时提醒。标题为「dsh-TUI · 任务已完成」，正文显示最新回复的单行纯文本摘要，去掉 Markdown 样式，最多 200 字符；OSC 777/9 还会按完整序列的 2048 字节预算截短，不拆字符；没有回复时只显示标题，BEL 只响铃。默认仅在终端失去焦点时通知；关闭可禁用，每次完成则在终端聚焦或不支持焦点报告时也通知。回放、取消和失败不通知。立即生效。' },
+    kind: 'select',
+    options: [
+      { value: 'unfocused', label: 'When unfocused', descriptions: { zh: '仅失焦时' } },
+      { value: 'always', label: 'Always', descriptions: { zh: '每次完成' } },
+      { value: 'off', label: 'Off', descriptions: { zh: '关闭' } },
+    ],
+  },
   'terminalImages': {
     label: 'Terminal image previews',
     descriptions: { zh: '终端图片预览' },
@@ -442,20 +527,28 @@ export const SETTING_DEFINITIONS = {
       { value: 'strong', label: 'Strong', descriptions: { zh: '明显' } },
     ],
   },
+  'turnUsageRow': {
+    label: 'Turn usage row',
+    descriptions: { zh: '回合用量行' },
+    group: 'rendering',
+    hint: 'Show the quiet right-aligned ledger that closes each turn (tokens in/out, cache split, span, retries). Off by default — the /tokens and /status commands and the footer token hover keep reporting the same numbers either way.',
+    hintDescriptions: { zh: '在每回合末尾显示安静的右对齐用量小记（输入/输出、缓存分段、耗时、重试）。默认关闭——无论开关，/tokens、/status 与底栏 token 悬停都照常报告同样数字。' },
+    kind: 'boolean',
+  },
   'whale': {
     label: 'Header art',
     descriptions: { zh: '标题图形 logo' },
     group: 'splash',
-    hint: 'Show the header splash art — the pixel whale, or the maid portrait when the setting below is on. Off leaves a text-only header.',
-    hintDescriptions: { zh: '开屏头部显示图形 logo：像素鲸鱼（打开下方「女仆娘立绘」时显示女仆娘）。关闭则只留文字标题。' },
+    hint: 'Header art. DeepSeek follows Companion skin and the maid toggle; Claude uses its own art; Codex uses its own raster portrait or maid character-art fallback. Off leaves a text-only header.',
+    hintDescriptions: { zh: '标题图形：DeepSeek 品牌随宠物皮肤与女仆娘开关，Claude 使用自己的图案；Codex 优先显示自己的真图，不可用时回落女仆娘字符画。关闭则只留文字标题。' },
     kind: 'boolean',
   },
   'whaleGirl': {
     label: 'Maid portrait',
     descriptions: { zh: '女仆娘立绘' },
     group: 'splash',
-    hint: 'Swap the header splash\'s pixel whale for the author-designed maid portrait, rendered FIRST as a real raster through the terminal image protocols (Kitty/Sixel); terminals without graphics support fall back to the character-art maid.',
-    hintDescriptions: { zh: '把开屏头部的像素鲸鱼换成项目作者绘制的女仆娘立绘，最优先走终端图像协议（Kitty/Sixel）的真图渲染；终端不支持时回落到字符画版女仆娘。' },
+    hint: 'DeepSeek brand: choose whale in Companion skin, then enable this toggle. Claude uses its own art; Codex uses its own raster portrait or maid character-art fallback. Swaps the pixel whale for the author-designed maid portrait, preferring the real raster (Kitty/Sixel) with character-art fallback.',
+    hintDescriptions: { zh: 'DeepSeek 品牌：选 whale 皮肤并开启本项。Claude 使用自己的图案；Codex 优先显示自己的真图，不可用时回落女仆娘字符画。把像素鲸鱼换成项目作者绘制的女仆娘立绘，优先用终端图像协议（Kitty/Sixel）渲染真图，不支持时回落字符画。' },
     kind: 'boolean',
   },
   'whaleIdle': {
@@ -574,14 +667,26 @@ export const SHORTCUT_FIELD_META: Record<ShortcutActionId, { label: string; zh: 
   todoFold: {
     label: 'Todo fold shortcut',
     zh: '待办折叠快捷键',
-    hintEn: d => `Fold/unfold the goal/todo panel. Default: ${d}.`,
-    hintZh: d => `折叠/展开目标与待办面板。默认 ${d}。`,
+    hintEn: d => `Fold running todos; hide/restore the idle goal/todo footer. Default: ${d}.`,
+    hintZh: d => `运行时折叠待办，空闲时隐藏/恢复目标与待办底部面板。默认 ${d}。`,
   },
   questionFold: {
     label: 'Question panel fold shortcut',
     zh: '提问面板折叠快捷键',
     hintEn: d => `Fold/unfold the pending question panel. Default: ${d}.`,
     hintZh: d => `折叠/展开等待回答的提问面板。默认 ${d}。`,
+  },
+  questionDetailUp: {
+    label: 'Panel preview previous page shortcut',
+    zh: '面板正文向上翻页快捷键',
+    hintEn: d => `Page up through question text or a compact approval preview without moving the choice focus. Default: ${d}.`,
+    hintZh: d => `向上翻阅问卷正文或紧凑审批预览，不移动选项焦点。默认 ${d}。`,
+  },
+  questionDetailDown: {
+    label: 'Panel preview next page shortcut',
+    zh: '面板正文向下翻页快捷键',
+    hintEn: d => `Page down through question text or a compact approval preview without moving the choice focus. Default: ${d}.`,
+    hintZh: d => `向下翻阅问卷正文或紧凑审批预览，不移动选项焦点。默认 ${d}。`,
   },
   expandEditor: {
     label: 'Fullscreen editor shortcut',

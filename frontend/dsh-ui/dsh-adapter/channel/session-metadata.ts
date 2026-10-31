@@ -1,3 +1,4 @@
+import type { DshBindingCapture, DshChannelBinding } from './binding.js'
 import type { Agent } from '@deepseek-ai/dsh-agent'
 import { createUserMessage, type Message } from '@deepseek-ai/dsh-llm'
 import type { Context } from '@deepseek-ai/cordis'
@@ -7,9 +8,10 @@ import { appendSessionTitle, deleteSessionLog, userTitleData } from '../compat/i
 import { snapshotLiveSessionEvents } from '../compat/liveSession.js'
 import { collectRecentActivity, parseRecapResponse, RECAP_RECENT_CHARS, wrapRecapPrompt } from '../recap.js'
 import { listSummaries, locateSession, previewSession, type SessionSource, type SessionSummary } from '../sessions/index.js'
-import { openStepToolCallIds, runSideQuestion, splitUnresolvedToolCalls, wrapSideQuestion } from '../sideQuestion.js'
-import { readListingSnapshot } from '../sessions/snapshot.js'
+import { openStepToolCallIds, runAsSideBranch, runSideQuestion, splitUnresolvedToolCalls, wrapSideQuestion, type InitiatorScope } from '../sideQuestion.js'
+import { beginListingSnapshot, readListingSnapshot } from '../sessions/snapshot.js'
 import type { ChannelOwner } from './owner.js'
+import { createSessionListing } from './session-listing.js'
 import type { CredentialStatus, SideQuestionLlm } from './types.js'
 import { isUserInvocable } from '@deepseek-ai/dsh-skill'
 
@@ -24,19 +26,17 @@ declare module '@deepseek-ai/dsh-llm' {
 
 const PREVIEW_ENTRIES = 8
 
-type Capture = { readonly agent: Agent; readonly generation: number }
-type Binding = {
-  readonly agent: Agent
-  capture(): Capture
-  isCurrent(capture: Capture): boolean
-}
+type Capture = DshBindingCapture
+type Binding = Pick<DshChannelBinding, 'agent' | 'capture' | 'isCurrent'>
 
 /** Session-scoped metadata, persistence queries, and tool-less LLM reads. */
 export function createSessionMetadataActions(ctx: Context, deps: {
-  owner: Pick<ChannelOwner, 'current' | 'signal'>
+  owner: Pick<ChannelOwner, 'current' | 'signal' | 'own'>
   binding: Binding
   provider(): string
   model(): string
+  /** The browser's current workspace, prioritized during a cold listing. */
+  cwd?(): string
   emit(): void
   sessionTitle(): string
   setSessionTitle(title: string): void
@@ -51,7 +51,16 @@ export function createSessionMetadataActions(ctx: Context, deps: {
   const withOwnerSignal = (signal?: AbortSignal): AbortSignal =>
     signal === undefined ? deps.owner.signal : AbortSignal.any([signal, deps.owner.signal])
 
-  let listingGeneration = 0
+  // The public registry-global getter is independent of workspace sessionIds:
+  // archived sessions deliberately retain their workspace accounting slot.
+  const archiveProjection = (): ((row: SessionSummary) => SessionSummary) => {
+    const registry = ctx.get('workspaceRegistry') as { readonly archivedSessionIds?: readonly string[] } | undefined
+    // Older hosts lack this capability. A present getter that throws must
+    // reject the listing rather than masquerading as an empty archive set.
+    const archived = new Set(registry?.archivedSessionIds ?? [])
+    return row => ({ ...row, archived: archived.has(row.id) })
+  }
+
   let lastListing: { source: SessionSource | symbol; rows: readonly SessionSummary[] } | undefined
   const remember = (source: SessionSource, rows: readonly SessionSummary[]): void => {
     lastListing = { source: source.identity ?? source, rows }
@@ -61,32 +70,60 @@ export function createSessionMetadataActions(ctx: Context, deps: {
     if (source === undefined) return undefined
     // Providers without a durable scope still keep same-instance reopen fast.
     // A replaced service never inherits this in-memory view.
-    return lastListing?.source === (source.identity ?? source)
+    const rows = lastListing?.source === (source.identity ?? source)
       ? lastListing.rows
       : readListingSnapshot(source)
+    return rows?.map(archiveProjection())
   }
-  const listSessions = async (onEnriched?: (summary: SessionSummary) => void, onPartial?: (rows: readonly SessionSummary[]) => void): Promise<readonly SessionSummary[]> => {
-    const generation = ++listingGeneration
-    const capture = deps.binding.capture()
-    const source = persistence()
-    if (!source) {
-      if (current(capture)) deps.setPersistedSessions([])
-      return []
-    }
-    let summaries: readonly SessionSummary[] = []
-    summaries = await listSummaries(source, deps.owner.signal, enriched => {
-      if (!current(capture) || generation !== listingGeneration) return
-      summaries = summaries.map(row => row.id === enriched.id ? enriched : row)
+  const listing = createSessionListing({
+    owner: deps.owner,
+    capture: () => {
+      const capture = deps.binding.capture()
+      const source = persistence()
+      const identity = source?.identity
+      const cwd = deps.cwd?.()
+      return () => {
+        const liveSource = persistence()
+        // Legacy hosts may return a new service wrapper on every lookup;
+        // only the provider's explicit identity is stable across proxies.
+        return current(capture) && (liveSource !== undefined) === (source !== undefined)
+          && liveSource?.identity === identity && deps.cwd?.() === cwd
+      }
+    },
+    async read(listingCurrent, onEnriched, onPartial) {
+      const source = persistence()
+      if (!source) {
+        if (listingCurrent()) deps.setPersistedSessions([])
+        return []
+      }
+      const projectArchive = archiveProjection()
+      let summaries: readonly SessionSummary[] = []
+      summaries = await listSummaries(source, deps.owner.signal, enriched => {
+        if (!listingCurrent()) return
+        enriched = projectArchive(enriched)
+        summaries = summaries.map(row => row.id === enriched.id ? enriched : row)
+        remember(source, summaries)
+        deps.setPersistedSessions(summaries)
+        onEnriched(enriched)
+      }, rows => {
+        if (listingCurrent()) onPartial(rows.map(projectArchive))
+      }, deps.cwd?.())
+      if (!listingCurrent()) return []
+      summaries = summaries.map(projectArchive)
       remember(source, summaries)
       deps.setPersistedSessions(summaries)
-      onEnriched?.(enriched)
-    }, rows => {
-      if (current(capture) && generation === listingGeneration) onPartial?.(rows)
-    })
-    if (!current(capture) || generation !== listingGeneration) return []
-    remember(source, summaries)
-    deps.setPersistedSessions(summaries)
-    return summaries
+      return summaries
+    },
+  })
+  const saveMutation = (rows: readonly SessionSummary[] | undefined): void => {
+    listing.invalidate()
+    const source = persistence()
+    if (source === undefined) return
+    // Revoke a pending scan's disk write even before any complete cache exists.
+    const save = beginListingSnapshot(source)
+    if (rows === undefined) return
+    remember(source, rows)
+    save(rows)
   }
 
   const preview = async (sessionId: string) => {
@@ -180,7 +217,8 @@ export function createSessionMetadataActions(ctx: Context, deps: {
     // /btw can land mid-step; see splitUnresolvedToolCalls.
     const running = openStepToolCallIds(snapshotLiveSessionEvents(capture.agent.session))
     const history = splitUnresolvedToolCalls(capture.agent.session.deriveMessages(), running)
-    const outcome = await runSideQuestion({
+    const agents = ctx.get('agents') as Partial<InitiatorScope> | undefined
+    const outcome = await runAsSideBranch(agents, capture.agent, () => runSideQuestion({
       stream: llm.stream.bind(llm),
       options: llmRequest(capture, [
         ...history.messages,
@@ -189,7 +227,7 @@ export function createSessionMetadataActions(ctx: Context, deps: {
       // Do not let an old session append streamed UI facts after a switch.
       onText: delta => { if (current(capture) && !options?.signal?.aborted) options?.onText?.(delta) },
       signal,
-    })
+    }))
     return current(capture) ? outcome : { answer: null }
   }
 
@@ -222,6 +260,7 @@ export function createSessionMetadataActions(ctx: Context, deps: {
     // Live rename: the same strict-reader-required payload the offline append
     // writes — a `{ title }`-only event made the log unopenable (issue #1006).
     capture.agent.session.append('session/title', userTitleData(title))
+    saveMutation(cachedSessions()?.map(row => row.id === capture.agent.session.id ? { ...row, title: { text: title, source: 'renamed' } } : row))
     deps.setSessionTitle(title)
     deps.emit()
   }
@@ -237,6 +276,7 @@ export function createSessionMetadataActions(ctx: Context, deps: {
     const capture = deps.binding.capture()
     if (sessionId === capture.agent.session.id || !current(capture)) return false
     if (deleteSessionLog(sessionId) !== 'deleted' || !current(capture)) return false
+    saveMutation(cachedSessions()?.filter(row => row.id !== sessionId))
     forgetSession(sessionId)
     deps.forgetAgentView(sessionId)
     if (readResumeTarget() === sessionId) clearResumeTarget()
@@ -247,12 +287,13 @@ export function createSessionMetadataActions(ctx: Context, deps: {
     if (!current(capture)) return false
     if (sessionId === capture.agent.session.id) { renameSession(title); return true }
     if (appendSessionTitle(sessionId, title) !== 'appended' || !current(capture)) return false
+    saveMutation(cachedSessions()?.map(row => row.id === sessionId ? { ...row, title: { text: title, source: 'renamed' } } : row))
     touchSession(sessionId)
     return true
   }
 
   return {
-    cachedSessions, listSessions, previewSession: preview, listSkills, describeCredential,
+    cachedSessions, listSessions: listing.listSessions, previewSession: preview, listSkills, describeCredential,
     sideQuestion, recapRecent, setResumeTarget: writeResumeTarget,
     renameSession, setSessionColor, deleteSession, renameSessionTo,
   }

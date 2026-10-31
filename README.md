@@ -1,143 +1,164 @@
-<p align="center">
-  <a href="https://github.com/ace-code-engine/hooh-agent/actions/workflows/ci.yml"><img alt="Tests" src="https://github.com/ace-code-engine/hooh-agent/actions/workflows/ci.yml/badge.svg"></a>
-  <img alt="Python" src="https://img.shields.io/badge/python-3.10%20%7C%203.11%20%7C%203.12-blue">
-  <a href="LICENSE"><img alt="License" src="https://img.shields.io/badge/license-MIT-blue"></a>
-  <img alt="Release" src="https://img.shields.io/badge/release-v1.1.0-brightgreen">
-  <img alt="Safety core" src="https://img.shields.io/badge/safety%20core-zero--dep-orange">
-  <img alt="Model API" src="https://img.shields.io/badge/model%20API-requires%20requests-blue">
-  <a href="CHANGELOG.md"><img alt="Latest" src="https://img.shields.io/badge/latest-v1.1.0%20(2026--10--04)-brightgreen"></a>
-</p>
+# HooH
 
-<h1 align="center">HooH · 互</h1>
+<div align="center">
 
-<p align="center">
-  English · <a href="README.zh-CN.md">简体中文</a> · <a href="CHANGELOG.md">Changelog</a> · <a href="docs/README.md">Docs</a>
-</p>
+<img src="assets/logo.svg" width="96" alt="HooH" />
 
-<p align="center">
-  <strong>An execution layer that places the safety boundary below the model.<br>
-  The model proposes; permission, isolation, snapshots and rollback are decided by code it cannot argue with.</strong>
-</p>
+### An execution layer that places the safety boundary **below the model**.
+
+**The model proposes; code decides.**
+
+[English](README.md) · [简体中文](README.zh-CN.md) · [Release notes](UPDATES.md) · [Docs](docs/README.md) · [Contributing](CONTRIBUTING.md)
+
+[![CI](https://github.com/ace-code-engine/hooh-agent/actions/workflows/ci.yml/badge.svg)](https://github.com/ace-code-engine/hooh-agent/actions/workflows/ci.yml)
+[![Version](https://img.shields.io/badge/Version-1.2.0-7DA1DE)](https://github.com/ace-code-engine/hooh-agent/releases)
+[![Release](https://img.shields.io/github/v/release/ace-code-engine/hooh-agent?label=Download&color=7DA1DE)](https://github.com/ace-code-engine/hooh-agent/releases)
+<a href="CHANGELOG.md"><img alt="Latest" src="https://img.shields.io/badge/latest-v1.2.0%20(2026--10--31)-7DA1DE"></a>
+[![License](https://img.shields.io/badge/License-MIT-7DA1DE)](LICENSE)
+[![Safety core](https://img.shields.io/badge/safety%20core-zero--dep-orange)](docs/security/SECURITY-MODEL.md)
+[![Model API](https://img.shields.io/badge/model%20API-requires%20requests-blue)](docs/CONFIGURATION.md)
+[![UI](https://img.shields.io/badge/UI-en%20%C2%B7%20zh%20%C2%B7%20ja-7DA1DE)](#three-shells)
+[![Security](https://github.com/ace-code-engine/hooh-agent/actions/workflows/security.yml/badge.svg?label=Security%20scans)](https://github.com/ace-code-engine/hooh-agent/actions/workflows/security.yml)
+[![CodeQL](https://github.com/ace-code-engine/hooh-agent/actions/workflows/security.yml/badge.svg?event=push&label=CodeQL)](https://github.com/ace-code-engine/hooh-agent/actions/workflows/security.yml)
+[![OpenSSF Scorecard](https://api.securityscorecards.dev/badge/github/ace-code-engine/hooh-agent)](https://securityscorecards.dev/viewer?uri=github.com/ace-code-engine/hooh-agent)
+[![Bandit](https://img.shields.io/badge/Bandit-clean-4C1)](https://github.com/ace-code-engine/hooh-agent/actions/workflows/security.yml)
+[![pip-audit](https://img.shields.io/badge/pip--audit-clean-4C1)](https://github.com/ace-code-engine/hooh-agent/actions/workflows/security.yml)
+
+</div>
 
 ---
 
-HooH is an **execution layer for coding agents**. Every tool call — files, commands, network, MCP —
-passes through a single decision point: a permission gate, a path & sensitive-target boundary, a
-write-ahead snapshot, and an HMAC-chained audit record. The safety core is **pure standard library**;
-the boundary holds when the prompt does not (jailbreak, injected content, tampered tool output).
+## What it is
 
-> **互 (HooH)** — *mutual*: the model proposes, code decides. A snapshot is written before every
-> write, so `/undo` always has something to undo. The name is a tribute; the full rationale and the
-> naming history are in [docs/WHY.md](docs/WHY.md) and [docs/NAMING.md](docs/NAMING.md).
+Every tool call — files, commands, network, MCP — passes through a single decision point:
+**permission gate → path & sensitive-target boundary → write-ahead snapshot → HMAC-chained audit**.
+The safety core is **pure standard library**: the boundary holds when the prompt does not
+(jailbreak, injected content, tampered tool output).
+
+> **互 (HooH)** — *mutual*: two horizontal bones locked by one vertical stroke. Every action
+> gets an equal and reversible response. A snapshot is written before every write, so `/undo`
+> always has something to undo. The name is a tribute — see [the note below](#naming--credits).
 
 ## What makes it different
 
 - **Safety below the model, not in the prompt.** Permissions, paths, sandbox and rollback are harness code.
 - **Read-only by default.** Elevation is a human action (`/permission write`).
 - **Snapshot + `/undo`** on every write, HMAC-signed, not writable by the agent.
-- **Self-driven.** Persistent goals, subagents, and one command to switch among **9 vendors · 10 endpoints**.
+- **Self-driven.** Persistent goals, subagents, a knowledge base, and one command to switch among **9 vendors · 10 endpoints**.
+- **Three shells, one engine.** The full dsh-TUI multi-kernel UI / a Swiss-spec classic frontend / a pure-Python fallback — the decision chain stays singular.
 
-## Get it
+## Get it: double-click and go
 
-Four artefacts per release — alternatives, not layers:
+**No error-reading, no Python install, no Node install.** Grab the installer, double-click, click **HooH** in the Start menu:
 
-| Form | Artefact | Choose it when |
+| Your situation | Download | How to use |
 |---|---|---|
-| **① HooH as your agent** | `hooh-<ver>-windows-amd64.msi` · `.zip` | You want a terminal agent to work in |
-| **② HooH as an MCP server** | `hooh-mcp-<ver>-<platform>.zip` | You already use Cline / Claude Desktop / Cursor and want the boundary without changing it. **Self-contained: no Python needed** |
-| **③ MCP pack (source)** | `hooh-mcp-server-<ver>.zip` | Same as ② but you want to read/patch the source; needs Python 3.10+ |
-| **④ MCP + sandbox base** | `hooh-sandbox-bundle-<ver>.zip` | You want the execution boundary too (KVM microVM) |
+| Windows, want it working | **`hooh-<ver>-windows-amd64.msi`** | Double-click → Start menu → **HooH** (ships Python runtime + full UI + Node) |
+| Portable (unzip, no system install) | **`hooh-<ver>-windows-amd64.zip`** | Unzip → double-click `ace.cmd` |
+| Wire HooH into another agent (Cline / Claude Desktop / Cursor) | **`hooh-mcp-<ver>-<platform>.zip`** | Configure per [docs/MCP-SERVER.md](docs/MCP-SERVER.md) — the boundary, without changing your agent |
+| Source folks | `git clone` this repo | `hooh.cmd --mock` for the offline demo / `hooh.cmd` for a real model |
 
-## Quickstart
+**Only these artefacts ship**; the MSI is self-contained (engine + full UI + Node runtime) and runs `--mock` offline.
 
-```bash
-python ai_code.py --mock    # offline demo — no key, no network
-python ai_code.py           # real model (setup wizard)
+**[Download the latest release](https://github.com/ace-code-engine/hooh-agent/releases)** · [Release notes](UPDATES.md) · [Open an issue](https://github.com/ace-code-engine/hooh-agent/issues/new/choose)
+
+## 30 seconds in
+
+```text
+Double-click HooH (or run `ace` in a terminal)
+  ↓
+Type a sentence, press Enter
+  ↓
+When it needs to write/run, HooH asks first → snapshots → then acts
+  ↓
+Unhappy? /undo rolls back to before the action
 ```
 
-From a checkout you can also use the launcher, which finds a usable Python for you:
-`hooh.cmd --mock` (Windows) — `ace.cmd` is kept as an alias for the same entry point.
+From source: `hooh.cmd --mock` (offline demo, no key, no network) · `hooh.cmd` (real model, guided setup).
+The full slash-command reference is **[docs/COMMANDS.md](docs/COMMANDS.md)**.
 
-Windows without Python: grab the zip from [Releases](https://github.com/ace-code-engine/hooh-agent/releases)
-and run `ace\ace.exe --mock`. Install & build: [docs/PACKAGING-EXE.md](docs/PACKAGING-EXE.md).
+## What it can do
 
-<p align="center">
-  <img src="demo/demo.svg" alt="A recorded offline HooH session" width="820">
-</p>
+- **Act**: files, commands, code, web search, document parsing (Word/Excel/PPT/PDF), SQLite, a browser — each through the decision chain;
+- **Guard**: read-only by default, elevation requires approval; a snapshot precedes every write (HMAC-chained audit); `/undo` rolls back;
+- **Drive**: persistent goals (resume across restarts), subagents, a task tree, a knowledge base, plan mode;
+- **Connect**: an MCP server (lend the decision boundary to other agents), event hooks, custom commands and skills;
+- **Switch**: 9 model vendors · 10 endpoints in one command; en/zh/ja UI.
 
-## What's new in 1.1.0
+**What does HooH block, and what does it not?** Read **[docs/security/SECURITY-FAQ.md](docs/security/SECURITY-FAQ.md)** — eleven questions, answered.
 
-- **The UI was rebuilt on one spec.** No borders (full-width hairlines instead), one accent per
-  screen, left-aligned, and small parts (dividers, six-state status icons, eighth-block progress
-  bars, bylines, key hints) that are **value-for-value parity-tested against the terminal renderer**.
-- **Chinese · English · 日本語, all complete.** Switch the *interface* language with `/lang` — the
-  slash menu, dialogs, errors and status bar switch with it (it no longer silently changes the
-  model's reply language).
-- **The context window follows the model.** DeepSeek → 1M, GLM-4.6/4.7 → 200K, table entries carry
-  their sources; unknown models get a safe fallback *and a visible hint*. New: `/window 1m`.
-- **Fullscreen that actually works**: `--fullscreen` gives the transcript its own scroll viewport
-  (`PgUp/PgDn/↑↓/g/G`, scrollbar) — plus **synchronized output** (`\u001b[?2026`) so long transcripts
-  stop flickering, and `<Static>` so the main screen keeps real scrollback.
+## Three shells
 
-## Documentation
+| Shell | Entry | Looks like | For |
+|---|---|---|---|
+| **Full app** (default) | HooH double-click / `ace` | The dsh-TUI multi-kernel UI: landing page, streaming Markdown, tool cards, status bar, command palette | Daily use |
+| **Classic frontend** | `ace classic` | Swiss-spec UI: two-lane main screen, one accent colour per screen | Fallback (frozen, bug-fix only) |
+| **Pure Python** | `ace --no-tui` | A plain REPL with no UI dependency | Scripts / CI / old terminals |
 
-| What you want | Go here |
+Behind all three sits **the same engine and the same decision chain** — the shell can change, the safety boundary does not.
+
+## Docs
+
+| Looking for | Go here |
 |---|---|
-| 5-minute start · the ten traps | [docs/GETTING-STARTED.md](docs/GETTING-STARTED.md) |
-| What HooH stops / does not | [docs/security/SECURITY-FAQ.md](docs/security/SECURITY-FAQ.md) |
-| Layers · directory tree · ADR | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
-| Every command & flag | [docs/COMMANDS.md](docs/COMMANDS.md) |
+| 5-minute start · ten classic traps | [docs/GETTING-STARTED.md](docs/GETTING-STARTED.md) |
+| What HooH blocks / does not | [docs/security/SECURITY-FAQ.md](docs/security/SECURITY-FAQ.md) |
+| Layered architecture · full tree · ADRs | [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) |
+| Every command and flag | [docs/COMMANDS.md](docs/COMMANDS.md) |
 | Every config key | [docs/CONFIGURATION.md](docs/CONFIGURATION.md) |
-| Why HooH · vs prompt-guard agents | [docs/WHY.md](docs/WHY.md) |
-| Capability checklist | [docs/CAPABILITIES.md](docs/CAPABILITIES.md) |
-| Testing · CI · promise guards | [docs/TESTING.md](docs/TESTING.md) |
-| Engineering debt · hand-off | [docs/HANDOFF.md](docs/HANDOFF.md) |
-| Everything, indexed | [docs/README.md](docs/README.md) |
+| Why HooH · vs prompt guardrails | [docs/WHY.md](docs/WHY.md) |
+| Capability list | [docs/CAPABILITIES.md](docs/CAPABILITIES.md) |
+| Packaging & release (MSI / zip / MCP / sandbox) | [docs/PACKAGING-EXE.md](docs/PACKAGING-EXE.md) |
+| Tests · CI · promise guards | [docs/TESTING.md](docs/TESTING.md) |
+| Engineering debt · handoff | [docs/HANDOFF.md](docs/HANDOFF.md) |
+| Full docs index | [docs/README.md](docs/README.md) |
 
 ## Contributing
 
-Read [CONTRIBUTING.md](CONTRIBUTING.md) → [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) (standard flow,
-add-a-tool, add-a-feature) → [docs/BACKLOG.md](docs/BACKLOG.md).
+Found a trap, have an idea, want to add a feature — start at **[CONTRIBUTING.md](CONTRIBUTING.md)**:
+environment → standard flow → the eight-step add-a-tool checklist → PR.
+User-visible changes per release are summarised in **[UPDATES.md](UPDATES.md)**; technical detail in [CHANGELOG.md](CHANGELOG.md).
 
-## Name & attribution
+> The author is a student: weekdays are for classes, issues / PRs are handled on weekends.
+> Messages are read and noted — no rush.
 
-The name **HooH (互)** is a **tribute**, not an asset claim. 互 — *mutual* — is what this
-project is shaped like: the model proposes, code decides; a snapshot is written, only then
-can `/undo` mean anything. Every action gets a reciprocal, reversible answer.
+## Security scanning (authoritative line)
 
-The project **contains no miHoYo material** — that claim is about names and artwork only;
-third-party code and text adapted by this project is listed separately in
-[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md). `frontend/dsh-ui/` is the dsh-TUI UI tree migrated under MIT (upstream `LICENSE.upstream` + migration notes included), shipped in-repo as the main shell -- the globally-installed dsh-tui npm package is never used. The icon ([`assets/logo.svg`](assets/logo.svg))
-is original geometry in this repo's own visual language — two interlocking strokes crossed by
-one spine, the 互 glyph, drawn from scratch. Nothing is traced, copied, or extracted from any game.
+CI runs a **Security workflow** separate from tests — four authoritative scanners in parallel, results in the GitHub Security tab:
 
-> The author is a long-time miHoYo player, and the name is a nod to the Aeon of
-> Equilibrium in *Honkai: Star Rail*. If miHoYo (or anyone else) considers this naming
-> inappropriate, **open an issue and it will be changed** — no argument, no delay.
+| Scanner | What it covers | Authority |
+|---|---|---|
+| **CodeQL** (GitHub native) | Static taint/injection analysis for Python + TypeScript (security-extended) | GitHub's own SAST, reviewable findings |
+| **Bandit** | Python SAST; medium+medium confidence fails the build (every exception carries a `# nosec` + compensating-control note, manually triaged) | Industry-standard Python SAST |
+| **pip-audit** | Dependency CVEs (locked runtime + every package in the build env) | PyPA's official auditor, `--strict` |
+| **OpenSSF Scorecard** | Supply-chain maturity (branch protection / pinned deps / SAST presence / token permissions) | Published by OpenSSF infra, publicly queryable |
 
-## What we use from third parties
+Each one is a **standing CI gate**: any red blocks the PR — not a screenshot of a one-off run.
 
-**Vendored code — MIT.** `frontend/vendor/dsh-ink/` is the Ink fork of `@deepseek-harness-tui/dsh-tui`
-v0.12.0 (MIT, © 2026 chimney), copied byte for byte: 135 files / 27,755 lines, SHA256-equal to
-upstream — cell buffer, damage rectangles, dirty-node blit, hardware scroll, `DEC2026` sync output,
-React 19. Per-file provenance: [MANIFEST.md](frontend/vendor/dsh-ink/MANIFEST.md); the two licences
-dsh-TUI itself omits (Ink, Meta Yoga) are supplied in [`third_party/dsh-tui/`](third_party/dsh-tui/) —
-[`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md).
+## Security
 
-**Adapted designs — no files copied.** Read their code, rewrite the idea in ours: page-margin geometry
-(inset content, bleeding structural lines), code-block layout, diff **status slots instead of invented
-line numbers**, leak-proof syntax-colour mapping, the key registry (declaration, platform aliases,
-user remapping, reserved set, conflict detection), `Ctrl+R` history search, large-paste folding,
-picker / settings / session-tree / draft-editor shells and `$EDITOR`.
+- Read-only by default; a physical snapshot precedes every write, failures roll back, the snapshot dir is not writable by the agent;
+- Permission gate, path & sensitive-target boundary, HMAC-chained audit — all harness code, none of it in the prompt;
+- Egress through a single gate (pin-to-IP + per-hop re-check); commands get a three-way verdict (allow / prompt / forbidden);
+- Full model: **[docs/security/SECURITY-MODEL.md](docs/security/SECURITY-MODEL.md)**; release commitments: **[SECURITY.md](SECURITY.md)**.
 
-- 73 semantic colour keys → we ship 17 tokens, one accent per screen.
-- `─` dividers → must degrade under cp936, so ours go through the glyph fallback.
-- An 80 ms spinner → breaks this repo's "animation ≤ 5 Hz"; `highlight.js` → we are zero-dependency.
-- Brand, mascot, easter eggs → none appear; UI copy is ours, complete in three languages.
+## Naming & credits
+
+**HooH (互)** is **a tribute, not an asset grab**. 互 is the shape of this system: the model
+proposes, code decides; a snapshot first, so `/undo` means something. The repo contains **no
+HoYoverse assets** — that sentence covers **naming and assets only**, not third-party code:
+adapted sources and text are listed in [`THIRD-PARTY-NOTICES.md`](THIRD-PARTY-NOTICES.md).
+The visual language (the 互 geometric mark, three horizontals one vertical) is drawn from scratch —
+no tracing, no extraction, no redistribution.
+
+> The author is a long-time HoYoverse player; the name salutes the "Equilibrium" aeon of
+> *Honkai: Star Rail*. If HoYoverse (or any rights holder) finds the naming unfitting,
+> **one issue and it changes** — no argument, no delay.
 
 ## License
 
 [MIT](LICENSE) © 2026 jincheng3870682453-hash
 
-Third-party notices: [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) — redistributed wheels
-and adapted source & text.
+Third-party notices: [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md) — this repo both
+redistributes unmodified third-party wheels and **adapts** third-party sources and text;
+item by item in that file.

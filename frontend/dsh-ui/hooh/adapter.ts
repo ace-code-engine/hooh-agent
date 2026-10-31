@@ -15,6 +15,8 @@
 
 import { resolveLaunchpadActions, type LaunchpadAction } from '../components/launchpadActions.js'
 import type { LaunchpadLayout } from '../components/launchpadLayout.js'
+// 0.17.0：首屏补全命令的上游行形状（Launchpad.commands 要求它）。
+import type { CommandCompletion } from '../adapter/ports/channel-catalog.js'
 
 /** ace 侧能给首屏的东西（先只列首屏用得到的；引擎接上后再长）。 */
 export interface AceSnapshot {
@@ -36,9 +38,10 @@ export interface AceSnapshot {
   lastSessionTitle?: string | undefined
   /** 有没有后台任务在跑（ace 的队列/工具看板） */
   jobsRunning?: boolean
-  /** 斜杠命令候选（`/` 补全用；形状必须是上游 LocalCommand——字符串会把
-   *  CommandSuggestions 的 stringWidth(c.name) 直接炸掉，2026-10-24 闪退的根因）。 */
-  commands?: readonly { name: string; description: string }[]
+  /** 斜杠命令候选（`/` 补全用；形状必须是上游 CommandCompletion——字符串会把
+   *  CommandSuggestions 的 stringWidth(c.name) 直接炸掉，2026-10-24 闪退的根因；
+   *  0.17.0 起还要带 replacement/commandLine 两个必填字段）。 */
+  commands?: readonly CommandCompletion[]
   /** 首次启动（提示换成首启那句） */
   firstRun?: boolean
   /** 星标过没有（上游的 star 提示；ace 不弹就恒 true = 不提示） */
@@ -82,7 +85,7 @@ export function launchpadData(snap: AceSnapshot): {
   effort: string
   preset: string
   permission: string
-  commands: readonly string[]
+  commands: readonly CommandCompletion[]
   cwd: string
   branch: string
   tuiVersion: string

@@ -118,7 +118,14 @@ export interface TurnRange {
  * question that big.
  */
 export interface SessionSummary {
+  /** Public backend archive state; archived rows remain available for lineage. */
+  readonly archived?: boolean
   readonly id: string
+  /**
+   * The backend whose catalog lists this session (`claude`, `acp:<agent>`);
+   * absent for a DSH session.
+   */
+  readonly backendId?: string
   readonly kind: SessionKind
   readonly title: SessionTitle
   /** Working directory recorded in the header; '' when it recorded none. */

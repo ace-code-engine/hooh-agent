@@ -9,6 +9,7 @@
  * 于是这里从"再导出一个外部包的预设表"变成"把我们的帧表接成上游要的形状"：
  * 导入名、导出名、`FramePreset` 形状全不变（上游的 `/activity` 选择器、状态行、
  * channel、activityPrefs 都照旧解析），只把**数据源**换成我们的。
+ * （0.17.0 re-vendor：新树该文件仍是外部包薄壳 + 新增 normalize 语义，重放同一覆盖。）
  */
 
 import { GLYPHS } from '../../src/render/spinner.js'

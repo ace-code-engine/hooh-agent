@@ -9,11 +9,16 @@
 import type { Context } from '@deepseek-ai/cordis'
 import Schema from '@deepseek-ai/schemastery'
 import type { SessionModeSpec } from '../sessionModes.js'
-import { DEFAULT_COMPANION_SKIN, DEFAULT_SIDE_PANEL_IDS, DEFAULT_STATUS_BAR, normalizeCompanionSkin, normalizePageMargin, normalizeSidePanelPanels, normalizeSidePanelRatio, type ImageBacking, type MathImageBacking, type MathImageScale, type MathRendering, type PageMarginSetting, type ScrollGutterMode, type StatusBarConfig, type ToolBackground } from '../tuiDisplayPrefs.js'
+import type { NotificationMethod, TaskNotifications } from '../ink/terminal-notification.js'
+import { parseBackendChoice } from './backend-registry.js'
+import { parseBackendId, type KernelBackendId } from '../kernelPrefs.js'
+import { ALL_SIDE_PANELS, BTW_CONTEXT_BUDGET_DEFAULT, BTW_CONTEXT_TURNS_DEFAULT, DEFAULT_COMPANION_SKIN, DEFAULT_STATUS_BAR, normalizeBtwContextBudget, normalizeBtwContextTurns, normalizeCompanionSkin, normalizePageMargin, normalizeSidePanelPanels, normalizeSidePanelRatio, type CodeFrameStyle, type ImageBacking, type MathImageBacking, type MathImageScale, type MathRendering, type PageMarginSetting, type ScrollGutterMode, type StatusBarConfig, type ToolBackground } from '../tuiDisplayPrefs.js'
 import { SHORTCUT_ACTIONS, type ShortcutActionId } from '../utils/keymap.js'
 import { normalizeSplashFont, type SplashFontSetting } from '../components/splashFonts.js'
+import { normalizeBrandSetting, type BrandSetting } from '../branding.js'
 import { editableConfig, type RuntimeConfig } from './compat/settings.js'
 import { EDITABLE_CONFIG_KEYS } from '../settings/definitions.js'
+import { peekEntrySlot, takeEntryAttach } from './entry-slot.js'
 
 export const name = 'dsh-tui'
 // `tuiWorkspaces` must stay OUT of this code-level inject (issue #183): the
@@ -34,12 +39,29 @@ export const inject = ['agents']
 export interface Config {
   /** Existing session to attach; a fresh session is created when absent. */
   sessionId?: string
-  /** LLM provider route. The route resolves atomically (issue #67): when
-   *  cordis.yml names BOTH `provider` and `model`, that pair wins; otherwise
-   *  the `/model` choice persisted in `~/.dsh-tui/model.json` wins whole;
-   *  otherwise `agentDefaultModel` supplies the provider-neutral Harness
-   *  default. A bare embedder without that service falls back to DeepSeek.
-   *  A provider-only pin never half-overrides the persisted choice. */
+  /** Agent backend the session runs on: `dsh` (default), the DeepSeek
+   *  Harness agent; `claude`, the experimental Claude Agent backend driving
+   *  the local Claude CLI through the Claude Agent SDK (optional peer
+   *  `@anthropic-ai/claude-agent-sdk`); `codex`, the experimental Codex
+   *  backend driving the user's own `codex` CLI over `codex app-server`.
+   *  `dsh-tui --backend <id>` sets it through `DSH_TUI_BACKEND`.
+   *
+   *  A plain `string` on purpose: this is the **input** surface, so an embedder
+   *  writing `{ backend: 'codex' }` keeps compiling. The schema normalizes syntax;
+   *  the boot checks registry membership after assembling installed bundles.
+   *  The `BackendId` brand stays inside the package, where it guards session
+   *  refs and `~/.dsh-tui/backends/<id>/` paths. Declaring the
+   *  branded `KernelBackendId` here breaks published consumers instead
+   *  (PR #1380 review R1). */
+  backend?: string
+  /** LLM provider route. The route resolves atomically (issue #67): the
+   *  `/model` choice persisted in `~/.dsh-tui/model.json` — the route the
+   *  last session ran — wins whole; otherwise a `provider`+`model` pair named
+   *  here is the deployment DEFAULT; otherwise `agentDefaultModel` supplies
+   *  the provider-neutral Harness default. A bare embedder without that
+   *  service falls back to DeepSeek. A half-pinned pair (only one of the two
+   *  keys) is ignored outright and never half-overrides the persisted
+   *  choice. */
   provider?: string
   /** Model override passed to the agent; resolved together with `provider`
    *  as one atomic route (see `provider`). */
@@ -53,11 +75,13 @@ export interface Config {
   workspace?: string
   /** Reasoning effort applied to every request, validated against the live
    *  route's adapter levels (an unlisted level is ignored and the adapter
-   *  default applies). Wins over the persisted /effort choice; also seeds
-   *  the startup status line until the first request header reports the
-   *  live value. */
+   *  default applies). This is the deployment DEFAULT beneath the persisted
+   *  `/effort` choice (the level the last session ran); it also seeds the
+   *  startup status line until the first request header reports the live
+   *  value. */
   effort?: string
-  /** Settings default for future sessions; overrides the `effort` fallback. */
+  /** Settings user-layer default for future sessions; when set it outranks
+   *  both the persisted `/effort` choice and the `effort` fallback. */
   effortDefault?: string
   /** Show the header whale and its idle animation. */
   whale?: boolean
@@ -67,6 +91,10 @@ export interface Config {
    *  id from `components/splashFonts.ts` (`bold`/`square`/…) pinning that one
    *  face. An unknown value falls back to `daily`. */
   splashFont?: SplashFontSetting
+  /** Brand look of the splash and theme (settings `dsh-tui.brand`): `auto`
+   *  (the default) follows the active backend — Claude boots orange;
+   *  `deepseek`/`claude` pin one look. Junk normalizes to `auto`. */
+  brand?: BrandSetting
   /** Swap the header's pixel whale for the static maid portrait. */
   whaleGirl?: boolean
   /** Reduce decorative header content and colors. */
@@ -92,13 +120,20 @@ export interface Config {
    *  /settings choices override this value after restart. The environment
    *  override DSH_TUI_DISABLE_TERMINAL_IMAGES can always force previews off. */
   terminalImages?: boolean
+  /** Launchpad landing page (settings `dsh-tui.launchpad`): an ordinary
+   *  launch (no --resume, no first prompt) starts on the launchpad — the
+   *  page where the first sentence gets typed. On by default; `false` boots
+   *  straight into the chat page. Saved /settings choices override this
+   *  value after restart; DSH_TUI_NO_LAUNCHPAD=1 skips it regardless. */
+  launchpad?: boolean
   /** UI language: `en` / `zh`. When absent, the `DSH_TUI_LANG` env var wins,
    *  then the `/lang` choice persisted in `~/.dsh-tui/lang.json`, then `zh`. */
   lang?: string
   /** Agent preset id new sessions compose from (standard/ptc/minimal/
-   *  cordis/… when the roster is mounted). When absent, the `/preset` choice
-   *  persisted in `~/.dsh-tui/agent-preset.json` wins, then the roster
-   *  default (`standard`). */
+   *  cordis/… when the roster is mounted). A `DSH_TUI_PRESET` launch
+   *  instruction outranks everything; otherwise the `/preset` choice
+   *  persisted in `~/.dsh-tui/agent-preset.json` wins, then this value as
+   *  the deployment default, then the roster default (`standard`). */
   preset?: string
   /** Edit/Write diff presentation: `auto` picks side-by-side on wide
    *  terminals (≥110 cols) and unified below; `split`/`unified` force one
@@ -131,6 +166,11 @@ export interface Config {
    *  `+N lines` hint; Ctrl+O / clicking the card expands it. Default off —
    *  the full title keeps rendering. */
   foldTerminalCommand?: boolean
+  /** Turn-usage ledger row (settings `dsh-tui.turnUsageRow`): the quiet
+   *  right-aligned line that closes each turn in the transcript (tokens
+   *  in/out, cache split, span, retries). Off by default; the ledger data
+   *  feeds /tokens, /status and the footer hover regardless. */
+  turnUsageRow?: boolean
   /** Show the session name as a chip on the prompt top border's right side
    *  (settings `dsh-tui.promptSessionLabel`); off by default. */
   promptSessionLabel?: boolean
@@ -144,6 +184,11 @@ export interface Config {
    *  a ~30fps reveal instead of jumping per provider burst — bursty or
    *  one-shot deliveries read as an even flow. On by default. */
   smoothStreaming?: boolean
+  /** Successful task notifications: off, unfocused (default), or always. */
+  taskNotifications?: TaskNotifications
+  /** Notification transport: auto (default), OSC 9, BEL, or the native Windows
+   *  toast, which off Windows resolves back to the probed terminal protocol. */
+  notificationMethod?: NotificationMethod
   /** Mermaid diagrams (settings `dsh-tui.mermaidDiagrams`): ```mermaid
    *  fences in replies render as Unicode box-drawing art — flowcharts,
    *  sequence/state/class/ER diagrams, pie, mindmap, timeline, gitGraph —
@@ -151,6 +196,13 @@ export interface Config {
    *  than the viewport or of an unsupported type keeps the fenced source.
    *  On by default; off always shows the source. */
   mermaidDiagrams?: boolean
+  /** Code-frame shape (settings `dsh-tui.codeFrameStyle`): `light`
+   *  (default) is the open rail frame — corner + language label on top,
+   *  a left rail with one padding column per row, no right wall or
+   *  bottom edge; `full` closes the box with a right wall (continuous
+   *  across wrapped rows) and a bottom edge. The narrow fallback (net
+   *  body width < 8) always stays the plain ANSI fence. */
+  codeFrameStyle?: CodeFrameStyle
   /** LaTeX math (settings `dsh-tui.mathRendering`): `$…$` / `\(…\)` inline
    *  and `$$…$$` / `\[…\]` blocks in replies. `auto` (default) uses the best
    *  available renderer — today Unicode text: Greek and operator symbols,
@@ -194,9 +246,12 @@ export interface Config {
     /** Chat column as a fraction of the content width, clamped to 0.1–0.95
      *  (default 0.68); +/- while the panel is focused nudges it live. */
     ratio?: number
-    /** Enabled panel ids, comma-separated, in PanelBar order (default
-     *  `todo,jobs,agents`; add `companion` to enable the pet panel). A
-     *  malformed id is dropped, an unknown one survives for a plugin. */
+    /** Which panels the side-panel bar shows, in PanelBar order. `*` (the
+     *  default) means every registered panel — built-ins plus whatever a
+     *  plugin registers later; an explicit comma list means exactly those ids
+     *  (an unknown-but-well-formed id stays as a placeholder for a plugin).
+     *  Registration never rewrites this value: a malformed id is dropped, the
+     *  rest keep their order. */
     panels?: string
   }
   /** Companion pet (settings `dsh-tui.companion.*`): which skin the panel
@@ -205,6 +260,16 @@ export interface Config {
     /** 'deepy' (default, the deepy whale kit) or 'whale' (the splash's
      *  layered pixel whale). Unknown ids normalize to deepy. */
     skin?: string
+  }
+  /** btw thread context (settings `dsh-tui.btw.*`): how much of the side
+   *  thread follows into the next ask. Members normalize (turns clamp
+   *  1-8, budget clamps 1k-200k), so junk cannot wedge the thread. */
+  btw?: {
+    /** Completed Q/A pairs carried into a follow-up ask, 1-8 (default 4). */
+    contextTurns?: number
+    /** Total character budget of that carried context (default 24000;
+     *  the per-answer cap derives internally as min(8k, budget/2)). */
+    contextBudget?: number
   }
   /** Built-in action-shortcut overrides (`paste: 'alt+v'`), keyed by action
    *  id (see the keymap utility). Combos are `ctrl+`/`alt+`/`shift+` plus a
@@ -217,10 +282,31 @@ export interface Config {
    *  `plan`/`sandbox`/`approval` atoms; absent → the built-in
    *  default/plan/full cycle (see sessionModes.ts). */
   modes?: SessionModeSpec[]
+  /** Upstream auto-retry for DSH sessions (default on): seed a retry
+   *  policy (5 attempts, transport-drop-aware failure codes) on the
+   *  llm-pi-ai provider route the bound session actually uses whenever
+   *  it declares no retryPolicy, through the llm-pi-ai settings section
+   *  — the policy the kernel's llm-retry plugin executes. Dormant
+   *  channels are never written; routes with an explicit retryPolicy are
+   *  never overwritten; setting this to false opts out entirely. */
+  upstreamRetry?: boolean
+}
+
+/** The complete two-stage parse: syntax, then registry membership (P0 D1).
+ *  Empty, malformed or unregistered values mean "not configured". Unlike the
+ *  syntax-only Config schema, this helper requires discovery to have run. */
+export function normalizeBackendChoice(value: unknown): KernelBackendId | undefined {
+  return parseBackendChoice(value)
 }
 
 export const Config: Schema<Config, RuntimeConfig<Config>> = editableConfig<Config>(Schema.object({
   sessionId: Schema.string().required(false),
+  // A transform, not a union: the row reads `DSH_TUI_BACKEND`, and a stray
+  // export (`Claude`, a typo) must not fail the whole boot — case and blanks
+  // are normalized here and the id-shape gate drops junk. Cordis validates
+  // before `apply` assembles installed backends: membership must wait until
+  // after that discovery, or a third-party Config choice is erased.
+  backend: Schema.transform(Schema.string(), value => parseBackendId(value)),
   // No schema defaults on the route: a `.default()` here would make an
   // unset key indistinguishable from an explicit cordis.yml choice and the
   // persisted `/model` preference could never win (issue #30). The defaults
@@ -244,6 +330,12 @@ export const Config: Schema<Config, RuntimeConfig<Config>> = editableConfig<Conf
     Schema.string(),
     value => normalizeSplashFont(value),
   ),
+  // 同 splashFont 的 transform 而非 union：cordis.yml 保持决定权，`auto`
+  // 的默认值由 `normalizeBrandSetting` 在每个读取点给出。
+  brand: Schema.transform(
+    Schema.string(),
+    value => normalizeBrandSetting(value),
+  ),
   whaleGirl: Schema.boolean().default(false),
   minimal: Schema.boolean().default(false),
   activity: Schema.boolean().default(true),
@@ -251,6 +343,10 @@ export const Config: Schema<Config, RuntimeConfig<Config>> = editableConfig<Conf
   contextBar: Schema.boolean().default(true),
   fullscreen: Schema.boolean().default(true),
   terminalImages: Schema.boolean().default(true),
+  // No `.default()` on purpose (same rule as recapOnOpen): an unset key must
+  // stay distinguishable from an explicit `false`, and the boot reads
+  // undefined as on (`config.launchpad !== false`).
+  launchpad: Schema.boolean(),
   lang: Schema.string().required(false),
   preset: Schema.string().required(false),
   diffLayout: Schema.union(['auto', 'split', 'unified']).default('auto'),
@@ -266,10 +362,14 @@ export const Config: Schema<Config, RuntimeConfig<Config>> = editableConfig<Conf
     value => normalizePageMargin(value),
   ),
   foldTerminalCommand: Schema.boolean().default(false),
+  turnUsageRow: Schema.boolean().default(false),
   promptSessionLabel: Schema.boolean().default(false),
   expandEditor: Schema.boolean().default(true),
   smoothStreaming: Schema.boolean().default(true),
+  taskNotifications: Schema.union(['off', 'unfocused', 'always']),
+  notificationMethod: Schema.union(['auto', 'osc9', 'bel', 'windows']),
   mermaidDiagrams: Schema.boolean().default(true),
+  codeFrameStyle: Schema.union(['light', 'full']),
   mathRendering: Schema.union(['auto', 'image', 'unicode', 'source']),
   mathImageScale: Schema.union(['auto', 'large', 'xlarge']),
   mathImageBacking: Schema.union(['transparent', 'terminal']),
@@ -303,6 +403,8 @@ export const Config: Schema<Config, RuntimeConfig<Config>> = editableConfig<Conf
     activity: Schema.boolean().default(DEFAULT_STATUS_BAR.activity),
     trajectory: Schema.boolean().default(DEFAULT_STATUS_BAR.trajectory),
     shortcutHint: Schema.boolean().default(DEFAULT_STATUS_BAR.shortcutHint),
+    pluginFields: Schema.boolean().default(DEFAULT_STATUS_BAR.pluginFields),
+    pluginFieldsOrder: Schema.string().default(DEFAULT_STATUS_BAR.pluginFieldsOrder),
   }).default({ ...DEFAULT_STATUS_BAR }),
   // Side-panel preferences, same shape as statusBar: every member carries a
   // default so an unset cordis.yml block and a partially hand-written one
@@ -316,16 +418,30 @@ export const Config: Schema<Config, RuntimeConfig<Config>> = editableConfig<Conf
       value => normalizeSidePanelRatio(value),
     ),
     panels: Schema.transform(
-      Schema.string().default(DEFAULT_SIDE_PANEL_IDS),
+      Schema.string().default(ALL_SIDE_PANELS),
       value => normalizeSidePanelPanels(value),
     ),
-  }).default({ splitEnabled: true, open: false, ratio: 0.68, panels: DEFAULT_SIDE_PANEL_IDS }),
+  }).default({ splitEnabled: true, open: false, ratio: 0.68, panels: ALL_SIDE_PANELS }),
   companion: Schema.object({
     skin: Schema.transform(
       Schema.string().default(DEFAULT_COMPANION_SKIN),
       value => normalizeCompanionSkin(value),
     ),
   }).default({ skin: DEFAULT_COMPANION_SKIN }),
+  // btw thread context: schema defaults + transforms (same shape as
+  // sidePanel above) so an unset cordis.yml block and junk values both
+  // resolve to the documented 4 turns / 24k chars before the stores see
+  // them (the store normalize remains the second, identical gate).
+  btw: Schema.object({
+    contextTurns: Schema.transform(
+      Schema.number().default(BTW_CONTEXT_TURNS_DEFAULT),
+      value => normalizeBtwContextTurns(value),
+    ),
+    contextBudget: Schema.transform(
+      Schema.number().default(BTW_CONTEXT_BUDGET_DEFAULT),
+      value => normalizeBtwContextBudget(value),
+    ),
+  }).default({ contextTurns: BTW_CONTEXT_TURNS_DEFAULT, contextBudget: BTW_CONTEXT_BUDGET_DEFAULT }),
   // One optional combo string per customizable action (no defaults: unset
   // keeps the built-in binding; see Config.shortcuts).
   shortcuts: Schema.object(
@@ -341,6 +457,9 @@ export const Config: Schema<Config, RuntimeConfig<Config>> = editableConfig<Conf
       permission: Schema.string().required(false),
     }),
   ).required(false),
+  // Upstream auto-retry seeding (see upstream-retry.ts): on by default so
+  // an upstream link drop retries like any other transient failure.
+  upstreamRetry: Schema.boolean().default(true),
 }), EDITABLE_CONFIG_KEYS as readonly (keyof Config)[])
 
 /**
@@ -351,6 +470,14 @@ export const Config: Schema<Config, RuntimeConfig<Config>> = editableConfig<Conf
  * @returns a promise settling when the Loader entry has scheduled its runtime.
  */
 export async function apply(ctx: Context, config: RuntimeConfig<Config>): Promise<void> {
+  // The entry already mounted the screen in this process (./entry-slot.ts):
+  // the row only runs the DSH side and hands the session to that screen.
+  const entrySlot = peekEntrySlot()
+  if (entrySlot !== undefined) {
+    entrySlot.rowSeen = true
+    attachToEntry(ctx, config)
+    return
+  }
   // Upstream drift is NO LONGER spammed to stderr here: per-package
   // console.warn lines interleave with the TUI frame redraw and arrive
   // garbled (typewriter animation repaints over them). The merged,
@@ -374,3 +501,49 @@ export async function apply(ctx: Context, config: RuntimeConfig<Config>): Promis
     if (!disposed) handleStartupError(ctx, error)
   })
 }
+
+/** The row under the entry's screen: the DSH side in its own runtime fiber
+ *  once the Loader settled, never a second render; a recompose stays idle. */
+function attachToEntry(ctx: Context, config: RuntimeConfig<Config>): void {
+  let disposed = false
+  ctx.effect(() => () => { disposed = true })
+  const loader = ctx.get('loader') as { await(): Promise<unknown> } | undefined
+  void (loader?.await() ?? ctx.fiber.await()).then(() => {
+    if (disposed) return
+    // Taken only now: a row that unloads before the Loader settled leaves the
+    // first attach to the next row. A later row takes over only once the
+    // previous one unloaded (#1651).
+    const attach = takeEntryAttach() ?? peekEntrySlot()?.reattachDsh?.()
+    if (attach === undefined) {
+      ctx.logger.warn('dsh-tui: the entry\'s screen already holds a DSH session; this dsh-tui row stays idle')
+      return
+    }
+    return ctx.plugin({
+      name: 'dsh-tui-runtime',
+      apply: (runtimeCtx: Context) => attach(runtimeCtx, config, ctx),
+    })
+  }).catch((error: unknown) => {
+    ctx.logger.error(`dsh-tui: the DSH side failed to start under the entry's screen: ${error instanceof Error ? error.message : String(error)}`)
+  })
+}
+
+// ── The Backend contribution family (B-2) ─────────────────────────────────────
+// `alpha`, and deliberately narrow: the *declaration* shape, its validator, the
+// admission verdict and the projection this package uses for its own manifests.
+// A third-party author writes a declaration by hand against exactly this surface
+// (scripts/verify-public-config-types.mjs compiles a real consumer file against
+// the published declarations), and from here on it may only grow — removing any
+// of it is a breaking change. What is NOT here: the registry, the loader and the
+// picker. Those stay the host's; an installed bundle's declaration reaches them
+// through the boot-time assembly (`backend-assembly.ts`, D-1) on top of the W-2
+// admission chain (see docs/plugins.md).
+export {
+  BACKEND,
+  BACKEND_CAPABILITY_NAMES,
+  BACKEND_RESERVED_IDS,
+  validateBackendSpec,
+  type BackendInstallRecipe,
+  type BackendSpec,
+} from '../adapter/spec/tui-contributions.js'
+export { backendAdmission, type BackendAdmission, type BackendAdmissionHost } from './backend-admission.js'
+export { backendContributionOf } from './backend-contribution.js'

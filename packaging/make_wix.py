@@ -96,6 +96,10 @@ def build_wxs(payload: Path, version: str, out: Path, app_name: str = "HooH") ->
     add(f'    <Property Id="ARPNOMODIFY" Value="1" />')
     add(f'    <Property Id="ARPCOMMENTS" Value="Local-first AI coding agent. No Python needed." />')
     add('    <Property Id="ARPURLINFOABOUT" Value="https://github.com/ace-code-engine/hooh-agent" />')
+    # 品牌图标：Add/Remove Programs 里显示 HooH 的「互」徽标。ico 随 PyInstaller
+    # datas（assets/）落在 _internal\assets\，与载荷一起被本脚本收获。
+    add('    <Icon Id="ace.ico" SourceFile="_internal\\assets\\ace.ico" />')
+    add('    <Property Id="ARPPRODUCTICON" Value="ace.ico" />')
 
     # 目录骨架：Program Files\ACE\{,_internal\...}
     # 用真正的递归目录树来生成，而不是"按深度补 </Directory>"——第一版就是那么写的，
@@ -144,7 +148,7 @@ def build_wxs(payload: Path, version: str, out: Path, app_name: str = "HooH") ->
     add('      </Directory>')
     # 开始菜单
     add('      <Directory Id="ProgramMenuFolder">')
-    add('        <Directory Id="AceProgramMenuDir" Name="ACE" />')
+    add('        <Directory Id="AceProgramMenuDir" Name="HooH" />')
     add('      </Directory>')
     add('    </Directory>')
 

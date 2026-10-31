@@ -191,6 +191,8 @@ type Options = {
   /** Paint image fallbacks as blank backing cells and collect placements. */
   terminalImages?: boolean
   imageReady?: (placement: TerminalImagePlacement) => boolean
+  /** Protocol-specific decoded raster size, measured before allocation. */
+  imageRasterBytes?: (placement: TerminalImagePlacement) => number
   /**
    * True when the active protocol paints rasters OVER the cell grid (Sixel)
    * instead of behind it (Kitty). Image-owned cells must then carry the
@@ -214,6 +216,8 @@ export type Operation =
   | NoSelectOperation
   | CopyRegionOperation
   | SoftWrapRowOperation
+  | { type: 'selectionPane'; region: Rectangle; id: string; viewport: boolean }
+  | { type: 'selectionOcclusion'; region: Rectangle; keep: ReadonlySet<string>; source?: Screen; below?: Set<string> }
   | ShiftOperation
 
 /**
@@ -226,6 +230,8 @@ type ShadeOperation = {
   type: 'shade'
   region: Rectangle
 }
+
+export type SoftWrapFlag = boolean | 'gap'
 
 type WriteOperation = {
   type: 'write'
@@ -241,8 +247,10 @@ type WriteOperation = {
    * Undefined means the producer didn't track wrapping (e.g. fills,
    * raw-ansi): the rows it paints are marked "not a continuation", since it
    * replaced whatever was there — see the write case in `get()`.
+   * 'gap' marks a continuation whose separator space was elided because
+   * line i-1 exactly filled the width; copy re-inserts it.
    */
-  softWrap?: boolean[]
+  softWrap?: SoftWrapFlag[]
 }
 
 type ClipOperation = {
@@ -348,9 +356,10 @@ type NoSelectOperation = {
   region: Rectangle
 }
 
-/** Row `y` continues the row above, whose content ends at `contentEnd`. */
+/** Row `y` continues the row above; negative contentEnd restores a separator. */
 type SoftWrapRowOperation = {
   type: 'softWrapRow'
+  x: number
   y: number
   contentEnd: number
 }
@@ -630,6 +639,7 @@ export default class Output {
   terminalImagesEnabled: boolean
   opaqueImageBacking: boolean
   private imageReady: ((placement: TerminalImagePlacement) => boolean) | undefined
+  private imageRasterBytes: ((placement: TerminalImagePlacement) => number) | undefined
 
   private readonly operations: Operation[] = []
   private readonly imagePlacements: TerminalImagePlacement[] = []
@@ -697,6 +707,7 @@ export default class Output {
     this.terminalImagesEnabled = options.terminalImages ?? false
     this.opaqueImageBacking = options.opaqueImageBacking ?? false
     this.imageReady = options.imageReady
+    this.imageRasterBytes = options.imageRasterBytes
     this.previousImages = options.previousImages ?? []
 
     resetScreen(screen, width, height)
@@ -720,6 +731,7 @@ export default class Output {
     previousImages: readonly TerminalImagePlacement[] = [],
     imageReady?: (placement: TerminalImagePlacement) => boolean,
     opaqueImageBacking = false,
+    imageRasterBytes?: (placement: TerminalImagePlacement) => number,
   ): void {
     this.width = width
     this.height = height
@@ -727,6 +739,7 @@ export default class Output {
     this.terminalImagesEnabled = terminalImages
     this.opaqueImageBacking = opaqueImageBacking
     this.imageReady = imageReady
+    this.imageRasterBytes = imageRasterBytes
     this.previousImages = previousImages
     this.operations.length = 0
     this.imagePlacements.length = 0
@@ -792,11 +805,42 @@ export default class Output {
    * @param region - the region to mark.
    */
   /** Mark row `y` as a wrap continuation (see Styles.softWrapContinuation). */
-  softWrapRow(y: number, contentEnd: number): void {
-    this.operations.push({ type: 'softWrapRow', y, contentEnd })
+  softWrapRow(y: number, contentEnd: number, x = 0): void {
+    this.operations.push({ type: 'softWrapRow', x, y, contentEnd })
+  }
+
+  selectionPane(region: Rectangle, id: string, viewport = false): void {
+    const clip = this.imageClips.at(-1)
+    const x = Math.ceil(Math.max(0, region.x, clip?.x1 ?? 0))
+    const y = Math.ceil(Math.max(0, region.y, clip?.y1 ?? 0))
+    const right = Math.floor(Math.min(this.width, region.x + region.width, clip?.x2 ?? this.width))
+    const bottom = Math.floor(Math.min(this.height, region.y + region.height, clip?.y2 ?? this.height))
+    if (right > x && bottom > y) this.operations.push({ type: 'selectionPane', id, viewport, region: { x, y, width: right - x, height: bottom - y } })
+  }
+
+  /** A later opaque surface hides both pane ownership and earlier gutters. */
+  selectionOcclusion(region: Rectangle, keep: ReadonlySet<string>, source?: Screen): void {
+    const clip = this.imageClips.at(-1)
+    const x = Math.ceil(Math.max(0, region.x, clip?.x1 ?? 0))
+    const y = Math.ceil(Math.max(0, region.y, clip?.y1 ?? 0))
+    const right = Math.floor(Math.min(this.width, region.x + region.width, clip?.x2 ?? this.width))
+    const bottom = Math.floor(Math.min(this.height, region.y + region.height, clip?.y2 ?? this.height))
+    if (right > x && bottom > y) this.operations.push({ type: 'selectionOcclusion', keep, source, region: { x, y, width: right - x, height: bottom - y } })
   }
 
   noSelect(region: Rectangle): void {
+    // Masks are applied after all paint operations, when the clip stack
+    // has unwound. Capture the visible part now so a long decorated run
+    // cannot exclude selectable cells on a neighboring surface.
+    const clip = this.imageClips.at(-1)
+    if (clip !== undefined) {
+      const x = Math.ceil(Math.max(0, region.x, clip.x1 ?? 0))
+      const y = Math.ceil(Math.max(0, region.y, clip.y1 ?? 0))
+      const right = Math.floor(Math.min(this.width, region.x + region.width, clip.x2 ?? this.width))
+      const bottom = Math.floor(Math.min(this.height, region.y + region.height, clip.y2 ?? this.height))
+      if (right <= x || bottom <= y) return
+      region = { x, y, width: right - x, height: bottom - y }
+    }
     this.operations.push({ type: 'noSelect', region })
   }
 
@@ -829,6 +873,7 @@ export default class Output {
     }
     const presentation = node.attributes.imagePresentation
     const transparent = node.attributes.imageTransparent === 'transparent'
+    const lineArt = node.attributes.imageLineArt === 'lineArt'
     // Both protocols crop a partially visible content image to its visible
     // cells (Sixel re-encodes the slice, Kitty places a source rectangle), so
     // scrolling past a viewport edge never flips it to its text fallback.
@@ -856,13 +901,6 @@ export default class Output {
     const visibleRight = Math.min(this.width, left + width, Math.floor(clip?.x2 ?? this.width))
     const visibleBottom = Math.min(this.height, top + height, Math.floor(clip?.y2 ?? this.height))
     if (visibleRight <= visibleLeft || visibleBottom <= visibleTop) return false
-    const decodedBytes = source.data.byteLength
-    if (
-      this.imageDecodedBytes + decodedBytes >
-      TERMINAL_IMAGE_MAX_FRAME_BYTES
-    ) {
-      return false
-    }
     const placement: TerminalImagePlacement = {
       node,
       x: left,
@@ -872,9 +910,14 @@ export default class Output {
       source,
       ...(presentation === 'preview' || presentation === 'transcript' ? { presentation } : {}),
       ...(transparent ? { transparent: true } : {}),
+      ...(lineArt ? { lineArt: true } : {}),
       ...(canCrop ? { clip: { x: visibleLeft, y: visibleTop, columns: visibleRight - visibleLeft, rows: visibleBottom - visibleTop } } : {}),
       ...(background !== undefined ? { background } : {}),
     }
+    // Bound both decoded sources and fitted uploads: downsampling
+    // must not admit more source data, and upscaling must not evade the cap.
+    const decodedBytes = Math.max(source.data.byteLength, this.imageRasterBytes?.(placement) ?? 0)
+    if (this.imageDecodedBytes + decodedBytes > TERMINAL_IMAGE_MAX_FRAME_BYTES) return false
     const graphicsReady = this.imageReady?.(placement)
     this.imagePlacements.push(graphicsReady === undefined ? placement : { ...placement, graphicsReady })
     this.imageNodes.add(node)
@@ -1011,7 +1054,7 @@ export default class Output {
    * @param softWrap - per-line soft-wrap flags parallel to text.split('\n').
    * @param lines - optional pre-split physical lines, exactly text.split('\n').
    */
-  write(x: number, y: number, text: string, softWrap?: boolean[], lines?: readonly string[]): void {
+  write(x: number, y: number, text: string, softWrap?: SoftWrapFlag[], lines?: readonly string[]): void {
     if (!text) {
       return
     }
@@ -1061,6 +1104,12 @@ export default class Output {
    */
   get(): Screen {
     const screen = this.screen
+    const paneWrap = (row: number, x: number, end: number, wrap: number): void => {
+      for (const rows of screen.selectionPanes?.values() ?? []) {
+        const span = rows.get(row)
+        if (span && x < span.end && end > span.start) span.wrap = wrap
+      }
+    }
     const screenWidth = this.width
     const screenHeight = this.height
 
@@ -1188,13 +1237,31 @@ export default class Output {
           continue
         }
 
+        case 'selectionOcclusion':
+          operation.below = new Set(screen.selectionPanes?.keys())
+          continue
+
+        case 'selectionPane': {
+          // Ownership follows paint order, just like noSelect/copyRegion.
+          // A cached child contributes its spans through its own blit.
+          screen.selectionPanes ??= new Map()
+          let rows = screen.selectionPanes.get(operation.id)
+          if (!rows) screen.selectionPanes.set(operation.id, rows = new Map())
+          for (let row = operation.region.y; row < operation.region.y + operation.region.height; row++) {
+            rows.set(row, { start: operation.region.x, end: operation.region.x + operation.region.width, wrap: 0, viewport: operation.viewport })
+          }
+          continue
+        }
+
         case 'softWrapRow': {
           // Paint order: the marker lands where the producer asked for it, and
           // the write case above resets it when a later operation repaints that
           // row. (This used to run in a pass after every write, which let a
           // marker outlive an overlay that overwrote the row.)
           if (operation.y > 0 && operation.y < screen.height) {
-            screen.softWrap[operation.y] = Math.max(1, operation.contentEnd)
+            const contentEnd = Math.max(1, Math.abs(operation.contentEnd))
+            screen.softWrap[operation.y] = operation.contentEnd < 0 ? -contentEnd : contentEnd
+            paneWrap(operation.y, operation.x, contentEnd, screen.softWrap[operation.y]!)
           }
           continue
         }
@@ -1257,7 +1324,7 @@ export default class Output {
           const writeX = clipHorizontally ? Math.max(x, clip.x1!) : x
           // Copy joins need only the preceding (horizontally clipped) line,
           // not every discarded line. Preserve its content-end coordinate.
-          if (softWrap && from > 0 && softWrap[from] === true) {
+          if (softWrap && from > 0 && softWrap[from]) {
             prevContentEnd = writeX + stringWidth(clipLine(lines[from - 1]!))
           }
           lines = lines.slice(from, to)
@@ -1293,8 +1360,8 @@ export default class Output {
             // from writeLineToScreen is tab-expansion-aware, unlike
             // x+stringWidth(line) which treats tabs as width 0.
             if (softWrap) {
-              const isSW = softWrap[swFrom + offsetY] === true
-              swBits[lineY] = isSW ? prevContentEnd : 0
+              const flag = softWrap[swFrom + offsetY]
+              swBits[lineY] = flag === 'gap' ? -prevContentEnd : flag ? prevContentEnd : 0
               prevContentEnd = contentEnd
             } else {
               // Paint order: a producer that doesn't track wrapping (fills,
@@ -1304,6 +1371,7 @@ export default class Output {
               // onto the previous line.
               swBits[lineY] = 0
             }
+            paneWrap(lineY, x, contentEnd, swBits[lineY]!)
             offsetY++
           }
           continue
@@ -1320,6 +1388,28 @@ export default class Output {
       if (operation.type === 'noSelect') {
         const { x, y, width, height } = operation.region
         markNoSelectRegion(screen, x, y, width, height)
+      } else if (operation.type === 'selectionOcclusion') {
+        const { x, y, width, height } = operation.region
+        for (let row = y; row < y + height; row++) {
+          const offset = row * screen.width + x
+          screen.noSelect.fill(0, offset, offset + width)
+          if (operation.source) screen.noSelect.set(operation.source.noSelect.subarray(offset, offset + width), offset)
+          for (const id of operation.below ?? []) {
+            if (operation.keep.has(id)) continue
+            const rows = screen.selectionPanes?.get(id)
+            const span = rows?.get(row)
+            if (span && x < span.end && x + width > span.start) {
+              const excluded = [...(span.excluded ?? []), { start: Math.max(x, span.start), end: Math.min(x + width, span.end) }].sort((a, b) => a.start - b.start)
+              const merged: { start: number; end: number }[] = []
+              for (const range of excluded) {
+                const last = merged.at(-1)
+                if (last && last.end >= range.start) last.end = Math.max(last.end, range.end)
+                else merged.push({ ...range })
+              }
+              rows!.set(row, { ...span, excluded: merged })
+            }
+          }
+        }
       }
     }
 

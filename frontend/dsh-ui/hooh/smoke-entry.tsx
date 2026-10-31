@@ -46,7 +46,10 @@ async function main(): Promise<void> {
   const stdout = new FakeOut()
   const snap: AceSnapshot = {
     version: '1.1.0', model: 'deepseek-v4-flash', permission: 'readonly', cwd: root,
-    effort: 'max', preset: 'code', commands: ['/help'],
+    effort: 'max', preset: 'code',
+    commands: ['/help'].map((name) => ({
+      name: name.slice(1), description: name, replacement: name, commandLine: name,
+    })),
   }
 
   // ① 首屏（还没接引擎）

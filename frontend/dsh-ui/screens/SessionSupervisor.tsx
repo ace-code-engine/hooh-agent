@@ -1,4 +1,4 @@
-import React, { useCallback, useMemo, useRef, useState } from 'react'
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { basename } from 'node:path'
 import { Box, Text, useInput, useTerminalSize } from '../ui.js'
 import { t } from '../i18n.js'
@@ -13,11 +13,12 @@ import { HomeWorkspaceRow } from '../components/workspaces/HomeWorkspaceRow.js'
 import { SessionListRow } from '../components/sessions/SessionListRow.js'
 import { SpinnerGlyph } from '../components/Spinner/SpinnerGlyph.js'
 import { ApprovalPanel } from '../components/approvals/ApprovalPanel.js'
-import type { ApprovalSnapshot } from '../dsh-adapter/approvals.js'
+import type { PermissionPanelDecision, PermissionPanelOutcome, PermissionPanelSnapshot } from '../channel/permissions.js'
 import { useTerminalFocus } from '../ink/hooks/use-terminal-focus.js'
-import { useAnimationFrame } from '../ink/hooks/use-animation-frame.js'
+import { useDeclaredCursor, useNativeCursor } from '../ink/hooks/use-declared-cursor.js'
 import { isPlainReturn, isMod } from '../utils/modifiers.js'
-import { truncateWidth } from '../sessions/format.js'
+import { truncateWidth, wrapPathWidth } from '../sessions/format.js'
+import { clearTooltip, useTooltip } from '../components/Tooltip.js'
 import { normalizeWorkspaceCwd } from '../sessions/view.js'
 import { readSessionPins, setSessionPinned } from '../sessionPins.js'
 import { readSessionOwners, type SessionMountOwner } from '../sessionMounts.js'
@@ -88,8 +89,8 @@ export function SessionSupervisor({
    * permission prompt is answerable without leaving this screen — the one
    * thing a parked session cannot wait indefinitely for.
    */
-  approval: ApprovalSnapshot | null
-  onApprove(outcome: 'allowed-once' | 'rejected'): void
+  approval: PermissionPanelSnapshot | null
+  onApprove(outcome: PermissionPanelOutcome, decision: PermissionPanelDecision): void
   /**
    * This terminal's live state for a session, or undefined when it has none.
    * Read from the channel's agent-view projection so the list agrees with the
@@ -102,6 +103,14 @@ export function SessionSupervisor({
   const isTerminalFocused = useTerminalFocus()
 
   const {
+    dshBackend,
+    archiveSessions,
+    sessionRename,
+    setSessionRename,
+    confirmDelete,
+    setConfirmDelete,
+    renameSession,
+    deleteSession,
     entries,
     sessions,
     loading,
@@ -168,8 +177,30 @@ export function SessionSupervisor({
   const [tab, setTab] = useState<string>(DSH_TAB)
   /** The `+N` dropdown of folded tabs, anchored where it was clicked. */
   const [tabMenu, setTabMenu] = useState<{ col: number; row: number; item: number } | undefined>(undefined)
+  // Like ModelPicker, the native caret follows the region last touched.
+  // The live filter keeps the rail/list's existing navigation and Enter target.
+  const [filterFocused, setFilterFocused] = useState(false)
+  const cursorActive = approval === null && menu === undefined && tabMenu === undefined
+    && rename === undefined && confirmRemove === undefined && sessionRename === undefined && confirmDelete === undefined
+  const searchCursor = filterFocused || (!railVisible && activePane === 'rail')
+  const nativeCursor = useNativeCursor()
+  const newSessionCursorRef = useDeclaredCursor({
+    line: 0, column: 0, active: tab === DSH_TAB && cursorActive && !searchCursor && cardFocused,
+    visible: nativeCursor, hideOnIdle: true,
+  })
+  const focusRail = (): void => {
+    setFilterFocused(false)
+    activateRail()
+  }
+  const focusList = (): void => {
+    setFilterFocused(false)
+    activateList()
+  }
   const tabMenuRef = useRef(tabMenu)
   tabMenuRef.current = tabMenu
+  /** The session-rename draft as the keyboard sees it (see the input handler). */
+  const sessionRenameRef = useRef(sessionRename)
+  sessionRenameRef.current = sessionRename
   const foreign = useForeignSessions({ channel, tab, registry: entries, query, setNotice, onOpenSession })
 
   /**
@@ -178,9 +209,13 @@ export function SessionSupervisor({
    * each time this screen opens.
    */
   const tabs = useMemo<readonly SourceTab[]>(() => {
+    // Another backend's screen lists that backend's sessions: its one tab
+    // names it (foreign imports are a DSH feature and never probed there).
+    // oxlint-disable-next-line typescript/no-unnecessary-condition -- runtime guard: headless hosts pass partial channels
+    if (!dshBackend) return [{ id: DSH_TAB, label: channel.backendCapabilities?.backendLabel ?? DSH_TAB }]
     if (foreign.sources.length === 0) return []
     return [{ id: DSH_TAB, label: 'DSH' }, ...foreign.sources.map(source => ({ id: source.agentId, label: source.label }))]
-  }, [foreign.sources])
+  }, [foreign.sources, dshBackend, channel.backendCapabilities])
   const activeSource = foreign.sources.find(source => source.agentId === tab)
 
   // A source that vanished on refresh takes its tab with it; land on DSH
@@ -199,6 +234,7 @@ export function SessionSupervisor({
     closeMenu()
     closeTabMenu()
     setQuery('')
+    setFilterFocused(false)
     setNotice(undefined)
     setTab(id)
   }, [closeMenu, closeTabMenu, setQuery, setNotice])
@@ -211,6 +247,43 @@ export function SessionSupervisor({
 
   useInput((input, key) => {
     // Modal layers own the keyboard, in the same order they render.
+    // The draft is read through a ref: keystrokes that arrive in one batch
+    // (typing, then Enter) must commit everything typed, not the last render.
+    const renaming = sessionRenameRef.current
+    if (renaming !== undefined) {
+      const update = (next: { id: string; draft: string } | undefined): void => {
+        sessionRenameRef.current = next
+        setSessionRename(next)
+      }
+      if (key.escape) {
+        update(undefined)
+        return
+      }
+      if (isPlainReturn(key)) {
+        update(undefined)
+        renameSession(renaming.id, renaming.draft)
+        return
+      }
+      if (key.backspace || key.delete) {
+        update({ ...renaming, draft: renaming.draft.slice(0, -1) })
+        return
+      }
+      if (!isMod(key) && !key.meta && input && !key.return) {
+        const typed = input.replace(/[\r\n]+/gu, '')
+        if (typed !== '') update({ ...renaming, draft: renaming.draft + typed })
+      }
+      return
+    }
+    if (confirmDelete !== undefined) {
+      if (isPlainReturn(key)) {
+        const target = listedSessions.find(candidate => candidate.id === confirmDelete)
+        setConfirmDelete(undefined)
+        if (target !== undefined) deleteSession(target)
+      } else if (key.escape) {
+        setConfirmDelete(undefined)
+      }
+      return
+    }
     if (rename !== undefined) {
       if (key.escape) {
         setRename(undefined)
@@ -285,6 +358,7 @@ export function SessionSupervisor({
         return
       }
       if (queryRef.current.length > 0) {
+        setFilterFocused(true)
         setQuery('')
         return
       }
@@ -297,6 +371,9 @@ export function SessionSupervisor({
       // the route was given up to the tabs.
       cycleTab(key.shift ? -1 : 1)
       return
+    }
+    if (key.leftArrow || key.rightArrow || key.upArrow || key.downArrow || key.wheelUp || key.wheelDown || key.pageUp || key.pageDown) {
+      setFilterFocused(false)
     }
     if (tab !== DSH_TAB) {
       foreignKey(input, key)
@@ -327,12 +404,10 @@ export function SessionSupervisor({
       else moveRail(key.pageDown ? 1 : -1)
       return
     }
-    // The filter is a LIVE query, not a mode you enter: this screen has no
-    // second cursor for a text seat, and the rail/list already own the arrows
-    // (a seat would have to relearn them). So printable input goes straight to
-    // the query — without this branch the box rendered, focused, and could never
-    // be typed into.
+    // Typing moves the native caret into the live filter; arrows and Enter
+    // still belong to the rail/list, so filtering adds no separate input mode.
     if (key.backspace || key.delete) {
+      setFilterFocused(true)
       setQuery(text => text.slice(0, -1))
       return
     }
@@ -347,6 +422,20 @@ export function SessionSupervisor({
     }
     if (isMod(key) && input === 'x') {
       if (focusedSession !== undefined) stopSession(focusedSession)
+      return
+    }
+    // Another backend's stored sessions are renamed / deleted through its
+    // catalog (the DSH screen keeps its keys exactly as they were).
+    if (!dshBackend && isMod(key) && input === 'r') {
+      if (activePane === 'list' && focusedSession !== undefined) {
+        const next = { id: focusedSession.id, draft: focusedSession.title.text }
+        sessionRenameRef.current = next
+        setSessionRename(next)
+      }
+      return
+    }
+    if (!dshBackend && isMod(key) && input === 'd') {
+      if (activePane === 'list' && focusedSession !== undefined) setConfirmDelete(focusedSession.id)
       return
     }
     if (isPlainReturn(key)) {
@@ -382,17 +471,16 @@ export function SessionSupervisor({
     // unknown key cannot type an invisible glyph into the query.
     if (!isMod(key) && !key.meta && !key.super && input && !key.return) {
       const typed = input.replace(/\p{Cc}/gu, '')
-      if (typed.length > 0) setQuery(text => text + typed)
+      if (typed.length > 0) {
+        setFilterFocused(true)
+        setQuery(text => text + typed)
+      }
     }
   })
 
-  // Working rows animate their glyph. The shared clock only runs while at
-  // least one row is working, so an idle screen costs no extra ticks.
   const workingCount = listedSessions.filter(
     session => liveStateOf(session.id)?.status === 'working',
   ).length
-  const [, spinnerTime] = useAnimationFrame(workingCount > 0 ? 120 : null)
-  const spinnerFrame = Math.floor(spinnerTime / 120)
 
   /**
    * Keys on a source tab: the same pane model as DSH (←/→ pick the column,
@@ -416,6 +504,7 @@ export function SessionSupervisor({
       return
     }
     if (key.backspace || key.delete) {
+      setFilterFocused(true)
       setQuery(text => text.slice(0, -1))
       return
     }
@@ -432,7 +521,10 @@ export function SessionSupervisor({
     }
     if (!key.meta && !key.super && input && !key.return) {
       const typed = input.replace(/\p{Cc}/gu, '')
-      if (typed.length > 0) setQuery(text => text + typed)
+      if (typed.length > 0) {
+        setFilterFocused(true)
+        setQuery(text => text + typed)
+      }
     }
   }
 
@@ -449,8 +541,9 @@ export function SessionSupervisor({
   const tabBudget = columns - stringWidth(titleText) - (showSubtitle ? stringWidth(subtitleText) : 0) - HEADER_GAPS
   const tabLayout = layoutSourceTabs(tabs, tab, tabBudget)
   const tabMenuWidth = Math.max(12, ...tabLayout.hidden.map(hidden => stringWidth(hidden.label) + 6))
-  const withTabHint = (text: string): string => (tabs.length === 0 ? text : `${text} · ${t('supervisor-hint-tabs')}`)
+  const withTabHint = (text: string): string => (tabs.length < 2 ? text : `${text} · ${t('supervisor-hint-tabs')}`)
 
+  const listHint = dshBackend ? t('supervisor-hint-list') : t(archiveSessions ? 'supervisor-hint-list-archive' : 'supervisor-hint-list-backend')
   const railHint = rename !== undefined
     ? t('home-hint-rename')
     : confirmRemove !== undefined
@@ -459,22 +552,34 @@ export function SessionSupervisor({
         ? t('home-hint-menu')
         : activePane === 'rail'
           ? withTabHint(t('home-hint-list'))
-          : withTabHint(t('supervisor-hint-list'))
+          : withTabHint(listHint)
 
-  const railWindowTopIndex = railWindowTop(railFocus, railEntries.length, railEntryCapacity)
-  const visibleRailRows = railEntries.slice(railWindowTopIndex, railWindowTopIndex + railEntryCapacity)
   /** Content-local anchor for a keyboard-opened menu (screen coords minus inset). */
   const keyboardMenuAnchor = { col: inset.x + 2, row: inset.y + 3 }
   const filtered = query.trim().length > 0
 
-  // Scroll window over the session rows, keeping the focused row visible
-  // without re-shuffling the list under a stationary cursor.
-  //
-  // The new-session card is a permanent row above this window, so the window is
-  // one card shorter and the cursor is expressed in the FULL list's space (card =
-  // 0): without that offset the window kept its old height and the cursor could
-  // land on a row that never made it on screen — a `❯` on an invisible row.
-  const capacity = Math.max(1, Math.floor(sessionListHeight / SESSION_ROW_LINES))
+  // Keep the selected directory in one place for DSH and external sources.
+  // Wrap instead of animating a marquee; unusually long paths remain in the tooltip.
+  const selectedPath = tab === DSH_TAB
+    ? selected?.path === UNREGISTERED_RAIL_ID ? undefined : selected?.path
+    : foreign.selected?.path || undefined
+  const pathWidth = Math.max(1, columns - 2)
+  const wrappedPath = selectedPath === undefined ? [] : wrapPathWidth(selectedPath, pathWidth)
+  const maxPathRows = Math.max(1, Math.min(4, Math.floor(rows / 4)))
+  const pathClipped = wrappedPath.length > maxPathRows
+  const pathLines = wrappedPath.slice(0, maxPathRows)
+  if (pathClipped) pathLines[pathLines.length - 1] = truncateWidth(`${pathLines[pathLines.length - 1]}…`, pathWidth)
+  const pathTooltip = useTooltip(() => pathClipped ? selectedPath ?? '' : '')
+  // A keyboard selection change leaves the pointer still, so close the previous path's tooltip.
+  useEffect(() => { clearTooltip() }, [selectedPath])
+  const pathRows = pathLines.length
+  const visibleRailCapacity = Math.max(1, railEntryCapacity - Math.ceil(pathRows / WORKSPACE_ROW_LINES))
+  const railWindowTopIndex = railWindowTop(railFocus, railEntries.length, visibleRailCapacity)
+  const visibleRailRows = railEntries.slice(railWindowTopIndex, railWindowTopIndex + visibleRailCapacity)
+
+  // The new-session card is row 0; reserve its space and the path bar before
+  // deriving the visible session window, so the focused row never gets clipped.
+  const capacity = Math.max(1, Math.floor((sessionListHeight - pathRows) / SESSION_ROW_LINES))
   const sessionCapacity = Math.max(1, capacity - 1)
   let sessionTop = Math.min(
     Math.max(0, sessionIndex - 1 - sessionCapacity + 1),
@@ -515,6 +620,11 @@ export function SessionSupervisor({
         )}
       </Box>
       <Divider bleed />
+      {pathRows > 0 && (
+        <Box flexDirection="column" flexShrink={0} paddingX={1} {...pathTooltip}>
+          {pathLines.map((line, index) => <Text key={index} dimColor>{line}</Text>)}
+        </Box>
+      )}
       {tab !== DSH_TAB && (
         <ForeignSessionPanes
           model={foreign}
@@ -525,10 +635,13 @@ export function SessionSupervisor({
           notice={notice}
           railVisible={railVisible}
           railWidth={railWidth}
-          railEntryCapacity={railEntryCapacity}
+          railEntryCapacity={visibleRailCapacity}
           sessionWidth={sessionWidth}
-          rows={rows}
+          rows={rows - pathRows}
           isTerminalFocused={isTerminalFocused}
+          filterFocused={filterFocused}
+          cursorActive={cursorActive}
+          onFilterFocus={setFilterFocused}
         />
       )}
       {tab === DSH_TAB && (
@@ -536,9 +649,10 @@ export function SessionSupervisor({
         {railVisible && (
           <ink-box
             style={{ flexDirection: 'column', width: railWidth, height: '100%', flexShrink: 0, overflow: 'hidden' }}
-            onClick={activateRail}
-            onMouseEnter={activateRail}
+            onClick={focusRail}
+            onMouseEnter={focusRail}
             onWheel={(event: WheelEvent): void => {
+              setFilterFocused(false)
               moveRail(event.deltaY >= 0 ? 1 : -1)
             }}
           >
@@ -568,9 +682,11 @@ export function SessionSupervisor({
                   present={entry.present}
                   selected={selected !== undefined && selected.id === entry.id}
                   focused={activePane === 'rail' && railFocus === absolute}
+                  declareCursor={cursorActive && !searchCursor}
                   width={railWidth}
                   onSelect={(event): void => {
                     event.stopImmediatePropagation()
+                    setFilterFocused(false)
                     railRef.current = absolute
                     setRailFocus(absolute)
                     selectEntry(entry)
@@ -605,28 +721,35 @@ export function SessionSupervisor({
           height="100%"
           flexShrink={0}
           overflow="hidden"
-          onClick={activateList}
-          onMouseEnter={activateList}
+          onClick={focusList}
+          onMouseEnter={focusList}
         >
           <Box height={1} flexShrink={0} overflow="hidden">
             <Box flexShrink={1} overflow="hidden">
               <Text color="remember" bold>{truncateWidth(` ${t('home-sessions-title', { name: selected?.title ?? t('supervisor-title') })}`, Math.max(4, sessionWidth - 3))}</Text>
               <Text dimColor>
                 {`  ${truncateWidth(
-                  t('supervisor-counts', { working: workingCount, live: liveCount, total: visibleSessions.length }) + (refreshing ? ` · ${t('home-sessions-refreshing')}` : ''),
+                  (railVisible
+                    ? t('supervisor-counts', { working: workingCount, live: liveCount, total: visibleSessions.length })
+                    : String(visibleSessions.length)) + (refreshing ? ` · ${t('home-sessions-refreshing')}` : ''),
                   Math.max(4, sessionWidth - 3),
                 )}`}
               </Text>
             </Box>
           </Box>
-          <Box height={1} flexShrink={0} paddingX={1}>
-            {/* Always live: the keyboard feeds this query on every printable
-                key (see useInput), so a box that is "unfocused" while the
-                cursor rests on the first rail entry would be a lie — and it is
-                exactly where the cursor starts. */}
+          <Box height={1} flexShrink={0} paddingX={1} onClick={event => {
+            event.stopImmediatePropagation()
+            activateList()
+            setFilterFocused(true)
+          }} onMouseEnter={event => {
+            event.stopImmediatePropagation()
+            if (activePane !== 'list') activateList()
+            setFilterFocused(true)
+          }}>
             <SearchBox
               query={query}
-              isFocused={activePane === 'list'}
+              isFocused={activePane === 'list' || searchCursor}
+              declareCursor={cursorActive && searchCursor}
               isTerminalFocused={isTerminalFocused}
               placeholder={truncateWidth(t('supervisor-filter-placeholder'), Math.max(8, sessionWidth - 6))}
               prefix="/"
@@ -645,6 +768,7 @@ export function SessionSupervisor({
           <Box
             flexDirection="column"
             flexShrink={0}
+            onMouseEnter={() => setFilterFocused(false)}
             onClick={(event: ClickEvent): void => {
               event.stopImmediatePropagation()
               if (selected !== undefined) newSessionIn(selected)
@@ -652,7 +776,7 @@ export function SessionSupervisor({
           >
             {/* Row 0 of the session list, so it carries the cursor like any
                 other card — and only while the cursor is actually on it. */}
-            <Box height={1} flexShrink={0} overflow="hidden">
+            <Box ref={newSessionCursorRef} height={1} flexShrink={0} overflow="hidden">
               <Text color={cardFocused ? 'success' : 'subtle'}>{cardFocused ? '❯ ' : '  '}</Text>
               <Text color={cardFocused ? 'success' : undefined} bold={cardFocused}>{t('supervisor-new-session')}</Text>
             </Box>
@@ -662,7 +786,9 @@ export function SessionSupervisor({
           </Box>
           <ink-box
             style={{ flexDirection: 'column', flexGrow: 1, flexShrink: 1, overflow: 'hidden' }}
+            onMouseEnter={() => setFilterFocused(false)}
             onWheel={(event: WheelEvent): void => {
+              setFilterFocused(false)
               moveSession(event.deltaY >= 0 ? 1 : -1)
             }}
           >
@@ -682,18 +808,19 @@ export function SessionSupervisor({
                   width={sessionWidth}
                   depth={0}
                   focused={activePane === 'list' && sessionTop + index + 1 === sessionIndex}
+                  declareCursor={cursorActive && !searchCursor}
                   pinned={pins.has(session.id)}
                   now={now}
                   liveStatus={state?.live === true ? state.status : undefined}
                   current={state?.current === true}
                   occupiedPid={holder}
-                  spinner={{ frame: spinnerFrame, time: spinnerTime }}
                   onClick={(event): void => {
                     event.stopImmediatePropagation()
                     setFocusSessionId(session.id)
                     openSession(session)
                   }}
                   onTogglePin={(): void => {
+                    setFilterFocused(false)
                     setFocusSessionId(session.id)
                     persistPin(session.id, !pins.has(session.id))
                   }}
@@ -716,13 +843,33 @@ export function SessionSupervisor({
           </Box>
           <Box flexShrink={0}>
             <Text dimColor italic>
-              <HintLine text={filtered ? t('supervisor-hint-filter') : withTabHint(t('supervisor-hint-list'))} />
+              <HintLine text={sessionRename !== undefined ? t('supervisor-hint-session-rename') : filtered ? t('supervisor-hint-filter') : withTabHint(listHint)} />
             </Text>
           </Box>
         </Box>
       </Box>
       )}
 
+      {sessionRename !== undefined && (
+        <Box height={1} flexShrink={0}>
+          <SearchBox
+            query={sessionRename.draft}
+            isFocused
+            isTerminalFocused={isTerminalFocused}
+            placeholder={t('home-rename-placeholder')}
+            prefix="✎"
+            borderless
+            width="100%"
+          />
+        </Box>
+      )}
+      {confirmDelete !== undefined && (
+        <Box flexShrink={0} paddingX={1}>
+          <Text color="error">
+            {truncateWidth(` ${t(archiveSessions ? 'supervisor-archive-confirm' : 'supervisor-delete-confirm', { name: listedSessions.find(candidate => candidate.id === confirmDelete)?.title.text ?? confirmDelete })}`, columns - 3)}
+          </Text>
+        </Box>
+      )}
       {rename !== undefined && (
         <Box height={1} flexShrink={0}>
           <SearchBox

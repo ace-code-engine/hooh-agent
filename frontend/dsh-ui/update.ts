@@ -4,13 +4,26 @@ import { appendFileSync, chmodSync, copyFileSync, existsSync, lstatSync, mkdirSy
 import { homedir } from 'node:os'
 import { dirname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { gte, gt, lt, valid } from 'semver'
+// Per-function imports: this file loads before the first frame.
+import gt from 'semver/functions/gt.js'
+import gte from 'semver/functions/gte.js'
+import lt from 'semver/functions/lt.js'
+import valid from 'semver/functions/valid.js'
 import { shellQuote } from './utils/shellQuote.js'
 import { DATA_DIR } from './utils/paths.js'
+import { stripResumeArgs } from './sessionHistory.js'
+import { HOST_ENTRY_PATH_ENV, KERNEL_SWITCH_HANDOFF_ENV, RESUME_BACKEND_ENV, RESUME_RETRY_ENV, hostEntryDisabled, parseBackendId, type KernelBackendId } from './kernelPrefs.js'
+import { classifyReplacementOutcome, formatHandoffNotice, handoffEventTag, writeHandoffStage } from './handoffEvents.js'
+import { HANDOFF_ACK_FD_ENV, HANDOFF_ATTEMPT_ENV, HANDOFF_SCREEN_ENV, parseHandoffAckLine } from './handoffAck.js'
+import { DISABLE_KITTY_KEYBOARD, DISABLE_MODIFY_OTHER_KEYS, DISABLE_WIN32_INPUT_MODE } from './ink/termio/csi.js'
+import { DBP, DFE, DISABLE_MOUSE_TRACKING, EXIT_ALT_SCREEN, SHOW_CURSOR } from './ink/termio/dec.js'
+import { detachHandoffStdin } from './ink/stdin-handoff.js'
+import { runInstallerProcess } from './updateProcess.js'
 
 // Re-exported for scripts/verify-update.mjs and the bin launcher, which reads
 // the compiled copy at lib/types/utils/shellQuote.js.
 export { shellQuote }
+export { detachHandoffStdin }
 
 const PACKAGE_NAME = '@deepseek-harness-tui/dsh-tui'
 const DEFAULT_REGISTRY = 'https://registry.npmjs.org'
@@ -35,6 +48,13 @@ const UPDATED_FROM_ENV = 'DSH_TUI_UPDATED_FROM'
  * (ordinary launches stay silent, so the file is restart-only evidence).
  */
 const RESTART_CHILD_ENV = 'DSH_TUI_RESTART_CHILD'
+
+/**
+ * env marker on every replacement (/restart, /update, kernel switch): it is
+ * started with the original app arguments, so a command-line prompt in them
+ * was already sent by the first process and must not be sent again.
+ */
+export const LAUNCH_PROMPT_SENT_ENV = 'DSH_TUI_LAUNCH_PROMPT_SENT'
 
 /**
  * Field-diagnosis log for the /restart terminal handoff, appended by BOTH
@@ -67,6 +87,106 @@ export function logRestartEvent(event: string, data?: Record<string, unknown>): 
   writeRestartLine(`${event}${data === undefined ? '' : ` ${JSON.stringify(data)}`}`)
 }
 
+/**
+ * `~/.dsh-tui/last-run.json`: which kernel and session the most recent TUI
+ * instance ran, written at boot (plugin.ts) and refreshed by the exit funnel.
+ * The launcher's safe-mode retry reads it. After a kernel switch the
+ * launcher's own env still names the original backend, so retrying from that
+ * env would reopen the old kernel, or hand a DSH session id to a Claude boot.
+ * kernel.json has the backend but not the session or when it was written.
+ */
+export interface LastRunRecord {
+  /** The kernel THIS instance ran on (Config domain: KernelBackendId). */
+  readonly backendId: KernelBackendId
+  /** The resumable session id on that backend; '' = nothing resumable (the
+   *  retry cold-starts the backend instead of resuming across domains). */
+  readonly sessionId: string
+  /** The session's working directory (diagnostics; the retry keeps the
+   *  launch cwd, it does not chdir from this field). */
+  readonly cwd: string
+  /** Which boot wrote this record (pid+clock id; diagnostics and
+   *  generation comparisons). */
+  readonly attemptId: string
+  /** epoch-ms stamp (added by writeLastRunRecord): the launcher compares it
+   *  against its own start to tell this-chain records from a previous
+   *  launch's leftovers. */
+  readonly updatedAt: number
+  /** Writer pid (diagnostics). */
+  readonly pid?: number
+}
+
+const LAST_RUN_FILE = join(DATA_DIR, 'last-run.json')
+
+/** Windows rename retry cell (kernelPrefs writeKernelPrefs precedent). */
+const lastRunWaitCell = new Int32Array(new SharedArrayBuffer(4))
+
+/**
+ * Stamp the last-run record atomically (tmp + rename, so the launcher's read
+ * never sees half a file). Best effort, never throws: a failed stamp only
+ * degrades the launcher's retry to its legacy sniffing path.
+ * @param record - Identity without updatedAt (stamped here, one clock).
+ * @param file - Path override (verify scripts point at a temp dir).
+ */
+export function writeLastRunRecord(
+  record: Omit<LastRunRecord, 'updatedAt'>,
+  file: string = LAST_RUN_FILE,
+): void {
+  const temporary = join(dirname(file), `.last-run.${process.pid}.${Date.now()}.tmp`)
+  try {
+    mkdirSync(dirname(file), { recursive: true })
+    const updatedAt = Date.now()
+    writeFileSync(temporary, `${JSON.stringify({ ...record, updatedAt }, null, 2)}\n`, { encoding: 'utf8', flag: 'wx', mode: 0o600 })
+    for (let attempt = 0; ; attempt++) {
+      try {
+        renameSync(temporary, file)
+        return
+      } catch (error) {
+        const code = typeof error === 'object' && error !== null ? String((error as NodeJS.ErrnoException).code) : ''
+        if (process.platform !== 'win32' || attempt >= 7 || (code !== 'EPERM' && code !== 'EBUSY')) throw error
+        Atomics.wait(lastRunWaitCell, 0, 0, 2 ** attempt)
+      }
+    }
+  } catch (error) {
+    try {
+      rmSync(temporary, { force: true })
+    } catch {
+      // The previous record stays; no safe remedy.
+    }
+    writeRestartLine(`last-run record write failed (${error instanceof Error ? error.message : String(error)})`)
+  }
+}
+
+/**
+ * Read the last-run record; unreadable/invalid/missing yields undefined (the
+ * caller falls back to its legacy behavior). Never throws.
+ * @param file - Path override (verify scripts point at a temp dir).
+ */
+export function readLastRunRecord(file: string = LAST_RUN_FILE): LastRunRecord | undefined {
+  try {
+    const parsed: unknown = JSON.parse(readFileSync(file, 'utf8'))
+    if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) return undefined
+    const record = parsed as Record<string, unknown>
+    // The syntax gate only: this module is also loaded by the launcher's retry
+    // path, which must not pull the registry (and cannot, without compiled
+    // modules). A record naming an uninstalled plugin reads back fine — the boot
+    // then falls back to dsh with a warning, like any unknown value (P0 D1).
+    const backendId = parseBackendId(record.backendId)
+    if (backendId === undefined) return undefined
+    if (typeof record.sessionId !== 'string' || typeof record.cwd !== 'string' || typeof record.attemptId !== 'string') return undefined
+    if (typeof record.updatedAt !== 'number' || !Number.isFinite(record.updatedAt)) return undefined
+    return {
+      backendId,
+      sessionId: record.sessionId,
+      cwd: record.cwd,
+      attemptId: record.attemptId,
+      updatedAt: record.updatedAt,
+      ...(typeof record.pid === 'number' ? { pid: record.pid } : {}),
+    }
+  } catch {
+    return undefined
+  }
+}
+
 /** Start a fresh, clearly delimited /restart attempt block in the log. */
 export function beginRestartAttempt(sessionId: string): void {
   try {
@@ -94,6 +214,29 @@ export function writeHandoffNotice(text: string): void {
     writeFileSync(2, text)
   } catch {
     process.stderr.write(text)
+  }
+}
+
+/**
+ * Hand the terminal back after a kernel-switch replacement that cannot clean
+ * up after itself: one that died before its first frame (this process still
+ * holds the alternate screen) or one killed by a signal. Besides leaving the
+ * alternate screen it turns off the input modes the replacement may already
+ * have enabled; each reset is harmless if the mode was never on. Written
+ * synchronously to fd 1 so the failure notice that follows lands on the main
+ * screen.
+ */
+export function restoreHandoffScreen(): void {
+  const reset = DISABLE_MOUSE_TRACKING + DISABLE_MODIFY_OTHER_KEYS + DISABLE_KITTY_KEYBOARD
+    + DISABLE_WIN32_INPUT_MODE + DFE + DBP + SHOW_CURSOR + EXIT_ALT_SCREEN + '\r\n'
+  try {
+    writeFileSync(1, reset)
+  } catch {
+    try {
+      process.stdout.write(reset)
+    } catch {
+      // Even a dead stdout must not block the exit path.
+    }
   }
 }
 
@@ -210,13 +353,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /** Fetch `latest` from a registry; undefined on any failure. */
-async function fetchLatestVersion(registryBase: string): Promise<string | undefined> {
+async function fetchLatestVersion(registryBase: string, signal?: AbortSignal): Promise<string | undefined> {
+  if (signal?.aborted) return undefined
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), UPDATE_CHECK_TIMEOUT_MS)
   try {
     const response = await fetch(`${registryBase}/${PACKAGE_NAME}/latest`, {
       headers: { accept: 'application/json' },
-      signal: controller.signal,
+      signal: signal === undefined ? controller.signal : AbortSignal.any([controller.signal, signal]),
     })
     if (!response.ok) return undefined
     const payload: unknown = await response.json()
@@ -280,6 +424,8 @@ export interface GithubReleaseQuery {
   apiBaseUrl?: string
   /** Fetch implementation; defaults to the global fetch. */
   fetchImpl?: typeof fetch
+  /** Cancellation shared with the update that requested this release. */
+  signal?: AbortSignal
 }
 
 /**
@@ -324,14 +470,15 @@ export function releaseChecksumUrl(version: string): string {
  * the transition-period warning path instead of being blocked (new releases
  * always ship the manifest; old ones must keep updating).
  */
-async function probeChecksumManifestUrl(url: string): Promise<string | undefined> {
+async function probeChecksumManifestUrl(url: string, signal?: AbortSignal): Promise<string | undefined> {
+  if (signal?.aborted) return undefined
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), UPDATE_CHECK_TIMEOUT_MS)
   try {
     const response = await fetch(url, {
       headers: { 'user-agent': 'dsh-tui-updater' },
       redirect: 'follow',
-      signal: controller.signal,
+      signal: signal === undefined ? controller.signal : AbortSignal.any([controller.signal, signal]),
     })
     return response.ok ? url : undefined
   } catch {
@@ -350,13 +497,14 @@ async function probeChecksumManifestUrl(url: string): Promise<string | undefined
  *   failure.
  */
 export async function fetchGithubLatestRelease(options: GithubReleaseQuery = {}): Promise<{ version: string; downloadUrl?: string; checksumUrl?: string } | undefined> {
+  if (options.signal?.aborted) return undefined
   const doFetch = options.fetchImpl ?? fetch
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), UPDATE_CHECK_TIMEOUT_MS)
   try {
     const response = await doFetch(`${options.apiBaseUrl ?? 'https://api.github.com'}/repos/${GITHUB_REPO}/releases/latest`, {
       headers: { accept: 'application/vnd.github.v3+json', 'user-agent': 'dsh-tui-updater' },
-      signal: controller.signal,
+      signal: options.signal === undefined ? controller.signal : AbortSignal.any([controller.signal, options.signal]),
     })
     if (!response.ok) return undefined
     const payload: unknown = await response.json()
@@ -574,6 +722,7 @@ export function validateExtractedTree(extractDir: string): ExtractedTreeCheck {
 async function fetchChecksumManifest(
   checksumUrl: string,
   maxManifestBytes: number = MAX_CHECKSUM_MANIFEST_BYTES,
+  signal?: AbortSignal,
 ): Promise<string> {
   const controller = new AbortController()
   const timeout = setTimeout(() => controller.abort(), STANDALONE_DOWNLOAD_TIMEOUT_MS)
@@ -581,7 +730,7 @@ async function fetchChecksumManifest(
     const response = await fetch(checksumUrl, {
       headers: { 'user-agent': 'dsh-tui-updater' },
       redirect: 'follow',
-      signal: controller.signal,
+      signal: signal === undefined ? controller.signal : AbortSignal.any([controller.signal, signal]),
     })
     if (!response.ok) {
       throw new Error(`checksum manifest fetch failed: HTTP ${response.status} ${response.statusText}`)
@@ -627,6 +776,8 @@ export interface StandaloneDownloadOptions {
    * server stream.
    */
   maxChecksumManifestBytes?: number
+  /** Cancel both the archive and checksum transfer before replacement. */
+  signal?: AbortSignal
 }
 
 /**
@@ -654,11 +805,15 @@ export async function downloadAndReplaceStandaloneBinary(
   options: StandaloneDownloadOptions = {},
 ): Promise<{ success: boolean; error?: string }> {
   const maxAssetBytes = options.maxAssetBytes ?? MAX_ASSET_BYTES
+  const controller = new AbortController()
+  const signal = options.signal === undefined ? controller.signal : AbortSignal.any([controller.signal, options.signal])
+  const timeout = setTimeout(() => controller.abort(), STANDALONE_DOWNLOAD_TIMEOUT_MS)
   const tempDir = join(
     process.env.DSH_TUI_STANDALONE_CACHE ?? join(homedir(), '.cache', 'dsh-tui-standalone'),
     `.update-${Date.now()}-${process.pid}`,
   )
   try {
+    signal.throwIfAborted()
     const currentBinary = getStandaloneBinaryPath()
     const targetDir = dirname(currentBinary)
     const assetName = getStandaloneAssetName()
@@ -667,18 +822,11 @@ export async function downloadAndReplaceStandaloneBinary(
     const downloadPath = join(tempDir, assetName)
 
     onProgress?.(`downloading: ${downloadUrl}`)
-    const controller = new AbortController()
-    const timeout = setTimeout(() => controller.abort(), STANDALONE_DOWNLOAD_TIMEOUT_MS)
-    let response: Response
-    try {
-      response = await fetch(downloadUrl, {
-        headers: { 'user-agent': 'dsh-tui-updater' },
-        redirect: 'follow',
-        signal: controller.signal,
-      })
-    } finally {
-      clearTimeout(timeout)
-    }
+    const response = await fetch(downloadUrl, {
+      headers: { 'user-agent': 'dsh-tui-updater' },
+      redirect: 'follow',
+      signal,
+    })
     if (!response.ok) {
       throw new Error(`HTTP ${response.status} ${response.statusText}`)
     }
@@ -725,6 +873,7 @@ export async function downloadAndReplaceStandaloneBinary(
       const manifest = await fetchChecksumManifest(
         checksumUrl,
         options.maxChecksumManifestBytes ?? MAX_CHECKSUM_MANIFEST_BYTES,
+        signal,
       )
       if (!verifyAssetChecksum(buffer, manifest, assetName)) {
         // Fail closed: never leave a mismatching (potentially hostile) asset
@@ -736,6 +885,7 @@ export async function downloadAndReplaceStandaloneBinary(
     }
 
     onProgress?.('extracting…')
+    signal.throwIfAborted()
     const extractDir = join(tempDir, 'extracted')
     mkdirSync(extractDir, { recursive: true })
 
@@ -780,6 +930,7 @@ export async function downloadAndReplaceStandaloneBinary(
     }
 
     onProgress?.('replacing binary…')
+    signal.throwIfAborted()
     if (process.platform !== 'win32') {
       try { chmodSync(newBinaryPath, 0o755) } catch {}
     }
@@ -802,11 +953,12 @@ export async function downloadAndReplaceStandaloneBinary(
       renameSync(stagedTarget, currentBinary)
     }
 
-    try { rmSync(tempDir, { recursive: true, force: true }) } catch {}
     return { success: true }
   } catch (error) {
-    try { rmSync(tempDir, { recursive: true, force: true }) } catch {}
     return { success: false, error: error instanceof Error ? error.message : String(error) }
+  } finally {
+    clearTimeout(timeout)
+    try { rmSync(tempDir, { recursive: true, force: true }) } catch {}
   }
 }
 
@@ -823,14 +975,17 @@ export async function downloadAndReplaceStandaloneBinary(
  * say "installing X now, official latest is Y" instead of silently
  * upgrading to yesterday's version.
  */
-export async function resolveTuiUpdateTarget(): Promise<TuiUpdateTarget> {
+export async function resolveTuiUpdateTarget(signal?: AbortSignal): Promise<TuiUpdateTarget> {
+  if (signal?.aborted) return { kind: 'unknown' }
   const current = installedTuiVersion()
   const currentVersion = current === undefined ? null : valid(current)
   if (currentVersion === null) return { kind: 'unknown' }
 
   if (isStandaloneRuntime()) {
-    const ghRelease = await fetchGithubLatestRelease()
-    const latest = ghRelease?.version ?? (await fetchLatestVersion(resolveRegistryBase()))
+    const ghRelease = await fetchGithubLatestRelease({ signal })
+    if (signal?.aborted) return { kind: 'unknown' }
+    const latest = ghRelease?.version ?? (await fetchLatestVersion(resolveRegistryBase(), signal))
+    if (signal?.aborted) return { kind: 'unknown' }
     if (latest === undefined) return { kind: 'unknown' }
     if (!gt(latest, currentVersion)) return { kind: 'latest', current: currentVersion, isStandalone: true }
     const downloadUrl = ghRelease?.downloadUrl ?? `https://github.com/${GITHUB_REPO}/releases/download/v${latest}/${getStandaloneAssetName()}`
@@ -843,7 +998,7 @@ export async function resolveTuiUpdateTarget(): Promise<TuiUpdateTarget> {
     // release-bundle.yml generates it alongside the assets).
     const checksumUrl = ghRelease !== undefined
       ? ghRelease.checksumUrl
-      : await probeChecksumManifestUrl(releaseChecksumUrl(latest))
+      : await probeChecksumManifestUrl(releaseChecksumUrl(latest), signal)
     return checksumUrl === undefined
       ? { kind: 'update', current: currentVersion, latest, isStandalone: true, downloadUrl }
       : { kind: 'update', current: currentVersion, latest, isStandalone: true, downloadUrl, checksumUrl }
@@ -851,8 +1006,8 @@ export async function resolveTuiUpdateTarget(): Promise<TuiUpdateTarget> {
 
   const registryBase = resolveRegistryBase()
   const [latest, official] = await Promise.all([
-    fetchLatestVersion(registryBase),
-    registryBase === DEFAULT_REGISTRY ? undefined : fetchLatestVersion(DEFAULT_REGISTRY),
+    fetchLatestVersion(registryBase, signal),
+    registryBase === DEFAULT_REGISTRY ? undefined : fetchLatestVersion(DEFAULT_REGISTRY, signal),
   ])
   if (latest === undefined) return { kind: 'unknown' }
   if (!gt(latest, currentVersion)) return { kind: 'latest', current: currentVersion }
@@ -866,6 +1021,9 @@ export async function resolveTuiUpdateTarget(): Promise<TuiUpdateTarget> {
  * or blocks the interactive TUI.
  */
 export async function checkForTuiUpdate(): Promise<TuiUpdateInfo | undefined> {
+  // Callers start this during the first render; the first `fetch()` loads
+  // undici synchronously, so yield first and let that cost land after the frame.
+  await new Promise<void>(resolve => setImmediate(resolve))
   const target = await resolveTuiUpdateTarget()
   return target.kind === 'update'
     ? {
@@ -878,7 +1036,9 @@ export async function checkForTuiUpdate(): Promise<TuiUpdateInfo | undefined> {
     : undefined
 }
 
-interface ProcessOptions {  env?: NodeJS.ProcessEnv
+interface ProcessOptions {
+  env?: NodeJS.ProcessEnv
+  signal?: AbortSignal
   /** Needed only for .cmd launchers on Windows (they cannot spawn directly). */
   shell?: boolean
   /**
@@ -886,6 +1046,8 @@ interface ProcessOptions {  env?: NodeJS.ProcessEnv
    * the caller can classify failures (issue #225's transient-race retry).
    */
   onStderr?: (chunk: string) => void
+  /** Cleanup uncertainty forbids another installer or a replacement process. */
+  onCleanupError?: () => void
 }
 
 /**
@@ -900,40 +1062,22 @@ function runProcess(
   args: readonly string[],
   options: ProcessOptions = {},
 ): Promise<number> {
-  return new Promise(resolve => {
-    let settled = false
-    const useShell = options.shell === true && process.platform === 'win32'
-    // DEP0190 (issue #148): Node ≥22 warns on `shell: true` with a non-empty
-    // args array even when every arg is escaped — the check is syntactic.
-    // Fold the shell-quoted args into the command string instead (an empty
-    // args array does not trigger the warning); future Node majors may turn
-    // the deprecation into a hard error.
-    const [runCommand, runArgs]: [string, readonly string[]] = useShell
-      ? [`${command} ${shellQuote(args).join(' ')}`, []]
-      : [command, args]
-    const child = spawn(runCommand, runArgs as string[], {
-      env: options.env,
-      stdio: options.onStderr === undefined ? 'inherit' : ['inherit', 'inherit', 'pipe'],
-      shell: useShell,
-    })
-    if (options.onStderr !== undefined && child.stderr !== null) {
-      const onStderr = options.onStderr
-      child.stderr.on('data', (chunk: Buffer) => {
-        const text = chunk.toString('utf8')
-        process.stderr.write(text)
-        onStderr(text)
-      })
-    }
-    const finish = (code: number): void => {
-      if (settled) return
-      settled = true
-      resolve(code)
-    }
-    child.once('error', error => {
-      process.stderr.write(`dsh-tui: failed to run ${command}: ${error.message}\n`)
-      finish(127)
-    })
-    child.once('close', code => finish(code ?? 1))
+  return runInstallerProcess(command, args, {
+    ...options,
+    category: 'profile-install',
+    onStdout: text => { process.stdout.write(text) },
+    onStderr: text => {
+      process.stderr.write(text)
+      options.onStderr?.(text)
+    },
+    onEvent: event => {
+      if (event.stage === 'cleanup-error') options.onCleanupError?.()
+      logRestartEvent('update installer', { ...event })
+      if (event.stage === 'timeout' || event.stage === 'cancel' || event.stage === 'cleanup-error' || event.stage === 'error') {
+        writeHandoffNotice(`dsh-tui: installer ${event.stage}; category=${event.category} pid=${event.pid ?? 'unavailable'} last-output=${event.lastOutputAt === undefined ? 'none' : new Date(event.lastOutputAt).toISOString()}${event.message === undefined ? '' : `: ${event.message}`}\n`)
+        writeHandoffNotice('Installation may be partial. Check/repair the profile before resuming; no automatic restart.\n')
+      }
+    },
   })
 }
 
@@ -992,7 +1136,12 @@ function allowBuildsKeyLine(key: string): string {
  * ERR_PNPM_IGNORED_BUILDS diagnostic stays the visible fallback.
  */
 export function ensureProfileAllowBuilds(profile: string): AllowBuildsOutcome | undefined {
-  const yamlPath = profileWorkspaceYamlPath(profile)
+  return ensureWorkspaceAllowBuilds(profileWorkspaceYamlPath(profile))
+}
+
+/** Path-based core of {@link ensureProfileAllowBuilds} for callers that hold
+ *  the profile directory itself (the Claude SDK installer's heal pass). */
+export function ensureWorkspaceAllowBuilds(yamlPath: string): AllowBuildsOutcome | undefined {
   try {
     if (!existsSafe(dirname(yamlPath))) return undefined
     let text = ''
@@ -1070,17 +1219,14 @@ export interface ReleaseAgeExcludeOutcome {
  * preserved, a missing `minimumReleaseAgeExclude` block is appended, a
  * missing file is created, and an absent profile directory resolves to
  * undefined — the caller still runs pnpm, whose own diagnostic stays the
- * visible fallback. Own entries are re-rendered target-first on every
- * rewrite: pnpm 11.7.x honours only the FIRST entry per package (later
- * entries for the same package are ignored against the real registry), and
- * 11.21.x applies every entry in any order, so the target — the version the
- * swap itself has to resolve, and published by construction while a
- * dev-built `updatedFrom` need not be — takes the slot older pnpm still
- * reads. Both exemptions come from the manifest, not from `pnpm-lock.yaml`:
- * a profile whose manifest and lockfile diverged keeps the lockfile's entry
- * unexempted. The 11.7.x `--frozen-lockfile` policy check reads that first
- * entry only, so a two-entry list does not clear it there; the `pnpm add`
- * path `/update` runs resolves the target and does pass.
+ * visible fallback. Both versions share ONE entry, `pkg@<target> || <from>`:
+ * pnpm 11.5.x–11.7.x honour only the FIRST entry per package (later entries
+ * for the same package are ignored), so two entries leave the old lockfile
+ * version unexempted there whatever their order — the `pnpm update` dsh runs
+ * for `/update` fails on it (issue #1605) — while 11.10+ applies every entry.
+ * A version union is read whole by both. Both exemptions come from the
+ * manifest, not from `pnpm-lock.yaml`: a profile whose manifest and lockfile
+ * diverged keeps the lockfile's entry unexempted.
  *
  * @param profile - The dsh profile whose workspace file is seeded.
  * @param version - The update target (exact version).
@@ -1102,10 +1248,9 @@ export function ensureProfileReleaseAgeExclude(
       // Missing file — start from an empty document; writeFileSync creates it.
     }
     const entry = `${PACKAGE_NAME}@${version}`
-    const alsoEntry = alsoExempt !== undefined && alsoExempt !== '' && alsoExempt !== version
-      ? `${PACKAGE_NAME}@${alsoExempt}`
-      : undefined
-    const keep = alsoEntry === undefined ? [entry] : [entry, alsoEntry]
+    const keep = alsoExempt !== undefined && alsoExempt !== '' && alsoExempt !== version
+      ? [`${entry} || ${alsoExempt}`]
+      : [entry]
     const lines = text.split(/\r?\n/u)
     let blockStart = -1
     for (let i = 0; i < lines.length; i += 1) {
@@ -1144,10 +1289,8 @@ export function ensureProfileReleaseAgeExclude(
     if (!droppedStale && missing.length === 0) {
       return { entries: [...foreignLines.map(itemOf), ...present], changed: false }
     }
-    // Own entries are re-rendered in keep order (target first) instead of
-    // copied as found: pnpm 11.7.x honours only the first entry per package
-    // (11.21.x applies them all, order-independent), and the target is the
-    // version the swap must resolve, so it takes that first slot.
+    // Own entries are re-rendered from the keep set instead of copied as
+    // found, so a pre-#1605 two-entry pair collapses into the single union.
     const insert = foreignLines.concat(keep.map(item => `  - '${item}'`))
     if (blockStart !== -1) {
       lines.splice(blockStart + 1, blockEnd - blockStart - 1, ...insert)
@@ -1162,6 +1305,53 @@ export function ensureProfileReleaseAgeExclude(
   }
 }
 
+/** What ensureWorkspaceStoreDir did to the profile workspace file. */
+export interface StoreDirOutcome {
+  /** True when the file was written (the pin was appended). */
+  readonly changed: boolean
+}
+
+/**
+ * pnpm resolves its content-addressable store from the environment when no
+ * explicit setting exists: a pnpm run under a redirected \u0060XDG_DATA_HOME\u0060
+ * (sandbox, relay, container) silently records THAT location in the
+ * profile's \u0060node_modules/.modules.yaml\u0060, and every later pnpm run in the
+ * profile — dsh's own updates, plugin installs, the Claude SDK wizard —
+ * dies with ERR_PNPM_UNEXPECTED_STORE until node_modules is rebuilt by
+ * hand. Pin \u0060storeDir\u0060 in the profile's pnpm-workspace.yaml so all of them
+ * resolve the same store whatever the environment says. The value is
+ * relative on purpose: pnpm resolves it against the workspace file\u0027s
+ * directory, landing on \u0060<dsh home>/.pnpm-store\u0060 beside the profiles root
+ * for every user and surviving a relocated \u0060DSH_HOME\u0060. Same best-effort,
+ * idempotent pattern as {@link ensureProfileAllowBuilds}: an existing
+ * top-level \u0060storeDir:\u0060 is never overwritten (an explicit user decision
+ * wins), a missing file is created, and any failure resolves to undefined —
+ * pnpm's own diagnostic stays the visible fallback, and the installer's
+ * store-mismatch self-heal catches what a failed pin leaves behind.
+ */
+export function ensureWorkspaceStoreDir(yamlPath: string): StoreDirOutcome | undefined {
+  try {
+    if (!existsSafe(dirname(yamlPath))) return undefined
+    let text = ''
+    try {
+      text = readFileSync(yamlPath, 'utf8')
+    } catch {
+      // Missing file — start from an empty document; writeFileSync creates it.
+    }
+    const lines = text.split(/\r?\n/u)
+    for (const line of lines) {
+      if (line !== '' && line === line.trimStart() && /^storeDir:/u.test(line)) {
+        return { changed: false }
+      }
+    }
+    if (lines.length > 0 && lines[lines.length - 1] !== '') lines.push('')
+    lines.push('storeDir: ../../.pnpm-store')
+    writeFileSync(yamlPath, `${lines.join('\n')}\n`)
+    return { changed: true }
+  } catch {
+    return undefined
+  }
+}
 function existsSafe(path: string): boolean {
   try {
     statSync(path)
@@ -1172,18 +1362,21 @@ function existsSafe(path: string): boolean {
 }
 
 /**
- * sharp distributes its native binaries as platform-specific optional
- * dependencies (@img/sharp-<platform> wrappers plus @img/sharp-libvips-<platform>
- * runtimes). pnpm's lockfile records EVERY platform's entry by design, and
- * some pnpm update paths materialize all of them — maintainer-group report
- * 2026-09-11: a 0.10.0 → 0.10.1 update downloaded ~90MB of win32/darwin/
- * musl/riscv64/s390x/ppc64 binaries on a linux-x64 box. The fix keeps
- * `ignoredOptionalDependencies` patterns for every OTHER platform in the
- * profile: pnpm skips ignored optionals entirely (no download, no node_modules
- * entry), while the current platform's packages — the only ones sharp loads —
- * stay untouched. These tables mirror sharp's published platform matrix; a
- * suffix sharp adds later only costs the saving for that platform, never a
- * broken install, since an unknown suffix is simply not ignored.
+ * Native backends ship as platform-specific optional dependencies, and pnpm's
+ * lockfile records EVERY platform's entry by design. Some pnpm update paths
+ * materialize all of them — maintainer-group report 2026-09-11: a 0.10.0 →
+ * 0.10.1 update downloaded ~90MB of win32/darwin/musl/riscv64/s390x/ppc64
+ * sharp binaries on a linux-x64 box; a 0.15 → 0.16 dsh-tui update then pulled
+ * seven foreign `@anthropic-ai/claude-agent-sdk-*` bundles (~230MB each,
+ * ~1.6GB) the same way. The fix keeps `ignoredOptionalDependencies` patterns
+ * for every OTHER platform in the profile: pnpm skips ignored optionals
+ * entirely (no download, no node_modules entry), while the current platform's
+ * packages — the only ones these backends load — stay untouched.
+ *
+ * Each table mirrors its package's published platform matrix for the pinned
+ * version. A suffix the package adds later only costs the saving for that
+ * platform, never a broken install: an unknown suffix is simply not listed
+ * here, so it is never ignored.
  */
 const SHARP_WRAPPER_SUFFIXES = [
   'darwin-arm64', 'darwin-x64', 'freebsd-wasm32', 'linux-arm', 'linux-arm64',
@@ -1229,6 +1422,42 @@ export function ignoredSharpOptionalPatterns(platform: string, cpu: string, libc
 }
 
 /**
+ * `@anthropic-ai/claude-agent-sdk` carries the Claude CLI as one native bundle
+ * per platform in its optionalDependencies. The SDK is an on-demand backend —
+ * the kernel picker adds it to a profile only when the user picks Claude — but
+ * once it IS there, an update re-resolves it through the same pnpm path that
+ * materializes every platform's optional (see the sharp report above), so the
+ * same ignore list keeps only this platform's bundle. Suffixes mirror the
+ * pinned SDK version's published matrix, musl variants included.
+ */
+const CLAUDE_SDK_PREFIX = '@anthropic-ai/claude-agent-sdk-'
+const CLAUDE_SDK_SUFFIXES = [
+  'darwin-arm64', 'darwin-x64',
+  'linux-arm64', 'linux-arm64-musl', 'linux-x64', 'linux-x64-musl',
+  'win32-arm64', 'win32-x64',
+] as const
+
+/** The SDK bundle suffix of the RUNNING platform (musl linux adds `-musl`). */
+export function claudeSdkCurrentSuffix(platform: string, cpu: string, libc: string): string {
+  const musl = platform === 'linux' && libc === 'musl'
+  return `${platform}-${cpu}${musl ? '-musl' : ''}`
+}
+
+/** Patterns for every SDK bundle EXCEPT the running one. */
+export function ignoredClaudeSdkOptionalPatterns(platform: string, cpu: string, libc: string): string[] {
+  const current = claudeSdkCurrentSuffix(platform, cpu, libc)
+  return CLAUDE_SDK_SUFFIXES.filter(s => s !== current).map(s => `${CLAUDE_SDK_PREFIX}${s}`)
+}
+
+/** Patterns for every known native package this platform does not load. */
+export function ignoredForeignPlatformPatterns(platform: string, cpu: string, libc: string): string[] {
+  return [
+    ...ignoredSharpOptionalPatterns(platform, cpu, libc),
+    ...ignoredClaudeSdkOptionalPatterns(platform, cpu, libc),
+  ]
+}
+
+/**
  * Libc verdict for an explicit platform, so the whole matrix is testable on any
  * host. Node's report wins when present: a stray musl loader (Debian's musl
  * package, cross-compile toolchains) on a glibc system must NOT flip the
@@ -1258,10 +1487,11 @@ function isMuslRuntime(): boolean {
   ) === 'musl'
 }
 
-/** Every @img package this module's tables cover (both the wrapper and the libvips matrix). */
-const SHARP_MANAGED_PATTERNS: ReadonlySet<string> = new Set([
+/** Every native package this module's tables cover (sharp wrappers/libvips and SDK bundles). */
+const MANAGED_OPTIONAL_PATTERNS: ReadonlySet<string> = new Set([
   ...SHARP_WRAPPER_SUFFIXES.map(s => `@img/sharp-${s}`),
   ...SHARP_LIBVIPS_SUFFIXES.map(s => `@img/sharp-libvips-${s}`),
+  ...CLAUDE_SDK_SUFFIXES.map(s => `${CLAUDE_SDK_PREFIX}${s}`),
 ])
 
 /**
@@ -1286,8 +1516,8 @@ function optionalDependencyNameOf(line: string): string | undefined {
   return name === '' ? undefined : name
 }
 
-/** What ensureProfileSharpPlatformFilter did to the profile workspace file. */
-export interface SharpPlatformFilterOutcome {
+/** What ensurePlatformFilterAt did to a profile workspace file. */
+export interface PlatformFilterOutcome {
   /** The foreign-platform ignore patterns the file now carries. */
   entries: string[]
   /** True when the file was written (filter added or refreshed). */
@@ -1295,29 +1525,29 @@ export interface SharpPlatformFilterOutcome {
 }
 
 /**
- * Keep an `ignoredOptionalDependencies:` block in the profile's
- * pnpm-workspace.yaml listing every non-current-platform @img package, so an
- * update stops downloading the foreign-platform sharp natives. The list is
- * recomputed on every run: it is a fact about the machine running the update,
- * so a profile carried to another platform (WSL, a musl container, a new cpu)
- * gets a fresh list instead of a stale one that would skip the packages that
+ * Keep an `ignoredOptionalDependencies:` block in a profile's
+ * pnpm-workspace.yaml listing every native package this platform does not
+ * load — the foreign-platform sharp natives and Claude SDK bundles — so an
+ * update (or an on-demand kernel install) stops downloading them. The list is
+ * recomputed on every run: it is a fact about the machine running pnpm, so a
+ * profile carried to another platform (WSL, a musl container, a new cpu) gets
+ * a fresh list instead of a stale one that would skip the packages that
  * machine needs. Entries this module's own tables cover are rewritten (by
  * package name, so quoted forms, trailing comments and blank lines inside the
- * block all still refresh); every other entry — a user's `fsevents`, a name
- * sharp adds later, a user's own `@img/sharp-wasm32` exemption — is preserved
- * verbatim, same as in {@link ensureProfileAllowBuilds}. Best effort and
- * idempotent: the file is written only when the resulting block actually
- * differs, a missing `ignoredOptionalDependencies:` block is appended, and an
- * absent profile directory resolves to undefined — the update still runs, only
- * the download-size win is lost. A document this function cannot rewrite safely
- * (a flow-style value, a duplicated key, which is already invalid YAML) is left
- * untouched rather than half-rewritten. Residual caveat shared by any persisted
- * machine fact: a second platform using the same profile without running an
- * update keeps this platform's list, so its own binaries stay skipped until the
- * next update there.
+ * block all still refresh); every other entry — a user's `fsevents`, a native
+ * package a backend adds later, a user's own `@img/sharp-wasm32` exemption —
+ * is preserved verbatim, same as in {@link ensureProfileAllowBuilds}. Best
+ * effort and idempotent: the file is written only when the resulting block
+ * actually differs, a missing `ignoredOptionalDependencies:` block is
+ * appended, and an absent directory resolves to undefined — the caller still
+ * runs pnpm, only the download-size win is lost. A document this function
+ * cannot rewrite safely (a flow-style value, a duplicated key, which is
+ * already invalid YAML) is left untouched rather than half-rewritten. Residual
+ * caveat shared by any persisted machine fact: a second platform using the
+ * same profile without running either path keeps this platform's list, so its
+ * own binaries stay skipped until the next update or install there.
  */
-export function ensureProfileSharpPlatformFilter(profile: string): SharpPlatformFilterOutcome | undefined {
-  const yamlPath = profileWorkspaceYamlPath(profile)
+export function ensurePlatformFilterAt(yamlPath: string): PlatformFilterOutcome | undefined {
   try {
     if (!existsSafe(dirname(yamlPath))) return undefined
     let text = ''
@@ -1349,10 +1579,10 @@ export function ensureProfileSharpPlatformFilter(profile: string): SharpPlatform
         const name = optionalDependencyNameOf(line)
         // Entries from our own tables (possibly computed for another platform)
         // are dropped here and recomputed below; everything else is preserved.
-        if (name === undefined || !SHARP_MANAGED_PATTERNS.has(name)) foreign.push(line)
+        if (name === undefined || !MANAGED_OPTIONAL_PATTERNS.has(name)) foreign.push(line)
       }
     }
-    const patterns = ignoredSharpOptionalPatterns(process.platform, process.arch, isMuslRuntime() ? 'musl' : 'glibc')
+    const patterns = ignoredForeignPlatformPatterns(process.platform, process.arch, isMuslRuntime() ? 'musl' : 'glibc')
     const insert = foreign.concat(patterns.map(p => `  - '${p}'`))
     if (blockStart !== -1 && lines.slice(blockStart + 1, blockEnd).join('\n') === insert.join('\n')) {
       return { entries: patterns, changed: false }
@@ -1368,6 +1598,11 @@ export function ensureProfileSharpPlatformFilter(profile: string): SharpPlatform
   } catch {
     return undefined
   }
+}
+
+/** {@link ensurePlatformFilterAt} for a profile's own workspace file. */
+export function ensureProfilePlatformFilter(profile: string): PlatformFilterOutcome | undefined {
+  return ensurePlatformFilterAt(profileWorkspaceYamlPath(profile))
 }
 
 /**
@@ -1493,7 +1728,26 @@ export function migrateGlobalLauncher(): boolean {
   // layouts collapse both onto the same real path — copying onto ourselves
   // would be a no-op at best).
   let dir = dirname(resolve(launcherBin))
-  const ownDir = dirname(dirname(fileURLToPath(import.meta.url)))
+  const here = dirname(fileURLToPath(import.meta.url))
+  let own: { dir: string; bin: Buffer; manifest: Buffer } | undefined
+  // These are the same two layouts accepted by installedTuiVersion(). Read
+  // both source files before replacing either destination file.
+  for (const relativePath of ['../..', '..']) {
+    try {
+      const candidate = resolve(here, relativePath)
+      const manifest = readFileSync(join(candidate, 'package.json'))
+      const parsed: unknown = JSON.parse(manifest.toString('utf8'))
+      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)
+        || (parsed as Record<string, unknown>).name !== PACKAGE_NAME) continue
+      const bin = readFileSync(join(candidate, 'bin', 'dsh-tui.js'))
+      if (bin.length === 0) continue
+      own = { dir: realpathSync(candidate), bin, manifest }
+      break
+    } catch {
+      // A missing or invalid compiled root may still be a source checkout.
+    }
+  }
+  if (!own) return false
   for (let depth = 0; depth < 4; depth++) {
     const manifest = join(dir, 'package.json')
     try {
@@ -1502,23 +1756,23 @@ export function migrateGlobalLauncher(): boolean {
         parsed !== null && typeof parsed === 'object' && !Array.isArray(parsed)
         && (parsed as Record<string, unknown>).name === PACKAGE_NAME
       ) {
-        let same = false
         try {
-          same = realpathSync(dir) === realpathSync(ownDir)
+          // Fail closed when the real paths cannot establish distinct roots.
+          if (realpathSync(dir) === own.dir) return false
+          // Each rename is atomic, not the pair. A partial migration returns
+          // false and can be retried; the standalone bin is safe in either case.
+          const replace = (target: string, content: Buffer): void => {
+            const staged = `${target}.dsh-tui-migrate`
+            writeFileSync(staged, content)
+            renameSync(staged, target)
+          }
+          replace(join(dir, 'bin', 'dsh-tui.js'), own.bin)
+          replace(manifest, own.manifest)
+          return true
         } catch {
-          same = resolve(dir) === resolve(ownDir)
+          // Keep the alignment warning as the permission/locked-file fallback.
+          return false
         }
-        if (same) return false
-        // tmp + rename keeps each file atomic; a crash mid-migration leaves
-        // either the old or the new file, never a truncated one.
-        const replace = (target: string, source: string): void => {
-          const staged = `${target}.dsh-tui-migrate`
-          writeFileSync(staged, readFileSync(source))
-          renameSync(staged, target)
-        }
-        replace(join(dir, 'bin', 'dsh-tui.js'), join(ownDir, 'bin', 'dsh-tui.js'))
-        replace(manifest, join(ownDir, 'package.json'))
-        return true
       }
     } catch {
       // Unreadable manifest at this level — keep walking up.
@@ -1554,6 +1808,7 @@ export interface TuiUpdateOutcome {
 export async function updateTui(
   profile: string,
   targetVersion?: string,
+  signal?: AbortSignal,
 ): Promise<TuiUpdateOutcome> {
   // Stamp the pre-update version BEFORE pnpm runs: it reads this package's
   // manifest from disk, which the update replaces on the fly — a
@@ -1561,9 +1816,11 @@ export async function updateTui(
   // process then compares new-vs-new and false-alarms "version did not
   // advance" on every successful update (issue #307's screenshots).
   const updatedFrom = installedTuiVersion() ?? ''
+  if (signal?.aborted) return { code: 130, updatedFrom }
 
   if (isStandaloneRuntime()) {
-    const target = await resolveTuiUpdateTarget()
+    const target = await resolveTuiUpdateTarget(signal)
+    if (signal?.aborted) return { code: 130, updatedFrom }
     const latestVersion = targetVersion ?? (target.kind === 'update' ? target.latest : undefined)
     const downloadUrl = (target.kind === 'update' && target.downloadUrl)
       ? target.downloadUrl
@@ -1578,7 +1835,8 @@ export async function updateTui(
     process.stderr.write(`dsh-tui: 正在更新便携包 (${updatedFrom || 'current'} → ${latestVersion})…\n`)
     const result = await downloadAndReplaceStandaloneBinary(downloadUrl, msg => {
       process.stderr.write(`dsh-tui: ${msg}\n`)
-    }, checksumUrl)
+    }, checksumUrl, { signal })
+    if (signal?.aborted) return { code: 130, updatedFrom }
     if (!result.success) {
       process.stderr.write(`dsh-tui: 便携包更新失败: ${result.error ?? '未知错误'}\n`)
       return { code: 1, updatedFrom }
@@ -1599,13 +1857,16 @@ export async function updateTui(
         'postinstall-only deps are explicitly ignored\n',
     )
   }
-  // Foreign-platform @img/sharp-* optionals are pure download waste (~90MB on
-  // the maintainer-group report); keep the profile's ignore list matching THIS
-  // machine (each update recomputes it) so pnpm never fetches them.
-  const sharpFilter = ensureProfileSharpPlatformFilter(profile)
-  if (sharpFilter !== undefined && sharpFilter.changed) {
+  // Foreign-platform natives are pure download waste (sharp ~90MB, the Claude
+  // SDK's bundles ~1.6GB on the maintainer report); keep the profile's ignore
+  // list matching THIS machine (each update recomputes it) so pnpm never
+  // fetches them. The SDK is never ADDED here — it only enters a profile
+  // through the kernel picker's guided install, and then only for the
+  // platform it runs on.
+  const platformFilter = ensureProfilePlatformFilter(profile)
+  if (platformFilter !== undefined && platformFilter.changed) {
     process.stderr.write(
-      `dsh-tui: sharp platform filter updated (${sharpFilter.entries.length} foreign-platform patterns ignored) — ` +
+      `dsh-tui: platform filter updated (${platformFilter.entries.length} foreign-platform patterns ignored) — ` +
         `this profile's install keeps only the current platform's natives\n`,
     )
   }
@@ -1623,7 +1884,7 @@ export async function updateTui(
     )
     if (releaseAge !== undefined && releaseAge.changed) {
       const exempted = updatedFrom !== '' && updatedFrom !== targetVersion
-        ? `${PACKAGE_NAME}@${targetVersion} + ${PACKAGE_NAME}@${updatedFrom}`
+        ? `${PACKAGE_NAME}@${targetVersion} || ${updatedFrom}`
         : `${PACKAGE_NAME}@${targetVersion}`
       process.stderr.write(
         `dsh-tui: pre-seeded profile release-age exclusion (${exempted}) — ` +
@@ -1633,14 +1894,24 @@ export async function updateTui(
   }
   let updateStderr = ''
   const capture = (chunk: string): void => { updateStderr += chunk }
-  let updateCode = await runProcess(dsh, updateArgs, { shell: true, onStderr: capture })
+  let cleanupUnconfirmed = false
+  const onCleanupError = (): void => { cleanupUnconfirmed = true }
+  const installerOptions = { shell: true, onStderr: capture, signal, onCleanupError }
+  let updateCode = await runProcess(dsh, updateArgs, installerOptions)
+  // Exit codes alone cannot prove ownership cleanup: a supervisor failure can
+  // use the same code/stderr as a retryable installer failure. Never overlap
+  // a surviving installer with a retry, stale-file removal, repair or restart.
+  if (cleanupUnconfirmed) return { code: updateCode || 1, updatedFrom }
+  if (signal?.aborted) return { code: 130, updatedFrom }
   // Transient Windows tmp-rename race (issue #225): retry the identical
   // command once — it succeeds on a clean second run, and only the
   // `_tmp_<pid>` race signature qualifies, never a real resolution error.
-  if (updateCode !== 0 && isTransientUpdateFailure(updateStderr)) {
+  if (![0, 124, 129, 130, 143].includes(updateCode) && isTransientUpdateFailure(updateStderr)) {
     process.stderr.write('dsh-tui: transient pnpm failure (Windows tmp-rename race) — retrying once…\n')
     updateStderr = ''
-    updateCode = await runProcess(dsh, updateArgs, { shell: true, onStderr: capture })
+    updateCode = await runProcess(dsh, updateArgs, installerOptions)
+    if (cleanupUnconfirmed) return { code: updateCode || 1, updatedFrom }
+    if (signal?.aborted) return { code: 130, updatedFrom }
   }
   // Deterministic Linux tmp-rename race (issue #479): EEXIST never clears on
   // a plain retry (the staging-dir collision reproduces every run), and a
@@ -1648,7 +1919,7 @@ export async function updateTui(
   // recover by removing the stale install + staging dirs, then rerunning —
   // the field-verified workaround that takes pnpm down its fresh-install
   // path instead of renaming over the collision.
-  if (updateCode !== 0 && (isEexistTmpRenameFailure(updateStderr) || isTransientUpdateFailure(updateStderr))) {
+  if (![0, 124, 129, 130, 143].includes(updateCode) && (isEexistTmpRenameFailure(updateStderr) || isTransientUpdateFailure(updateStderr))) {
     const flavor = isEexistTmpRenameFailure(updateStderr) ? 'EEXIST, issue #479' : 'retry failed, issue #225'
     const removal = removeStalePackageInstall(profile)
     const stagingNote = removal.tmpDirs.length > 0 ? ` + ${removal.tmpDirs.length} staging dir(s)` : ''
@@ -1657,7 +1928,9 @@ export async function updateTui(
         `(package dir: ${removal.packageDir}${stagingNote}) and rerunning the update…\n`,
     )
     updateStderr = ''
-    updateCode = await runProcess(dsh, updateArgs, { shell: true, onStderr: capture })
+    updateCode = await runProcess(dsh, updateArgs, installerOptions)
+    if (cleanupUnconfirmed) return { code: updateCode || 1, updatedFrom }
+    if (signal?.aborted) return { code: 130, updatedFrom }
   }
   if (updateCode !== 0) return { code: updateCode, updatedFrom }
 
@@ -1668,6 +1941,7 @@ export async function updateTui(
   // who was already on it keeps their restart (their combo demonstrably
   // boots) and gets the repair hint on the next /update instead.
   const installedNow = installedTuiVersion()
+  if (signal?.aborted) return { code: 130, updatedFrom }
   if (installedNow !== undefined && installedNow !== updatedFrom && isBootDeadlockTarget(installedNow)) {
     process.stderr.write(
       `dsh-tui: update landed on ${installedNow}, which can permanently deadlock boot under older launcher patches ` +
@@ -1685,8 +1959,12 @@ export async function updateTui(
   // a mixed state and hand the user the exact repair command instead.
   if (targetVersion !== undefined) {
     let installed = installedTuiVersion()
+    if (signal?.aborted) return { code: 130, updatedFrom }
     if (installed !== targetVersion) {
-      await runProcess(dsh, ['plugin', '--profile', profile, 'install'], { shell: true })
+      const repairCode = await runProcess(dsh, ['plugin', '--profile', profile, 'install'], { shell: true, signal, onCleanupError })
+      if (cleanupUnconfirmed) return { code: repairCode || 1, updatedFrom }
+      if (signal?.aborted) return { code: 130, updatedFrom }
+      if (repairCode !== 0) return { code: repairCode, updatedFrom }
       installed = installedTuiVersion()
     }
     if (installed !== targetVersion) {
@@ -1703,11 +1981,13 @@ export async function updateTui(
   // delegating shim — stamp it over the global launcher so this is the LAST
   // time the outer copy can lag. Best-effort; the alignment warning stays as
   // the fallback when the copy is impossible.
+  if (signal?.aborted) return { code: 130, updatedFrom }
   if (migrateGlobalLauncher()) {
     process.stderr.write('dsh-tui: global launcher aligned to the delegating shim (no manual npm i -g needed anymore).\n')
   }
 
-  return { code: 0, updatedFrom, installed: installedTuiVersion() }
+  const installed = installedTuiVersion()
+  return { code: signal?.aborted ? 130 : 0, updatedFrom, installed }
 }
 
 /**
@@ -1726,16 +2006,22 @@ export async function updateTui(
  *   other profile would leave the running install untouched.
  * @param targetVersion - Exact version returned by the preflight registry
  *   check, or undefined when that check failed and pnpm should resolve latest.
+ * @param kernel - The kernel this process runs (TuiRestartOptions.kernel).
  * @returns Exit codes for the update run and the replacement process.
  */
 export async function updateTuiAndRestart(
   sessionId: string,
   profile: string,
   targetVersion?: string,
+  kernel?: KernelBackendId,
+  /** The standalone entry's supervision hooks (TuiRestartOptions.onSpawn / onTerminationSignal). */
+  supervision: Pick<TuiRestartOptions, 'onSpawn' | 'onTerminationSignal'> = {},
+  signal?: AbortSignal,
 ): Promise<TuiUpdateResult> {
-  const outcome = await updateTui(profile, targetVersion)
+  const outcome = await updateTui(profile, targetVersion, signal)
   const { updatedFrom } = outcome
   if (outcome.code !== 0) return { updateCode: outcome.code, restartCode: outcome.code }
+  if (signal?.aborted) return { updateCode: 130, restartCode: 130 }
 
   // Restart through the same hardened handoff as /restart (issues
   // #284/#307/#483): wait for the replacement's natural exit (the outer
@@ -1747,6 +2033,8 @@ export async function updateTuiAndRestart(
   const restartCode = await restartTui(sessionId, {
     env: { [UPDATED_FROM_ENV]: updatedFrom },
     kind: 'update',
+    ...(kernel === undefined ? {} : { kernel }),
+    ...supervision,
   })
   return { updateCode: 0, restartCode }
 }
@@ -1821,36 +2109,6 @@ export async function cliUpdate(profile: string): Promise<number> {
 }
 
 /**
- * Release the shared console for the replacement without resetting it.
- *
- * A pty's termios is per-DEVICE: destroying this stream would write this
- * process's saved cooked/ECHO mode back over the replacement's raw mode
- * (libuv restores orig_termios on tty close; verified on Node 24 — mouse
- * reports then echo as `^[[<…M` and keys wait for a newline). Detaching —
- * no readers, paused, unref'd — keeps the mode untouched.
- *
- * Two deliberate trade-offs vs the old destroy():
- * - destroy() doubled as a permanent gate ("a destroyed stream can never be
- *   resumed"). Readers removed + paused already keep this process out of the
- *   console's key path (#284/#307), and after the handoff only the
- *   child-exit listener remains here — nothing re-attaches a reader.
- * - On exit Node still writes the saved cooked mode back once (atexit
- *   uv_tty_reset_mode). Fine in the normal order — this process outlives the
- *   replacement, and the shell wants cooked back anyway; it only bites if
- *   this process dies while the replacement is still running.
- *
- * @param stdin - Console stream to detach; injectable for the regression.
- */
-export function detachHandoffStdin(
-  stdin: Pick<NodeJS.ReadStream, 'removeAllListeners' | 'pause' | 'unref'> = process.stdin,
-): void {
-  stdin.removeAllListeners('readable')
-  stdin.removeAllListeners('data')
-  stdin.pause()
-  stdin.unref()
-}
-
-/**
  * Restart the running TUI in place and resume the active session — the
  * `/update` restart path minus the pnpm step, for `/restart`. Spawns the
  * same node process with the original argv and the dual-written resume
@@ -1882,10 +2140,12 @@ export function detachHandoffStdin(
  * reported synchronously (a raw inherit write can vanish mid-handoff). A
  * late exit is quiet — by then the user owned a working TUI session.
  *
- * @param sessionId - Session to resume in the replacement process.
+ * @param sessionId - Session to resume in the replacement process; empty
+ *   starts fresh. Ignored when `options.backend` switches kernels.
  * @param options - `kind: 'update'` drops the /restart boot-diagnosis
  *   marker and tags restart.log events for the update flow; `env` adds
- *   marker variables for the replacement (e.g. DSH_TUI_UPDATED_FROM).
+ *   marker variables for the replacement (e.g. DSH_TUI_UPDATED_FROM);
+ *   `backend` switches the replacement onto that kernel.
  * @returns 0 when the replacement ran and exited cleanly, 127 when it
  *   failed to start, otherwise the child's own exit code.
  */
@@ -1898,12 +2158,145 @@ export interface TuiRestartOptions {
    * diagnostics) and restart.log events carry the update-restart tag.
    */
   kind?: 'restart' | 'update'
+  /**
+   * A kernel switch from the launchpad selector. restart.log events use the
+   * backend-switch tag; the replacement gets DSH_TUI_BACKEND and the one-shot
+   * KERNEL_SWITCH_HANDOFF_ENV set to the chosen kernel (the latter beats a
+   * Config row that pins the other one), and no DSH_TUI_RESUME_SESSION: the
+   * new kernel starts a new session.
+   */
+  backend?: KernelBackendId
+  /**
+   * The chosen kernel's display name (its manifest's short label), resolved by
+   * the caller from the registry entry: THIS module prints it and has no registry
+   * of its own (`bin/dsh-tui.js` shares that constraint). Absent → the raw id,
+   * which is what an unregistered/uninstalled backend would show anyway.
+   */
+  backendName?: string
+  /**
+   * 'alt' (fullscreen kernel switch only): this process keeps the alternate
+   * screen open through the spawn, the replacement adopts it without a
+   * second 1049h, and its first flushed frame (ACKed on fd 3) hands the
+   * screen over; see src/handoffAck.ts. /restart, /update and inline
+   * sessions go back to the main screen before the spawn as before.
+   */
+  handoffScreen?: 'alt'
+  /**
+   * The kernel this process runs. A plain /restart or /update passes it in
+   * the one-shot KERNEL_SWITCH_HANDOFF_ENV so the replacement reopens the
+   * session on the same kernel even when a Config row names the other one
+   * (as it does after a kernel switch). Ignored when `backend` is set.
+   */
+  kernel?: KernelBackendId
+  /** The replacement was spawned (the standalone entry forwards SIGTERM to it). */
+  onSpawn?: (child: { kill(signal: NodeJS.Signals): boolean }) => void
+  /**
+   * The replacement ended by a signal: called before any outcome notice, so a
+   * standalone-entry supervisor can end by the same signal. Returning normally
+   * continues with the usual outcome handling.
+   */
+  onTerminationSignal?: (signal: NodeJS.Signals) => void
+}
+
+/**
+ * The replacement's env, pure: the resume marker, the /restart child stamp,
+ * the caller's extra markers and the kernel-switch overrides. Exported for
+ * scripts/verify-launchpad, which feeds it through the boot resolver.
+ */
+export function restartChildEnv(
+  parentEnv: NodeJS.ProcessEnv,
+  sessionId: string,
+  kind: 'restart' | 'update',
+  options: TuiRestartOptions,
+): NodeJS.ProcessEnv {
+  const childEnv: NodeJS.ProcessEnv = {
+    ...parentEnv,
+    // The replacement resumes the current session through the launcher
+    // contract (DSH_TUI_RESUME_SESSION; see src/sessionHistory.ts).
+    DSH_TUI_RESUME_SESSION: sessionId,
+    // Marks the replacement so its own boot logs to restart.log without
+    // noisy logging on every ordinary launch (/restart only).
+    ...(kind === 'restart' ? { [RESTART_CHILD_ENV]: '1' } : {}),
+    [LAUNCH_PROMPT_SENT_ENV]: '1',
+    ...options.env,
+  }
+  // The Config schema preserves '', so an absent session must be represented
+  // by removing the marker, including one inherited from the previous launch.
+  if (sessionId === '') delete childEnv.DSH_TUI_RESUME_SESSION
+  // A stale handoff override never leaks into a plain replacement: the var is
+  // one-shot (consumed at this process's own boot), and a child that is NOT
+  // switching kernels keeps this process's kernel by config/env/memory as
+  // usual.
+  delete childEnv[KERNEL_SWITCH_HANDOFF_ENV]
+  // Same for the alt-screen handoff markers: a replacement must not adopt a
+  // screen or ACK pipe from an earlier attempt. restartTui sets them again
+  // when it opens a handoff.
+  delete childEnv[HANDOFF_SCREEN_ENV]
+  delete childEnv[HANDOFF_ACK_FD_ENV]
+  delete childEnv[HANDOFF_ATTEMPT_ENV]
+  // A derived resume target's provenance is never inherited: whatever survives
+  // here was built by THIS process, and on a kernel switch even the target itself
+  // goes (below). Keeping a stale mark would make the replacement revoke a target
+  // nobody derived (see resolveResumeTarget in kernelPrefs.ts).
+  delete childEnv[RESUME_BACKEND_ENV]
+  // Same for the safe-mode retry marker: "this boot is a retry" describes the
+  // process the launcher spawned, not the replacement it spawns now. The boot
+  // consumes it on read anyway — this keeps a replacement honest even if one is
+  // ever built from an env that still carries it.
+  delete childEnv[RESUME_RETRY_ENV]
+  if (options.backend === undefined && options.kernel !== undefined) childEnv[KERNEL_SWITCH_HANDOFF_ENV] = options.kernel
+  if (options.backend !== undefined) {
+    childEnv.DSH_TUI_BACKEND = options.backend
+    // DSH_TUI_BACKEND alone loses to a Config row (config > env > memory),
+    // so the switch also sets the one-shot variable that ranks above config.
+    childEnv[KERNEL_SWITCH_HANDOFF_ENV] = options.backend
+    // A kernel switch never resumes: the id of THIS backend's session means
+    // nothing to the next one, and an inherited marker (this process may
+    // itself be a /restart child) would send the new kernel looking for it —
+    // deleted outright, not blanked (the launcher row maps '' to
+    // config.sessionId='', not to "absent").
+    delete childEnv.DSH_TUI_RESUME_SESSION
+  }
+  return childEnv
+}
+
+/**
+ * The replacement's argv after `process.execPath`, pure: the same script and
+ * arguments again, except that a replacement started outside the entry goes
+ * to `hostEntry` with the app arguments (the entry hosts every kernel).
+ */
+export function restartArgv(input: {
+  readonly execArgv: readonly string[]
+  readonly argv: readonly string[]
+  /** Whether this is a kernel switch (resume flags are dropped). */
+  readonly switching: boolean
+  /** The replacement opens a fresh session (no session id to hand over, e.g.
+   *  after /new): inherited resume flags name the previous one and are dropped. */
+  readonly fresh?: boolean
+  readonly hostEntry: string | undefined
+}): string[] {
+  const strip = (args: readonly string[]): string[] => input.switching || input.fresh === true ? stripResumeArgs(args) : [...args]
+  const script = input.argv[1]
+  if (input.hostEntry !== undefined && script !== input.hostEntry) {
+    // The app arguments: everything after dsh's own `--`.
+    const separator = input.argv.indexOf('--', 2)
+    const appArgs = separator === -1 ? [] : input.argv.slice(separator + 1)
+    return [...input.execArgv, input.hostEntry, ...strip(appArgs)]
+  }
+  return [...input.execArgv, ...strip(input.argv.slice(1))]
 }
 
 export async function restartTui(sessionId: string, options: TuiRestartOptions = {}): Promise<number> {
   const kind = options.kind ?? 'restart'
-  const tag = kind === 'update' ? 'update-restart' : 'restart'
-  const argv = [...process.execArgv, ...process.argv.slice(1)]
+  const tag = options.backend !== undefined ? 'backend-switch' : kind === 'update' ? 'update-restart' : 'restart'
+  const hostEntry = process.env[HOST_ENTRY_PATH_ENV]
+  const argv = restartArgv({
+    execArgv: process.execArgv,
+    argv: process.argv,
+    switching: options.backend !== undefined,
+    fresh: sessionId === '',
+    hostEntry: hostEntry === undefined || hostEntry === '' || hostEntryDisabled() ? undefined : hostEntry,
+  })
   logRestartEvent(`${tag}: spawning replacement`, {
     node: process.execPath,
     argv,
@@ -1915,25 +2308,88 @@ export async function restartTui(sessionId: string, options: TuiRestartOptions =
     dshHome: process.env.DSH_HOME ?? null,
   })
   const startedAt = Date.now()
+  // Fullscreen kernel switch: keep the alternate screen until the replacement
+  // reports its first flushed frame on the ACK pipe (see handoffScreen).
+  const handoff = options.handoffScreen === 'alt' && options.backend !== undefined
+  const attemptId = handoff ? 'hs-' + Date.now().toString(16) + '-' + Math.random().toString(16).slice(2, 8) : undefined
+  // Ctrl+C while the replacement boots reaches this process too: same process
+  // group, and nothing has the terminal in raw mode yet. Dying here would
+  // leave behind the alternate screen this process still holds; the
+  // replacement gets the same signal, and its close below restores the screen.
+  const ignoreInterrupt = (): void => {}
+  if (handoff) process.on('SIGINT', ignoreInterrupt)
+  // "Starting X…" goes out before the spawn, waiting for the write callback
+  // so it lands before the replacement draws anything.
+  if (options.backend !== undefined) {
+    await writeHandoffStage(
+      process.stdout,
+      formatHandoffNotice('stage-start', { name: options.backendName ?? options.backend, color: process.stdout.isTTY === true }) + '\n',
+    )
+    logRestartEvent(handoffEventTag('stage-start'), { backend: options.backend, ...(attemptId === undefined ? {} : { attemptId }) })
+  }
   return new Promise(resolve => {
+    const childEnv = restartChildEnv(process.env, sessionId, kind, options)
+    if (handoff) {
+      // stdio[3] is the ACK pipe; the env tells the replacement its fd and the attempt id.
+      childEnv[HANDOFF_SCREEN_ENV] = 'alt'
+      childEnv[HANDOFF_ACK_FD_ENV] = '3'
+      childEnv[HANDOFF_ATTEMPT_ENV] = attemptId!
+      logRestartEvent('handoff: alt-screen bracket held for the replacement', { attemptId })
+    }
+    // Reassert after root disposal: even a late drain must not restart the
+    // parent's native stdin read before the replacement probes the terminal.
+    detachHandoffStdin()
     const child = spawn(process.execPath, argv, {
-      env: {
-        ...process.env,
-        // The replacement resumes the current session through the launcher
-        // contract (DSH_TUI_RESUME_SESSION; see src/sessionHistory.ts).
-        DSH_TUI_RESUME_SESSION: sessionId,
-        // Marks the replacement so its own boot logs to restart.log without
-        // noisy logging on every ordinary launch (/restart only).
-        ...(kind === 'restart' ? { [RESTART_CHILD_ENV]: '1' } : {}),
-        ...options.env,
-      },
+      env: childEnv,
       // stdin/stdout stay inherited so the replacement owns the console the
       // moment it boots; stderr is captured so a boot failure is reportable
       // through THIS process (the terminal may already be mid-handoff when
-      // the child dies, and a raw inherit write can vanish).
-      stdio: ['inherit', 'inherit', 'pipe'],
+      // the child dies, and a raw inherit write can vanish). fd 3 is the
+      // one-way ACK pipe (replacement → supervisor): adopted / first frame.
+      stdio: handoff ? ['inherit', 'inherit', 'pipe', 'pipe'] : ['inherit', 'inherit', 'pipe'],
     })
-    logRestartEvent(`${tag}: replacement spawned`, { childPid: child.pid })
+    let ackAdoptedAt: number | undefined
+    let ackReadyAt: number | undefined
+    const ackStream = handoff ? (child.stdio[3] ?? undefined) as import('node:stream').Readable | undefined : undefined
+    if (ackStream !== undefined) {
+      ackStream.setEncoding('utf8')
+      let pending = ''
+      ackStream.on('data', (chunk: string) => {
+        pending += chunk
+        for (;;) {
+          const newline = pending.indexOf('\n')
+          if (newline < 0) break
+          const line = pending.slice(0, newline)
+          pending = pending.slice(newline + 1)
+          const ack = parseHandoffAckLine(line)
+          if (ack === null || ack.attemptId !== attemptId) continue
+          if (ack.kind === 'adopted' && ackAdoptedAt === undefined) {
+            ackAdoptedAt = Date.now()
+            logRestartEvent('handoff/screen-adopted', { attemptId, backend: options.backend })
+          }
+          if (ack.kind === 'ready' && ackReadyAt === undefined) {
+            ackReadyAt = Date.now()
+            // ready means the replacement's first frame was flushed, not just
+            // that it mounted or is still alive.
+            logRestartEvent(handoffEventTag('first-frame'), { attemptId, backend: options.backend, elapsedMs: ackReadyAt - startedAt })
+          }
+        }
+      })
+      ackStream.on('error', () => {
+        // The supervisor outlives the pipe by contract; a broken pipe here
+        // means the replacement never speaks the protocol (e.g. an older
+        // build) — the close handler's no-ready branch still restores the
+        // screen, so the bracket can never be orphaned.
+      })
+      const ackWatch = setTimeout(() => {
+        if (ackReadyAt === undefined) {
+          logRestartEvent('handoff/first-frame watch', { attemptId, note: 'no first-frame ACK within 30s (diagnosis only, never a success/failure fact)' })
+        }
+      }, 30000)
+      ackWatch.unref()
+    }
+    logRestartEvent(`${tag}: replacement spawned`, { childPid: child.pid, ...(options.backend === undefined ? {} : { backend: options.backend }) })
+    options.onSpawn?.(child)
     // Handoff watchdog (field evidence 2026-08-24: restarted TUI mounts but
     // takes no input). Two jobs, both diagnosis-grade:
     // 1. SAMPLE this process's stdin state every second — if anything
@@ -1988,19 +2444,84 @@ export async function restartTui(sessionId: string, options: TuiRestartOptions =
     timer.unref()
     child.once('error', error => {
       clearTimeout(timer)
+      process.removeListener('SIGINT', ignoreInterrupt)
       logRestartEvent(`${tag}: spawn error`, { message: error.message })
-      writeHandoffNotice(`dsh-tui: failed to spawn the restart: ${error.message}\n`)
+      if (options.backend !== undefined) {
+        // Nothing took the screen over: restore it before the notice.
+        if (handoff) restoreHandoffScreen()
+        // A spawn failure is a failed switch (yellow, with the safe-mode hint),
+        // not a crash.
+        logRestartEvent(handoffEventTag('failed'), { reason: 'spawn-error', message: error.message })
+        writeHandoffNotice(
+          formatHandoffNotice('failed', {
+            name: options.backendName ?? options.backend,
+            reason: 'spawn-error',
+            safeHint: true,
+            color: process.stderr.isTTY === true,
+          }) + `\n${error.message}\n`,
+        )
+      } else {
+        writeHandoffNotice(`dsh-tui: failed to spawn the restart: ${error.message}\n`)
+      }
       resolve(127)
     })
     child.once('close', (code, signal) => {
       clearTimeout(timer)
+      process.removeListener('SIGINT', ignoreInterrupt)
       const elapsedMs = Date.now() - startedAt
       logRestartEvent(`${tag}: replacement exited`, {
         code: code ?? null,
         signal: signal ?? null,
         elapsedMs,
       })
-      if (elapsedMs < 4000) {
+      // A replacement that took the screen over and died by a signal: the hook
+      // may end this process by that signal. Before a handoff's first frame this
+      // process still holds the screen, so the failure path below restores it.
+      if (signal !== null && options.onTerminationSignal !== undefined && (!handoff || ackReadyAt !== undefined)) {
+        options.onTerminationSignal(signal)
+      }
+      if (options.backend !== undefined) {
+        // Kernel switch outcome: success is quiet (restart.log only), a
+        // replacement that never came up is a yellow failure with the session
+        // kept and the safe-mode hint, and a later nonzero exit is a red
+        // crash. With the ACK pipe the first frame decides which of the two
+        // failures it was; see classifyReplacementOutcome.
+        const outcome = classifyReplacementOutcome({
+          closed: true, code, signal, elapsedMs,
+          ...(handoff ? { firstFrameAcked: ackReadyAt !== undefined } : {}),
+        })
+        logRestartEvent(handoffEventTag(outcome.kind), {
+          ...(outcome.kind === 'crashed' ? { code: outcome.code } : outcome.kind === 'failed' ? { reason: outcome.reason } : {}),
+          ...(attemptId === undefined ? {} : { attemptId }),
+        })
+        if (outcome.kind === 'failed') {
+          // Before ready this process still holds the alternate screen:
+          // restore it first so the notice lands on the main screen. After
+          // ready the replacement's own exit cleanup closed it.
+          if (handoff && ackReadyAt === undefined) restoreHandoffScreen()
+          const suffix = childStderr.trim() === '' ? '' : `\n${childStderr.trimEnd()}`
+          writeHandoffNotice(
+            formatHandoffNotice('failed', {
+              name: options.backendName ?? options.backend,
+              reason: outcome.reason,
+              safeHint: true,
+              color: process.stderr.isTTY === true,
+            }) + `${suffix}\n`,
+          )
+        } else if (outcome.kind === 'crashed') {
+          // A signal death after the first frame skipped the replacement's
+          // own exit cleanup, so the screen and input modes are still its.
+          if (handoff && signal !== null) restoreHandoffScreen()
+          writeHandoffNotice(
+            '\n' + formatHandoffNotice('crashed', {
+              name: options.backendName ?? options.backend,
+              code: outcome.code,
+              safeHint: true,
+              color: process.stderr.isTTY === true,
+            }) + '\n',
+          )
+        }
+      } else if (elapsedMs < 4000) {
         // Fast death: the TUI never came up. Synchronous stderr write —
         // process.exit() right after an async stream write skips the flush,
         // and a vanished diagnosis is indistinguishable from silent failure.

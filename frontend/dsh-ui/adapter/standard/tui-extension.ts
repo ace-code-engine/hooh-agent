@@ -1,5 +1,3 @@
-// HooH 迁移：`@dsh-std/*`（插件标准）**只迁类型**，不迁运行时 ——
-// 这里改指 `hooh/stubs/dsh-std.js` 的空实现（我们不分发 DSH 插件）。
 /**
  * dsh-TUI private protocol registration on the shared dsh-std catalog.
  *
@@ -9,13 +7,15 @@
  * TUI profile definitions to the spec boundary.
  */
 
+// HooH 迁移：`@dsh-std/*`（插件标准）**只迁类型**，不迁运行时 ——
+// 这里改指 `hooh/stubs/dsh-std.js` 的空实现（我们不分发 DSH 插件）。
 import { ProtocolCatalog } from '../../hooh/stubs/dsh-std.js'
 import { ManifestDefinitionCatalog } from '../../hooh/stubs/dsh-std.js'
 import { register as registerCommand } from '../../hooh/stubs/dsh-std.js'
 import { register as registerMessages } from '../../hooh/stubs/dsh-std.js'
 import { register as registerPresentation } from '../../hooh/stubs/dsh-std.js'
 import { register as registerStorage } from '../../hooh/stubs/dsh-std.js'
-import { registerProfileProtocols } from '../spec/tui-contributions.js'
+import { registerProfileProtocols, registerTuiContributionExtensions } from '../spec/tui-contributions.js'
 
 export {
   TUI_EXTENSION_API_VERSION,
@@ -49,6 +49,12 @@ function buildAdmissionCatalog(): AdmissionCatalog {
   registerMessages(protocols)
   registerPresentation(protocols)
   registerProfileProtocols(protocols)
+  // The manifest extension catalog every `x-dsh-tui` contribution is validated
+  // against (W-2). Without it a bundle's SettingsSection / Scene / Backend
+  // declaration has no definition to resolve, so the family could never be
+  // admitted by a third party. Registering it here — the one assembly point of
+  // the canonical catalog, built lazily on first use — adds no startup ordering.
+  registerTuiContributionExtensions(manifests)
   return { protocols, manifests }
 }
 

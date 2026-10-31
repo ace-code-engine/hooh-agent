@@ -36,18 +36,19 @@ function snapshot(): AceSnapshot {
     effort: env.ACE_EFFORT ?? 'max',
     preset: env.ACE_PRESET ?? 'code',
     ...(env.ACE_LAST_SESSION ? { lastSessionTitle: env.ACE_LAST_SESSION } : {}),
-    // 形状必须是上游 LocalCommand（{name, description}，name 不带斜杠）：
-    // CommandSuggestions 对每条取 stringWidth(c.name)，喂字符串当场炸渲染
-    // （2026-10-24 一按 / 就闪退的根因）。
+    // 形状必须是上游 CommandCompletion（{name, description, replacement,
+    // commandLine}，name 不带斜杠）：CommandSuggestions 对每条取
+    // stringWidth(c.name)，喂字符串当场炸渲染（2026-10-24 一按 / 就闪退的根因）；
+    // 0.17.0 起 palette 还要 replacement/commandLine 才能回填完整命令行。
     commands: [
-      { name: 'help', description: 'Show available commands' },
-      { name: 'model', description: 'Show or switch the model' },
-      { name: 'permission', description: 'Show or change the permission level' },
-      { name: 'resume', description: 'Continue a saved session' },
-      { name: 'status', description: 'Show session status' },
-      { name: 'tools', description: 'List available tools' },
-      { name: 'effort', description: 'Show or change reasoning effort' },
-      { name: 'exit', description: 'Quit HooH' },
+      { name: 'help', description: 'Show available commands', replacement: '/help', commandLine: '/help' },
+      { name: 'model', description: 'Show or switch the model', replacement: '/model', commandLine: '/model' },
+      { name: 'permission', description: 'Show or change the permission level', replacement: '/permission', commandLine: '/permission' },
+      { name: 'resume', description: 'Continue a saved session', replacement: '/resume', commandLine: '/resume' },
+      { name: 'status', description: 'Show session status', replacement: '/status', commandLine: '/status' },
+      { name: 'tools', description: 'List available tools', replacement: '/tools', commandLine: '/tools' },
+      { name: 'effort', description: 'Show or change reasoning effort', replacement: '/effort', commandLine: '/effort' },
+      { name: 'exit', description: 'Quit HooH', replacement: '/exit', commandLine: '/exit' },
     ],
   }
 }
@@ -92,7 +93,9 @@ export async function main(argv: readonly string[]): Promise<void> {
   process.on('exit', cleanup)
   process.on('SIGINT', () => { cleanup(); process.exit(0) })
   process.on('SIGTERM', () => { cleanup(); process.exit(0) })
-  await app.waitUntilExit?.()
+  // 0.17.0：render 返回 Promise<Instance>，waitUntilExit 在 resolve 出来的实例上。
+  const instance = await app
+  await instance.waitUntilExit()
   if (process.env.ACE_SHELL_DEBUG === '1') {
     try {
       appendFileSync(

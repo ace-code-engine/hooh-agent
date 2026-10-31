@@ -1,7 +1,7 @@
-// HooH 迁移：`@dsh-std/*`（插件标准）**只迁类型**，不迁运行时 ——
-// 这里改指 `hooh/stubs/dsh-std.js` 的空实现（我们不分发 DSH 插件）。
 /** Five-state admission decision using dsh-std projection and ProtocolCatalog. */
 
+// HooH 迁移：`@dsh-std/*`（插件标准）**只迁类型**，不迁运行时 ——
+// 这里改指 `hooh/stubs/dsh-std.js` 的空实现（我们不分发 DSH 插件）。
 import { defineProtocolDeclaration } from '../../hooh/stubs/dsh-std.js'
 import { projectManifest } from '../../hooh/stubs/dsh-std.js'
 import type { ContractIndex } from './validate.js'

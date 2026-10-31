@@ -289,7 +289,7 @@ class TerminalExec:
             target, use_shell = verdict.argv, False
 
         try:
-            result = subprocess.run(target, shell=use_shell, capture_output=True, text=True,
+            result = subprocess.run(target, shell=use_shell, capture_output=True, text=True,  # nosec B602 —— 三值判定(allowlist) + 元字符闸门在前面两层；shell 仅兜 cmd 内建命令（见上方注释）
                                     timeout=30, cwd=str(self.project_root),
                                     stdin=subprocess.DEVNULL)
             return ExecutionResult(status="success", data={

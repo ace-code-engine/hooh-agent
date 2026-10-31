@@ -1,7 +1,7 @@
 import React from 'react'
 import { Box, Text, useInput, ScrollBox, type ScrollBoxHandle, useTerminalSize, useAnimationFrame } from '../ui.js'
-import { formatJobDuration, type BackgroundJobState, type BackgroundJobStatus } from '../dsh-adapter/jobs.js'
-import { JobProgress } from './Chat/JobCard.js'
+import { formatJobDuration, JOBS_MAX_OUTPUT_LINES, type BackgroundJobState, type BackgroundJobStatus, type JobTimelineEvent } from '../dsh-adapter/jobs.js'
+import { JobProgress, JobSection, jobCommandRows } from './Chat/JobCard.js'
 import { Markdown } from './Markdown.js'
 import type { Theme } from '../theme.js'
 import { t } from '../i18n.js'
@@ -15,10 +15,8 @@ import type { PanelKeyHandler } from './sidePanel/types.js'
 /**
  * Pure width→column allocation for the roster row (kept side-effect free so
  * regressions can assert the table directly). There is no pid column in this
- * roster. Side-panel tiers: the label always truncates and every column
- * leaves it ≥8 cells — progress drops first, then duration, then the
- * id/status columns narrow — so a 38-col panel never folds a command into
- * per-word lines. The full-screen form keeps its wrap-the-label contract.
+ * roster. In the side panel, the command gets a wrapped row under the id and
+ * status header; full-screen keeps the flexible inline label column.
  */
 export interface JobsRowColumns {
   readonly showProgress: boolean
@@ -26,8 +24,7 @@ export interface JobsRowColumns {
   readonly showStatus: boolean
   readonly idWidth: number
   readonly statusWidth: number
-  /** 整屏形态 label 折行（长命令可读全文）；panel 形态 truncate-end
-   *  （行高恒定，全文由焦点行的 detail 块承担）。 */
+  /** Full-screen keeps the label in the header; panel rows place it below. */
   readonly labelWrap: boolean
 }
 
@@ -50,8 +47,10 @@ export interface JobsPanelProps {
   onClose?: () => void
   /** Kill the focused live job (`job_kill` with the session's authority). */
   onKill: (id: string) => void
-  /** Send to Chat（§6.7）：把焦点任务作为附加上下文送进草稿（chip 出现在
-   *  输入框上方，随下一次提交附给模型）。仅 panel 形态；未接时不提供 's'。 */
+  /** Keep the focused job's output tail fresh while the panel shows it
+   *  (a backend whose output is read on demand); returns the unwatch. */
+  onWatchOutput?: (id: string) => () => void
+  /** Attach the focused job to the next submitted message. Panel mode only. */
   onSendToChat?: (job: BackgroundJobState) => void
   /** 'panel' mounts inside the side-panel host (no outer padding, host-owned
    *  chrome, keyboard via usePanelInput). Default keeps the full-screen
@@ -130,7 +129,7 @@ function renderOutputRuns(job: BackgroundJobState): OutputRun[] {
   return runs
 }
 
-function JobRowLine({ job, focused, armed, columns, onFocus }: {
+function JobRowLine({ job, focused, armed, columns, onFocus, expanded, onToggle, width }: {
   job: BackgroundJobState
   focused: boolean
   armed?: boolean
@@ -139,18 +138,20 @@ function JobRowLine({ job, focused, armed, columns, onFocus }: {
    * live job reports progress. */
   columns: JobsRowColumns
   onFocus?: () => void
+  expanded: boolean
+  onToggle: () => void
+  width: number
 }): React.ReactNode {
   const info = statusInfo(job.status)
   const duration = formatJobDuration(job)
   const live = !isTerminalStatus(job.status)
   const progress = live && job.progress !== undefined && job.progress !== '' ? job.progress : undefined
+  const labelRows = jobCommandRows(job.label, width - 2, expanded)
+  const command = job.command !== undefined && job.command !== '' ? job.command : job.label
+  const commandRows = focused ? jobCommandRows(command, width - 2, expanded) : []
   return (
     <Box flexDirection="column" onClick={onFocus}>
-      {/* Fixed columns around ONE flexible label. The old row reserved a
-        * hand-counted `columns - 46` for the label, which ignored the progress
-        * chip (+22) and the exit detail (+15) — any long command then overflowed
-        * and ink wrapped it, splitting the id across two lines. The label now
-        * truncates into whatever is left, so the grid holds at every width. */}
+      {/* Fixed columns leave the label the remaining header width. */}
       <Box flexDirection="row" gap={1}>
         {/* Marker and status glyph share one 2-cell cell: as two siblings the
           * row gap collapsed between them and the marker touched the glyph. */}
@@ -161,12 +162,9 @@ function JobRowLine({ job, focused, armed, columns, onFocus }: {
         <Box width={columns.idWidth} flexShrink={0}>
           <Text bold={focused} color={focused ? 'accent' : undefined} wrap="truncate-end">{job.id}</Text>
         </Box>
-        {/* The label is the row's flexible column and WRAPS: a long command
-          * folds onto the following lines (hanging under its own column)
-          * instead of collapsing to an ellipsis when the terminal is narrow.
-          * The id, progress, duration and status columns keep their grid. */}
+        {/* Full-screen keeps the command in its flexible header column. */}
         <Box flexGrow={1} flexShrink={1}>
-          <Text bold={focused} wrap={columns.labelWrap ? undefined : 'truncate-end'}>{job.label}</Text>
+          <Text bold={focused} wrap={columns.labelWrap && expanded ? 'wrap' : 'truncate-end'}>{job.label}</Text>
         </Box>
         {columns.showProgress && (
           <Box width={11} flexShrink={0} justifyContent="flex-end">
@@ -190,21 +188,12 @@ function JobRowLine({ job, focused, armed, columns, onFocus }: {
           </>
         )}
       </Box>
+      {(!columns.labelWrap || focused) && (
+        <JobSection rows={focused ? commandRows : labelRows} color="accent" onToggle={onToggle} />
+      )}
       {focused && (
-        // Detail block on one label gutter (width 6 in both languages): the
-        // row above already names the job, so the old `任务：…` line was pure
-        // repetition, and the command only earns a line when it differs.
+        // The detail block starts below the focused job row.
         <Box flexDirection="column" paddingLeft={4}>
-          {job.command !== undefined && job.command !== '' && job.command !== job.label && (
-            <Box flexDirection="row" gap={1}>
-              <Box width={7} flexShrink={0}><Text dimColor>{t('jobs-panel-command')}</Text></Box>
-              {/* Detail values WRAP: a long command, a long path or a wide
-                * output line must be readable in full here — the panel is the
-                * deep view, and a clipped one-liner was the "a long line shows
-                * nothing" report. */}
-              <Text dimColor>{job.command}</Text>
-            </Box>
-          )}
           <Box flexDirection="row" gap={1}>
             <Box width={7} flexShrink={0}><Text dimColor>{t('jobs-panel-started')}</Text></Box>
             <Text dimColor>
@@ -213,14 +202,32 @@ function JobRowLine({ job, focused, armed, columns, onFocus }: {
                 + (job.lastOutputAt !== undefined ? ` · ${t('jobs-panel-output-at')} ${timeOf(job.lastOutputAt)}` : '')}
             </Text>
           </Box>
-          {(job.outputTotalBytes !== undefined || job.outputDropped === true) && (
+          {(job.outputTotalBytes !== undefined || job.outputDropped === true || (job.outputLines?.length ?? 0) >= JOBS_MAX_OUTPUT_LINES) && (
             <Box flexDirection="row" gap={1}>
               <Box width={7} flexShrink={0}><Text dimColor>{t('jobs-panel-output')}</Text></Box>
               <Text dimColor>
                 {(job.outputTotalBytes !== undefined ? formatBytes(job.outputTotalBytes) : '')
                   + (job.outputDropped === true
                     ? `${job.outputTotalBytes !== undefined ? ' · ' : ''}${t('jobs-output-dropped')}`
+                    : '')
+                  // At the retention cap the visible tail is provably partial:
+                  // say so instead of letting it read as the whole stream.
+                  + ((job.outputLines?.length ?? 0) >= JOBS_MAX_OUTPUT_LINES
+                    ? `${job.outputTotalBytes !== undefined || job.outputDropped === true ? ' · ' : ''}${t('jobs-output-retained-tail', { n: job.outputLines?.length ?? 0 })}`
                     : '')}
+              </Text>
+            </Box>
+          )}
+          {job.lastProgress !== undefined && (
+            // The producer's last progress line outlives the live chip: the
+            // registry clears `progress` at settle, the detail keeps the last
+            // line with its observation time and the producer kind.
+            <Box flexDirection="row" gap={1}>
+              <Box width={7} flexShrink={0}><Text dimColor>{t('jobs-progress-latest')}</Text></Box>
+              <Text dimColor>
+                {job.lastProgress}
+                {job.lastProgressAt !== undefined ? ` · ${t('jobs-progress-updated-at', { time: timeOf(job.lastProgressAt) })}` : ''}
+                {` · ${t('jobs-progress-source', { source: job.kind })}`}
               </Text>
             </Box>
           )}
@@ -232,7 +239,10 @@ function JobRowLine({ job, focused, armed, columns, onFocus }: {
             </Box>
           )}
           {(job.outputLines?.length ?? 0) > 0 ? (
-            <Box flexDirection="column" marginTop={1}>
+            <JobSection rows={[]} color="success">
+              <Box flexDirection="row">
+              <Box width={2} flexShrink={0}><Text dimColor>≡ </Text></Box>
+              <Box flexDirection="column" flexGrow={1}>
               {renderOutputRuns(job).map((run, runIndex) => (
                 <Box
                   key={`${job.id}-run-${runIndex}`}
@@ -249,17 +259,41 @@ function JobRowLine({ job, focused, armed, columns, onFocus }: {
                     <Markdown cacheTokens>{run.text}</Markdown>
                   )}
                   {run.kind === 'stderr' && (
-                    <Text color="error">{`│ ${run.text}`}</Text>
+                    <Text dimColor>{run.text}</Text>
                   )}
                   {run.kind === 'log' && (
-                    <Text dimColor italic>{`│ ${run.text}`}</Text>
+                    <Text dimColor italic>{run.text}</Text>
                   )}
                 </Box>
               ))}
-            </Box>
+              </Box>
+              </Box>
+            </JobSection>
           ) : (
             <Text dimColor>{t('jobs-panel-no-output-yet')}</Text>
           )}
+          {/* Bounded observation timeline: started, progress changes, output
+              drains, gaps and the settle, in arrival order. A job whose
+              history predates this process (resumed roster) says the
+              timeline is unavailable instead of showing it empty. */}
+          <Box flexDirection="column" marginTop={1}>
+            <Text dimColor bold>{t('jobs-timeline')}</Text>
+            {(job.timeline?.length ?? 0) === 0 ? (
+              <Text dimColor italic>{t('jobs-timeline-events-unavailable')}</Text>
+            ) : (
+              <>
+                {(job.gapCount ?? 0) > 0 && (
+                  <Text dimColor italic>{t('jobs-timeline-gap-count', { n: job.gapCount ?? 0 })}</Text>
+                )}
+                {(job.timeline?.length ?? 0) > JOBS_TIMELINE_DISPLAY && (
+                  <Text dimColor>{`… +${(job.timeline?.length ?? 0) - JOBS_TIMELINE_DISPLAY}`}</Text>
+                )}
+                {(job.timeline ?? []).slice(-JOBS_TIMELINE_DISPLAY).map((event, index) => (
+                  <Text key={index} dimColor>{timelineLine(event)}</Text>
+                ))}
+              </>
+            )}
+          </Box>
         </Box>
       )}
     </Box>
@@ -273,6 +307,32 @@ function timeOf(ms: number): string {
   return `${pad(date.getHours())}:${pad(date.getMinutes())}:${pad(date.getSeconds())}`
 }
 
+/** The rendered form of one timeline observation: `HH:MM:SS <what>`.
+ * Progress keeps the producer's own line verbatim (never re-parsed into a
+ * percentage); an output drain names its byte advance and channel when the
+ * kernel labelled one. */
+function timelineLine(event: JobTimelineEvent): string {
+  const time = timeOf(event.at)
+  switch (event.kind) {
+    case 'started':
+      return `${time} ${t('jobs-timeline-started')}`
+    case 'progress':
+      return `${time} ${t('jobs-timeline-progress')} ${event.text ?? ''}`
+    case 'output':
+      return `${time} ${event.channel === 'stderr' ? 'stderr' : event.channel === 'log' ? 'log' : t('jobs-timeline-output')}${event.bytes === undefined ? '' : ` +${formatBytes(event.bytes)}`}`
+    case 'gap':
+      return `${time} ${t('jobs-timeline-gap')}`
+    case 'stopping':
+      return `${time} ${t('jobs-status-stopping')}`
+    case 'settled':
+      return `${time} ${t('jobs-timeline-settled')}${event.text === undefined || event.text === '' ? '' : ` · ${event.text}`}`
+  }
+}
+
+/** Latest timeline slice shown in the focused detail: enough to read the
+ * recent shape of the job without the block swallowing the panel. */
+const JOBS_TIMELINE_DISPLAY = 8
+
 /**
  * `/jobs` overlay panel — every background job of the current session with
  * live status, elapsed/total duration and terminal detail (exit code).
@@ -280,8 +340,17 @@ function timeOf(ms: number): string {
  * row expands a detail block (full label, start/finish times, mirrored
  * output tail). The panel is the deep view behind the transcript job cards.
  */
-export function JobsPanel({ jobs, onClose, onKill, onSendToChat, initialFocusId, focusRequest, variant = 'default', focused = true, visible = true }: JobsPanelProps): React.ReactNode {
+export function JobsPanel({ jobs, onClose, onKill, onSendToChat, initialFocusId, focusRequest, variant = 'default', focused = true, visible = true, onWatchOutput }: JobsPanelProps): React.ReactNode {
   const panelMode = variant === 'panel'
+  const [expandedJobs, setExpandedJobs] = React.useState<ReadonlySet<string>>(new Set())
+  const toggleDetails = (id: string): void => {
+    setExpandedJobs(previous => {
+      const next = new Set(previous)
+      if (next.has(id)) next.delete(id)
+      else next.add(id)
+      return next
+    })
+  }
   const [focusIndex, setFocusIndex] = React.useState(() => {
     if (initialFocusId === undefined) return 0
     const found = jobs.findIndex(job => job.id === initialFocusId)
@@ -339,6 +408,12 @@ export function JobsPanel({ jobs, onClose, onKill, onSendToChat, initialFocusId,
   }, [])
 
   const focus = Math.min(focusIndex, Math.max(0, jobs.length - 1))
+  // The focused job's detail shows its output: keep that tail fresh while
+  // the panel is open and visible (a hidden side-panel instance keeps its
+  // state but reads nothing; a settled job is read once more, then left
+  // alone).
+  const focusedId = jobs[focus]?.id
+  React.useEffect(() => (focusedId === undefined || onWatchOutput === undefined || !visible ? undefined : onWatchOutput(focusedId)), [focusedId, onWatchOutput, visible])
 
   // The armed confirmation decays after 4s so a stray later `k` never kills.
   React.useEffect(() => {
@@ -347,10 +422,7 @@ export function JobsPanel({ jobs, onClose, onKill, onSendToChat, initialFocusId,
     return () => clearTimeout(timer)
   }, [killArmed])
 
-  // Full-screen form: byte-identical to the pre-panel behavior (the only
-  // delta is isActive, which is always true in default mode). In panel mode
-  // this stays registered-but-inactive so the hook order never changes; the
-  // host dispatcher (usePanelInput) owns the keys instead.
+  // Full-screen input stays registered but inactive when the panel dispatcher owns keys.
   useInput((input, key, event) => {
     if (panelMode) return
     if (key.escape || (key.ctrl && input === 'c')) {
@@ -383,6 +455,12 @@ export function JobsPanel({ jobs, onClose, onKill, onSendToChat, initialFocusId,
           setKillArmed(selected.id)
         }
       }
+      return
+    }
+    if (input === 'e' && !key.ctrl && !key.meta) {
+      event.stopImmediatePropagation()
+      setKillArmed(undefined)
+      if (focusedId !== undefined) toggleDetails(focusedId)
       return
     }
     // Enter on a live job does nothing extra (the card/panel IS the view);
@@ -422,6 +500,11 @@ export function JobsPanel({ jobs, onClose, onKill, onSendToChat, initialFocusId,
           setKillArmed(selected.id)
         }
       }
+      return true
+    }
+    if (input === 'e' && !key.ctrl && !key.meta) {
+      setKillArmed(undefined)
+      if (focusedId !== undefined) toggleDetails(focusedId)
       return true
     }
     // 's' = Send to Chat：焦点任务附为下一次提交的上下文（chip 在输入框
@@ -487,6 +570,9 @@ export function JobsPanel({ jobs, onClose, onKill, onSendToChat, initialFocusId,
                   focused={index === focus}
                   armed={killArmed === job.id}
                   columns={rowColumns}
+                  expanded={expandedJobs.has(job.id)}
+                  width={terminalColumns - (panelMode ? 2 : 4)}
+                  onToggle={() => { setKillArmed(undefined); setFocusIndex(index); toggleDetails(job.id) }}
                   onFocus={() => { setKillArmed(undefined); setFocusIndex(index) }}
                 />
               ))
@@ -536,6 +622,9 @@ export function JobsPanel({ jobs, onClose, onKill, onSendToChat, initialFocusId,
                 focused={index === focus}
                 armed={killArmed === job.id}
                 columns={rowColumns}
+                expanded={expandedJobs.has(job.id)}
+                width={terminalColumns - (panelMode ? 2 : 4)}
+                onToggle={() => { setKillArmed(undefined); setFocusIndex(index); toggleDetails(job.id) }}
                 onFocus={() => { setKillArmed(undefined); setFocusIndex(index) }}
               />
             ))

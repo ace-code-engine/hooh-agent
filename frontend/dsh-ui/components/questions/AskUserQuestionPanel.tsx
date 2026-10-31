@@ -10,6 +10,8 @@
  * appends into that input row (single-select also attaches the option's
  * label, so the answer can carry both `selected` and `custom`); focusing
  * the input row itself and typing gives a pure custom answer.
+ * Local /provider model lists additionally offer a Tab capability editor;
+ * ordinary questionnaires retain the inline-answer behavior.
  *
  * Paste works on the input row like the composer: Ctrl+V/Alt+V (the keymap
  * `paste` binding, remappable in /settings) reads the system clipboard,
@@ -27,18 +29,23 @@
 
 import React from 'react'
 import { t } from '../../i18n.js'
-import { Box, Text, useInput, useTerminalSize } from '../../ui.js'
-import { useDeclaredCursor } from '../../ink/hooks/use-declared-cursor.js'
+import { Box, Text, ScrollBox, useInput, useTerminalSize, type ScrollBoxHandle } from '../../ui.js'
+import wrapText from '../../ink/wrap-text.js'
+import { useDeclaredCursor, useNativeCursor } from '../../ink/hooks/use-declared-cursor.js'
 import { Divider } from '../design-system/Divider.js'
 import { POINTER } from '../../terminal-utils/figures.js'
-import type { QuestionDraft, QuestionSelection } from '../../dsh-adapter/questions.js'
+import type { QuestionDraft, QuestionSelection } from '../../channel/questions.js'
+import type { ProviderModelEditor as ModelEditor } from '../../adapter/ports/channel-settings.js'
 import { PlanReviewPanel } from './PlanReviewPanel.js'
+import { ProviderModelEditor } from './ProviderModelEditor.js'
 import { QuestionMinimizedBar } from './QuestionMinimizedBar.js'
 import { isPlainReturnInput } from '../../utils/modifiers.js'
 import { actionMatches, comboDisplay, effectiveComboDisplay, primaryComboString } from '../../utils/keymap.js'
 import { flattenPasteInline } from '../../dsh-adapter/sanitize.js'
 import { readClipboard, type ClipboardRead } from '../../utils/clipboard.js'
+import { createHyperlink } from '../../terminal-utils/hyperlink.js'
 import { listWindow } from '../listWindow.js'
+import { clipPreviewRows, pagePreview } from '../previewRows.js'
 
 /** Unmodified arrows switch questions; Ctrl/Alt/Super/Shift stay caret motion. */
 function isPlainArrow(key: { ctrl?: boolean; meta?: boolean; super?: boolean; shift?: boolean }): boolean {
@@ -48,6 +55,8 @@ function isPlainArrow(key: { ctrl?: boolean; meta?: boolean; super?: boolean; sh
 const CHECKED = '◉'
 const UNCHECKED = '○'
 const PENCIL = '✎'
+/** One masked code point of a secret answer (`question.secret`). */
+const SECRET_MASK = '•'
 
 /**
  * Paste cap for one answer field, in code points. Typing is naturally
@@ -59,6 +68,15 @@ const PENCIL = '✎'
  * PlanReviewPanel (the two panels share the same input contract).
  */
 const ANSWER_PASTE_MAX_POINTS = 8000
+
+/**
+ * Preview caps (#1664): each field contributes at most these rows to the
+ * shared body viewport, keeping the option list and key hint on screen. A
+ * short terminal shrinks them further through QUESTION_CHROME_ROWS — the
+ * rows the chrome and the panel scaffolding need before any preview text.
+ */
+const QUESTION_PREVIEW_MAX_ROWS = 6
+const QUESTION_CHROME_ROWS = 20
 
 export type AskUserQuestionPanelProps = {
   /** The question to render (from the QuestionStore snapshot). */
@@ -76,9 +94,19 @@ export type AskUserQuestionPanelProps = {
      *  (single-select) shown on first display, before any saved draft — e.g.
      *  the models already enabled on a provider being edited. */
     readonly defaultSelected?: readonly string[]
+    /** A URL the question is about (an MCP server's sign-in page): one line
+     *  under the detail, an OSC 8 hyperlink where the terminal supports it
+     *  (plain otherwise; a scheme that is not http(s)/file/mailto shows
+     *  nothing — the notice row still names it). */
+    readonly link?: string
+    /** A secret answer (a token, a password): the input row shows one `•`
+     *  per typed code point; the submitted answer is the real text. */
+    readonly secret?: boolean
+    /** Local /provider draft editor. Ordinary model-facing asks carry none. */
+    readonly modelEditor?: ModelEditor
     /** Presentation intent tag (rc.6): 'plan-review' switches to the
      *  decision-card layout; an intent never changes the protocol. */
-    readonly intent?: { readonly kind: 'plan-review'; readonly approve: string }
+    readonly intent?: { readonly kind: 'plan-review'; readonly approve: string; readonly approveAlso?: readonly string[]; readonly decline?: string }
   }
   /** 1-based position within the batch (progress header). */
   readonly position: number
@@ -160,7 +188,14 @@ export function AskUserQuestionPanel({
   const options = question.options ?? []
   const multiSelect = question.multiSelect === true
   const hideCustomInput = question.hideCustomInput === true && options.length > 0
-  const { rows: terminalRows } = useTerminalSize()
+  const modelEditor = typeof question.modelEditor?.read === 'function'
+    && typeof question.modelEditor.save === 'function' && typeof question.modelEditor.edited === 'function'
+    ? question.modelEditor : undefined
+  const [editingModel, setEditingModel] = React.useState<string | null>(null)
+  // Opening Tab and later keys may share one stdin batch. Stop the list
+  // synchronously, before the nested editor has had a chance to mount.
+  const editingRef = React.useRef(false)
+  const { columns: terminalColumns, rows: terminalRows } = useTerminalSize()
   /** Rows: the real options plus the inline input row at the tail. */
   const rowCount = options.length + (hideCustomInput ? 0 : 1)
   // A saved draft wins over the wizard's default selection (returning to a
@@ -236,6 +271,7 @@ export function AskUserQuestionPanel({
   }
   const onInputRow = (): boolean => !hideCustomInput && focusRef.current === options.length
   const [error, setError] = React.useState<string | null>(null)
+  const bodyScrollRef = React.useRef<ScrollBoxHandle | null>(null)
 
   const inputFocused = !hideCustomInput && focusIndex === options.length
   // Chat chrome + panel scaffolding consume twelve rows before the option
@@ -243,15 +279,67 @@ export function AskUserQuestionPanel({
   // Optional header/detail/input/error rows are charged explicitly. Long
   // lists then use fixed one/two-line rows so listWindow's budget is exact;
   // short questionnaires retain their existing wrapped presentation.
-  const detailRows = question.detail === undefined ? 0 : question.detail.split('\n').length + 1
+  const linkText = question.link === undefined || question.link === '' ? '' : createHyperlink(question.link)
+  // The question and its detail are preview text above the option list, and
+  // `wrap` re-flows every long line: counting source lines undercounts the
+  // rows they really take, and neither text had a cap — a long question
+  // pushed the options and the hint off screen with nothing left to answer
+  // (#1664). Pre-wrap to the panel's content width, fold past the cap, and
+  // charge the REAL row count to the option budget below.
+  const contentCells = Math.max(8, terminalColumns - 4)
+  const previewMaxRows = Math.max(2, Math.min(
+    QUESTION_PREVIEW_MAX_ROWS,
+    terminalRows - QUESTION_CHROME_ROWS,
+  ))
+  const questionView = clipPreviewRows(question.question, contentCells, previewMaxRows)
+  const questionBlockRows = questionView.rows.length + (questionView.omitted > 0 ? 1 : 0)
+  // The question's unused allowance flows to the detail — but only the rows
+  // the terminal frees up beyond the chrome floor. On a terminal already at
+  // that floor every preview row is contested, and the cap is what keeps the
+  // option list and the hint on screen; above it a one-line question must not
+  // fold the detail against a budget the question never needed.
+  const sparePreviewRows = Math.max(
+    0,
+    terminalRows - QUESTION_CHROME_ROWS - questionBlockRows,
+  )
+  const detailMaxRows = Math.max(2, Math.min(
+    QUESTION_PREVIEW_MAX_ROWS,
+    previewMaxRows + sparePreviewRows,
+  ))
+  const detailView = question.detail === undefined
+    ? undefined
+    : clipPreviewRows(question.detail, contentCells, detailMaxRows)
+  const detailRows = detailView === undefined
+    ? (linkText === '' ? 0 : 2)
+    : detailView.rows.length + (detailView.omitted > 0 ? 1 : 0) + 1 + (linkText === '' ? 0 : 1)
+  // One viewport keeps the question and its detail independently reachable:
+  // a question without a detail must still be readable beyond its preview.
+  const bodyRows = questionView.rows.length + questionView.omitted
+    + (detailView === undefined ? 0 : detailView.rows.length + detailView.omitted)
+    + (question.detail !== undefined || linkText !== '' ? 1 : 0)
+    + (linkText === '' ? 0 : wrapText(linkText, contentCells, 'wrap').split('\n').length)
+  const previewRows = questionBlockRows + detailRows
+  const bodyScrollRows = bodyRows > previewRows ? Math.max(1, previewRows - 1) : 0
+  const submitRows = multiSelect && fullscreen && (checked.size > 0 || textRef.current !== '') ? 2 : 0
   const reservedRows = 12
     + (question.header === undefined ? 0 : 1)
+    + (questionBlockRows - 1)
     + detailRows
     + (hideCustomInput ? 0 : 1)
     + (error === null ? 0 : 2)
+    + submitRows
   const optionBudget = Math.max(terminalRows - reservedRows, 2)
   const optionHeights = options.map(option => option.description === undefined ? 1 : 2)
-  const windowedOptions = optionHeights.reduce((sum, height) => sum + height, 0) > optionBudget
+  const optionLabels = options.map(option =>
+    option.label + (modelEditor?.edited(option.label) ? ` ${t('provider-model-edited')}` : ''))
+  // Non-windowed rows wrap at their actual text width. Reducing the preview
+  // must not disable windowing just because a multiline description was
+  // counted as one line. Windowed rows below still have fixed 1/2-row heights.
+  const optionCells = Math.max(1, contentCells - 3)
+  const wrappedOptionRows = options.reduce((sum, option, index) =>
+    sum + wrapText(optionLabels[index]!, optionCells, 'wrap').split('\n').length
+      + (option.description === undefined ? 0 : wrapText(option.description, optionCells, 'wrap').split('\n').length), 0)
+  const windowedOptions = wrappedOptionRows > optionBudget
   const optionFocus = Math.min(focusIndex, Math.max(options.length - 1, 0))
   const optionWindow = windowedOptions
     ? listWindow(optionHeights, optionFocus, optionBudget)
@@ -267,7 +355,12 @@ export function AskUserQuestionPanel({
   // three visual variants): its nodeCache rect IS the caret cell, so (0, 0)
   // stays exact under CJK widths and line wrapping without any
   // layout-affecting wrapper Box.
-  const caretRef = useDeclaredCursor({ line: 0, column: 0, active: !hideCustomInput && !collapsed })
+  const nativeCursor = useNativeCursor()
+  const caretRef = useDeclaredCursor({
+    line: 0, column: 0,
+    active: !hideCustomInput && !collapsed && editingModel === null,
+    visible: nativeCursor && inputFocused,
+  })
 
   const moveFocus = (delta: 1 | -1): void => {
     if (rowCount <= 1) return
@@ -414,7 +507,30 @@ export function AskUserQuestionPanel({
     }
   }
 
+  const openModelEditor = (model: string, event: { stopImmediatePropagation(): void }): void => {
+    editingRef.current = true
+    setEditingModel(model)
+    event.stopImmediatePropagation()
+  }
+  const manualModelAtCaret = (): string => {
+    const points = [...textRef.current]
+    const isSeparator = (char: string | undefined): boolean => char === undefined || /[,，\s]/u.test(char)
+    let at = Math.min(cursorRef.current, points.length)
+    if (at === points.length || isSeparator(points[at])) at -= 1
+    while (at >= 0 && isSeparator(points[at])) at -= 1
+    if (at < 0) return ''
+    let start = at
+    let end = at + 1
+    while (start > 0 && !isSeparator(points[start - 1])) start -= 1
+    while (end < points.length && !isSeparator(points[end])) end += 1
+    return points.slice(start, end).join('')
+  }
+
   useInput((input, key, event) => {
+    if (editingRef.current) {
+      event.stopImmediatePropagation()
+      return
+    }
     // The mounted panel owns folding, just like answering: hidden asks
     // cannot steal approval/dialog keys, and an interrupting questionnaire
     // still works when Chat yields to an underlying screen's open flag.
@@ -429,6 +545,15 @@ export function AskUserQuestionPanel({
         event.stopImmediatePropagation()
       }
       return
+    }
+    if (bodyScrollRows > 0) {
+      const up = actionMatches('questionDetailUp', input, key)
+      const down = actionMatches('questionDetailDown', input, key)
+      if (up || down) {
+        pagePreview(bodyScrollRef.current, up ? -1 : 1)
+        event.stopImmediatePropagation()
+        return
+      }
     }
     if (key.ctrl && input === 'c') {
       onCancel()
@@ -465,6 +590,16 @@ export function AskUserQuestionPanel({
     }
 
     if (onInputRow()) {
+      if (key.tab && modelEditor !== undefined) {
+        const manualModel = manualModelAtCaret()
+        if (manualModel !== '') {
+          openModelEditor(manualModel, event)
+          return
+        }
+        placeFocus(0)
+        event.stopImmediatePropagation()
+        return
+      }
       if (key.upArrow) {
         moveFocus(-1)
         return
@@ -548,6 +683,13 @@ export function AskUserQuestionPanel({
       if (onForward !== undefined) onForward(currentDraft())
       return
     }
+    if (key.tab && !key.shift && !key.ctrl && !key.meta && !key.super && modelEditor !== undefined) {
+      const model = options[focusRef.current]?.label
+      if (model !== undefined) {
+        openModelEditor(model, event)
+      }
+      return
+    }
     if (key.tab && !hideCustomInput) {
       placeFocus(options.length)
       setError(null)
@@ -584,8 +726,11 @@ export function AskUserQuestionPanel({
 
   // The caret counts code points (see the module header), so the caret
   // char and the visual split index into the point array — never raw
-  // UTF-16 offsets, which could land inside a surrogate pair.
-  const textPoints = [...customText]
+  // UTF-16 offsets, which could land inside a surrogate pair. A secret
+  // question paints one mask per code point instead: the same caret math,
+  // nothing of the typed text on screen.
+  const typedPoints = [...customText]
+  const textPoints = question.secret === true ? typedPoints.map(() => SECRET_MASK) : typedPoints
   const cursorChar = customCursor < textPoints.length ? textPoints[customCursor] : ' '
   /** Mouse: click the input row to focus it (same as Tab). */
   const focusInputRow = (): void => {
@@ -655,11 +800,10 @@ export function AskUserQuestionPanel({
         ) : (
           <>
             <Text wrap="wrap">{textPoints.slice(0, customCursor).join('')}</Text>
-            {/* Focused keeps the inverse block caret (same contract as the
-                composer's value box): the preedit then renders inverted,
-                which reads as "the block is filling with text". */}
+            {/* Leave the native caret's glyph plain so the terminal can
+                animate it and paint IME preedit with the input's style. */}
             {inputFocused
-              ? <Text ref={caretRef} inverse>{cursorChar}</Text>
+              ? <Text ref={caretRef} inverse={!nativeCursor}>{cursorChar}</Text>
               : <Text ref={caretRef}>▏</Text>}
             <Text wrap="wrap">{textPoints.slice(inputFocused ? customCursor + 1 : customCursor).join('')}</Text>
           </>
@@ -681,7 +825,8 @@ export function AskUserQuestionPanel({
             : absoluteIndex === optionWindow.end - 1 && optionWindow.end < options.length
               ? '↓'
               : ' '
-        const label = windowedOptions ? option.label.replace(/\s+/gu, ' ').trim() : option.label
+        const optionLabel = optionLabels[absoluteIndex]!
+        const label = windowedOptions ? optionLabel.replace(/\s+/gu, ' ').trim() : optionLabel
         const description = windowedOptions
           ? option.description?.replace(/\s+/gu, ' ').trim()
           : option.description
@@ -723,7 +868,7 @@ export function AskUserQuestionPanel({
         )
       })}
       {hideCustomInput ? null : renderInputRow()}
-      {multiSelect && fullscreen && (checked.size > 0 || textRef.current !== '') && (
+      {submitRows > 0 && (
         <Box
           flexDirection="row"
           height={1}
@@ -743,6 +888,7 @@ export function AskUserQuestionPanel({
   const hintParts = inputFocused
     ? [
         t('question-hint-type'),
+        ...(modelEditor === undefined ? [] : [t('provider-model-edit-hint')]),
         t('question-hint-paste', { key: comboDisplay(primaryComboString('paste')) }),
         t('question-hint-enter'),
         ...(options.length > 0 ? [t('question-hint-back')] : []),
@@ -755,6 +901,7 @@ export function AskUserQuestionPanel({
     : [
         t('question-hint-select'),
         ...(multiSelect ? [t('question-hint-multi')] : []),
+        ...(modelEditor === undefined ? [] : [t('provider-model-edit-hint')]),
         ...(hideCustomInput ? [] : [t('question-hint-paste', { key: comboDisplay(primaryComboString('paste')) }), t('question-hint-attach')]),
         t('question-hint-enter'),
         onBack === undefined ? t('question-hint-esc') : t('question-hint-previous'),
@@ -770,6 +917,31 @@ export function AskUserQuestionPanel({
   if (collapsed) {
     return <QuestionMinimizedBar progress={headerTitle} questionText={questionText} onExpand={onExpand ?? (() => {})} />
   }
+
+  if (editingModel !== null && modelEditor !== undefined) {
+    return <ProviderModelEditor
+      model={editingModel}
+      editor={modelEditor}
+      onClose={() => {
+        editingRef.current = false
+        setEditingModel(null)
+      }}
+      onAbort={onCancel}
+      readClipboardOverride={readClipboardOverride}
+    />
+  }
+
+  const body = (
+    <>
+      <Text bold wrap="wrap">{question.question}</Text>
+      {(question.detail !== undefined || linkText !== '') && (
+        <Box flexDirection="column" marginTop={1}>
+          {question.detail !== undefined && <Text dimColor italic wrap="wrap">{question.detail}</Text>}
+          {linkText !== '' && <Text wrap="wrap">{linkText}</Text>}
+        </Box>
+      )}
+    </>
+  )
 
   return (
     <Box flexDirection="column" marginTop={1} paddingLeft={2} paddingRight={2} width="100%">
@@ -788,18 +960,20 @@ export function AskUserQuestionPanel({
             ◈ {question.header}
           </Text>
         )}
-        <Text bold wrap="wrap">
-          {question.question}
-        </Text>
-        {question.detail !== undefined && (
-          <Box flexDirection="column" marginTop={1}>
-            {question.detail.split('\n').map((line, index) => (
-              <Text key={index} dimColor italic wrap="wrap">
-                {line}
-              </Text>
-            ))}
-          </Box>
-        )}
+        {bodyScrollRows > 0 ? (
+          <>
+            <ScrollBox ref={bodyScrollRef} flexDirection="column" height={bodyScrollRows} flexShrink={0}>
+              {body}
+            </ScrollBox>
+            <Text dimColor wrap="truncate-end">
+              {t('question-detail-scroll', {
+                count: bodyRows - bodyScrollRows,
+                up: effectiveComboDisplay('questionDetailUp'),
+                down: effectiveComboDisplay('questionDetailDown'),
+              })}
+            </Text>
+          </>
+        ) : body}
       </Box>
       {renderOptions()}
       {error !== null && (

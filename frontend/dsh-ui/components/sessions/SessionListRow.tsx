@@ -5,7 +5,10 @@ import type { ClickEvent } from '../../ink/events/click-event.js'
 import type { ContextMenuEvent } from '../../ink/events/context-menu-event.js'
 import { useTooltip } from '../Tooltip.js'
 import { SpinnerGlyph } from '../Spinner/SpinnerGlyph.js'
+import { useAnimationFrame } from '../../ink/hooks/use-animation-frame.js'
+import { useTerminalFocus } from '../../ink/hooks/use-terminal-focus.js'
 import { stringWidth } from '../../ink/stringWidth.js'
+import { useDeclaredCursor, useNativeCursor } from '../../ink/hooks/use-declared-cursor.js'
 import {
   formatAbsolute,
   formatBytes,
@@ -41,13 +44,24 @@ const LIVE_STATUS_COLOR: Readonly<Record<AgentViewStatus, 'warning' | 'suggestio
   stopped: undefined,
 }
 
+/** Only a visible working glyph subscribes; the session list does not tick. */
+function WorkingGlyph(): React.ReactNode {
+  const focused = useTerminalFocus()
+  const [ref, time] = useAnimationFrame(focused ? 120 : null)
+  return (
+    <Box ref={ref}>
+      <SpinnerGlyph frame={Math.floor(time / 120)} time={time} messageColor="suggestion" reducedMotion={false} />
+    </Box>
+  )
+}
+
 /**
  * One session in the browser's list: a title line and a metadata line.
  *
  * Two lines rather than one because the two carry different jobs. The title
- * answers "is this the conversation I mean"; the metadata answers "which of
- * the three that look alike is it" — when it was, on what branch, how big,
- * under which model. Folding both onto one line makes the title compete with
+ * answers "is this the conversation I mean"; the metadata gives its age and
+ * branch. Size and model are available in the title tooltip rather than taking
+ * space in every row. Folding both lines into one makes the title compete with
  * facts nobody reads first, and on a narrow terminal the title is what loses.
  *
  * Widths are resolved here rather than delegated to flexbox: the row must
@@ -59,6 +73,7 @@ export function SessionListRow({
   width,
   depth,
   focused,
+  declareCursor = false,
   pinned,
   now,
   onClick,
@@ -67,7 +82,6 @@ export function SessionListRow({
   liveStatus,
   current,
   occupiedPid,
-  spinner,
 }: {
   session: SessionSummary
   /** Columns available to the row, indentation included. */
@@ -75,6 +89,8 @@ export function SessionListRow({
   /** 0 for a conversation, 1 for a sub-agent run under its parent. */
   depth: number
   focused: boolean
+  /** Park the native caret on this row while the list owns it. */
+  declareCursor?: boolean
   /** Whether the user pinned this session to the top of the browser. */
   pinned: boolean
   /** Epoch ms used for every relative time in this render pass. */
@@ -101,10 +117,10 @@ export function SessionListRow({
    * not break. Undefined means free, or already ours.
    */
   occupiedPid?: number
-  /** Shared animation clock for the working glyph. */
-  spinner?: { frame: number; time: number }
 }): React.ReactNode {
   const indent = depth * 2
+  const nativeCursor = useNativeCursor()
+  const cursorRef = useDeclaredCursor({ line: 0, column: indent, active: focused && declareCursor, visible: nativeCursor, hideOnIdle: true })
   // Two cells for the focus marker, plus the indent for a nested run.
   const body = Math.max(8, width - 2 - indent)
   const mark = kindMark(session.kind)
@@ -140,14 +156,14 @@ export function SessionListRow({
     if (shownTitle !== titleText) parts.push(titleText)
     parts.push(formatAbsolute(session.updatedAt))
     if (session.cwd !== '') parts.push(session.cwd)
+    const size = formatBytes(session.bytes)
+    if (size !== undefined) parts.push(size)
+    if (session.model !== undefined) parts.push(session.model)
     return parts.join('\n')
   })
 
   const facts: string[] = [formatWhen(session.updatedAt, now)]
   if (session.branch !== undefined) facts.push(session.branch)
-  const size = formatBytes(session.bytes)
-  if (size !== undefined) facts.push(size)
-  if (session.model !== undefined) facts.push(session.model)
   if (session.childCount > 0 && depth === 0) {
     facts.push(t('session-children', { n: session.childCount }))
   }
@@ -166,7 +182,7 @@ export function SessionListRow({
       // background and a selected row keeps its own colour while hovered.
       backgroundColor={hovered && !focused ? 'userMessageBackgroundHover' : undefined}
     >
-      <Box>
+      <Box ref={cursorRef}>
         <Text color={focused ? 'success' : 'subtle'}>
           {`${' '.repeat(indent)}${focused ? '❯ ' : '  '}`}
         </Text>
@@ -190,13 +206,8 @@ export function SessionListRow({
             occupied one is a red ⊘; a session this terminal is not running
             holds the same two columns blank. */}
         <Box>
-          {liveStatus === 'working' && !occupied && spinner !== undefined ? (
-            <SpinnerGlyph
-              frame={spinner.frame}
-              messageColor="suggestion"
-              reducedMotion={false}
-              time={spinner.time}
-            />
+          {liveStatus === 'working' && !occupied ? (
+            <WorkingGlyph />
           ) : (
             <Text color={stateColor} dimColor={liveStatus === undefined && !occupied}>
               {`${stateGlyph} `}

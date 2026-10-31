@@ -61,7 +61,7 @@ export type PageMarginSpec = `${number}x${number}`
  * live in `components/splashFonts.ts`, whose registry is keyed by this union
  * — so a face declared here without a table entry is a compile error there.
  */
-export type SplashFontId = 'bold' | 'square' | 'bevel' | 'wide' | 'dot' | 'stencil' | 'classic' | 'slab'
+export type SplashFontId = 'bold' | 'square' | 'bevel' | 'wide' | 'dot' | 'stencil' | 'classic' | 'slab' | 'shadow'
 
 /**
  * Stored big-text setting (settings `dsh-tui.splashFont`): `daily` (the
@@ -69,6 +69,13 @@ export type SplashFontId = 'bold' | 'square' | 'bevel' | 'wide' | 'dot' | 'stenc
  * Normalization back to `daily` belongs to `components/splashFonts.ts`.
  */
 export type SplashFontSetting = 'daily' | SplashFontId
+
+/**
+ * Stored brand-look setting (settings `dsh-tui.brand`): `auto` (the default)
+ * follows the active backend (`branding.ts` resolves it); the other members
+ * pin one look. Normalization back to `auto` belongs to `branding.ts`.
+ */
+export type BrandSetting = 'auto' | 'deepseek' | 'claude' | 'codex'
 
 /** Individually selectable fields in the status footer. */
 export interface StatusBarConfig {
@@ -109,6 +116,16 @@ export interface StatusBarConfig {
   trajectory: boolean
   /** Idle `? for shortcuts` reminder; shortcut keys remain available when hidden. */
   shortcutHint: boolean
+  /** Footer fields contributed by plugins (`tuiStatus.setField`). Off only
+   *  stops the rendering; plugins keep their registrations. */
+  pluginFields: boolean
+  /** Plugin footer fields as an explicit, ordered list — the per-field layer
+   *  under {@link pluginFields}. `''` shows none; `'*'` (the default) shows
+   *  all of them in their plugin-declared slots and registration order;
+   *  anything else is exactly three `;`-separated groups whose index picks the
+   *  slot (`left-tail; right-head; right-tail`) and whose order picks the
+   *  sequence inside it. A listed key overrides its plugin-declared slot. */
+  pluginFieldsOrder: string
 }
 
 export interface SessionModeSpec {

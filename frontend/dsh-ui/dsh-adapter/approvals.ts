@@ -12,6 +12,12 @@
  * Outcomes are the protocol's closed set — `'allowed-once'` and
  * `'rejected'` from the panel, `'cancelled'` on abort/teardown; there is
  * no allow-always or feedback channel in the protocol.
+ *
+ * The store presents its asks through the shared permission-panel shape
+ * (`src/channel/permissions.ts`), so the one approval panel renders DSH and
+ * backend prompts alike: a DSH ask offers exactly the protocol's two
+ * options (allow once / reject), and the DSH-only facts (the `external`
+ * source badge, the background-session id) ride along on the snapshot.
  */
 
 import { compositionRoot } from './host-access.js'
@@ -23,9 +29,18 @@ import {
 import type { ApprovalOutcome, ApprovalRequest } from '@deepseek-ai/dsh-user-approval'
 import type { SessionEvent } from '@deepseek-ai/dsh-session'
 import { snapshotLiveSessionEvents } from './compat/liveSession.js'
+import { getLang } from '../i18n.js'
+import {
+  DEFAULT_PERMISSION_OPTIONS,
+  type PermissionPanelDecision,
+  type PermissionPanelOutcome,
+  type PermissionPanelSnapshot,
+  type PermissionPanelSource,
+} from '../channel/permissions.js'
 
-/** What the TUI renders while an approval is pending. */
-export interface ApprovalSnapshot {
+/** What the TUI renders while an approval is pending (the shared panel
+ *  shape plus the DSH facts it documents below). */
+export interface ApprovalSnapshot extends PermissionPanelSnapshot {
   /** Stable key so the panel remounts (fresh focus state) per request. */
   readonly key: string
   readonly toolName: string
@@ -56,6 +71,8 @@ export interface ApprovalSnapshot {
    * "needs input" instead of hanging on a fail-closed answer).
    */
   readonly agentId: string
+  /** The protocol's two choices: allow once / reject. */
+  readonly options: PermissionPanelSnapshot['options']
 }
 
 /**
@@ -100,6 +117,26 @@ export function getApprovalStore(ctx: Parameters<typeof compositionRoot>[0]): Ap
 }
 
 const COMMAND_CLIP = 500
+
+/**
+ * The ask's reason in the UI language. Requests may carry a localized
+ * `displayReason: { en, zh }` next to the English audit `reason` (DSH's
+ * auto-review asks do); older request types lack the field, so it is read
+ * structurally.
+ * @param req - The pending approval request.
+ * @returns The localized reason, else `req.reason`.
+ */
+function reasonOf(req: ApprovalRequest): string | undefined {
+  const display = (req as { displayReason?: unknown }).displayReason
+  if (display !== null && typeof display === 'object') {
+    const byLang = display as Record<string, unknown>
+    for (const lang of [getLang(), 'en']) {
+      const text = byLang[lang]
+      if (typeof text === 'string' && text.trim() !== '') return text
+    }
+  }
+  return req.reason
+}
 
 /**
  * Recover the gated command from the session log: the approval request
@@ -173,7 +210,7 @@ function consumedKey(agentId: unknown, callId: unknown): string {
  * the ask is withdrawn. The TUI subscribes for re-renders and decides via
  * {@link ApprovalStore.decide}.
  */
-export class ApprovalStore {
+export class ApprovalStore implements PermissionPanelSource {
   private readonly runtime: AdapterRuntimeOptions
 
   constructor(runtime: AdapterRuntimeOptions = defaultAdapterRuntime()) {
@@ -194,6 +231,9 @@ export class ApprovalStore {
    * have flipped — re-checks below this guard are skipped.
    */
   private externalCheckedAtEvents = -1
+  /** UI language the parked asks' reasons were resolved in (see
+   *  {@link refreshReasonLang}). */
+  private reasonLang = getLang()
   private notifyQueued = false
   /**
    * CallIds whose approval ask already settled (decided or cancelled).
@@ -233,6 +273,7 @@ export class ApprovalStore {
    * @returns The cached snapshot; the reference is stable between mutations.
    */
   getSnapshot(): ApprovalSnapshot | null {
+    this.refreshReasonLang()
     this.refreshActiveExternal()
     return this.snapshotCache
   }
@@ -264,6 +305,7 @@ export class ApprovalStore {
   pendingAgentDetail(
     agentId: string,
   ): Pick<ApprovalSnapshot, 'toolName'> & Partial<Pick<ApprovalSnapshot, 'reason' | 'command'>> | undefined {
+    this.refreshReasonLang()
     for (const ask of [...(this.active === undefined ? [] : [this.active]), ...this.queue]) {
       if (ask.snapshot.agentId !== agentId) continue
       const { toolName, reason, command } = ask.snapshot
@@ -287,12 +329,27 @@ export class ApprovalStore {
     })
   }
 
+  /** Re-resolve every parked ask's localized reason after a `/lang` switch;
+   *  Chat re-renders on the switch, so the read below lands on the new
+   *  language without a store subscription. */
+  private refreshReasonLang(): void {
+    const lang = getLang()
+    if (lang === this.reasonLang) return
+    this.reasonLang = lang
+    for (const pending of [...(this.active === undefined ? [] : [this.active]), ...this.queue]) {
+      const reason = reasonOf(pending.request)
+      if (reason === undefined) delete pending.snapshot.reason
+      else pending.snapshot.reason = reason
+    }
+    this.rebuildSnapshot()
+  }
+
   /** Rebuild the cached snapshot after any mutation of active. */
   private rebuildSnapshot(): void {
     const pending = this.active
     this.snapshotCache = pending === undefined
       ? null
-      : { key: pending.key, ...pending.snapshot }
+      : { key: pending.key, ...pending.snapshot, options: DEFAULT_PERMISSION_OPTIONS }
   }
 
   /**
@@ -386,6 +443,7 @@ export class ApprovalStore {
     assertCapabilityShadowPolicy('host.presentation.approve', this.runtime.mode, this.runtime.slices)
     return new Promise<ApprovalOutcome>(resolve => {
       const command = commandOf(req)
+      const reason = reasonOf(req)
       // Source badge: park() is reached through the approval/request
       // waterfall, which any in-process plugin can dispatch — the agent-id
       // gate in plugin.ts says whose SESSION it names, not that a live tool
@@ -405,7 +463,7 @@ export class ApprovalStore {
         snapshot: {
           agentId: String(req.agent.id),
           toolName: req.toolName,
-          ...(req.reason !== undefined ? { reason: req.reason } : {}),
+          ...(reason !== undefined ? { reason } : {}),
           ...(command !== undefined ? { command } : {}),
           ...(external ? { external: true } : {}),
         },
@@ -458,15 +516,20 @@ export class ApprovalStore {
   /**
    * The user decided on the current approval; settles it and drains the
    * next queued ask if any. No-op when nothing is pending.
-   * @param outcome - `'allowed-once'` or `'rejected'`.
+   * @param outcome - `'allowed-once'` or `'rejected'`. The protocol has no
+   *   allow-always and the panel never offers it for a DSH ask; one arriving
+   *   anyway is refused (fail closed). The panel's option detail carries
+   *   nothing the protocol can use beyond its panel key.
    */
-  decide(outcome: 'allowed-once' | 'rejected'): void {
+  decide(outcome: PermissionPanelOutcome, decision?: PermissionPanelDecision): void {
     const pending = this.active
     if (pending === undefined) return
+    // A keystroke the withdrawn panel still handled answers nothing.
+    if (decision?.key !== undefined && decision.key !== pending.key) return
     this.noteConsumed(pending)
     this.active = undefined
     this.rebuildSnapshot()
-    pending.resolve(outcome)
+    pending.resolve(outcome === 'allowed-once' ? 'allowed-once' : 'rejected')
     this.startNext()
     this.emit()
   }

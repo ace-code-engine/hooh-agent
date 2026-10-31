@@ -19,12 +19,15 @@ function throwCleanupFailures(failures: unknown[], message: string): void {
   if (failures.length > 1) throw new AggregateError(failures, message)
 }
 
+/** What every read of an ended Channel UI lifetime throws. */
+export const CHANNEL_UI_LIFETIME_ENDED = 'dsh-tui: Channel UI lifetime has ended'
+
 export function createChannelUiLease(isCurrent: () => boolean): ChannelUiLease & { dispose(): void } {
   let active = true
   const disposers = new Set<() => void>()
   return {
     assertActive() {
-      if (!active || !isCurrent()) throw new Error('dsh-tui: Channel UI lifetime has ended')
+      if (!active || !isCurrent()) throw new Error(CHANNEL_UI_LIFETIME_ENDED)
     },
     own(dispose) {
       let released = false
@@ -81,8 +84,26 @@ export function createChannelUi(channel: ChannelUi, mode: AdapterMode, lease: Ch
       enumerable: true,
       get() {
         check('read-only')
-        if (key === 'subagentControl') return methods(channel.subagentControl, { interrupt: 'mutate' })
-        if (key === 'jobControl') return channel.jobControl === undefined ? undefined : methods(channel.jobControl, { kill: 'mutate' })
+        if (key === 'subagentControl') {
+          const control = channel.subagentControl
+          const projected = methods(control, { interrupt: 'mutate' } as Readonly<Record<keyof typeof control, HostEffectClass>>)
+          const history = control.history
+          // The transcript read is an optional capability (Claude only): the
+          // method's absence is the signal the detail scene reads.
+          if (history === undefined) return projected
+          return Object.freeze({ ...projected, history: (id: string, window?: import('../../agent/capabilities.js').SubagentTranscriptWindow) => { check('read-only'); return history.call(control, id, window) } })
+        }
+        if (key === 'jobControl') {
+          const control = channel.jobControl as ChannelUi['jobControl'] | undefined
+          if (control === undefined) return undefined
+          const projected = methods(control, { kill: 'mutate' } as Readonly<Record<keyof typeof control, HostEffectClass>>)
+          const watch = control.watchOutput
+          if (watch === undefined) return projected
+          // A renderer observation of an on-screen card (like `subscribe`):
+          // the lease owns the unwatch, so a card unmounting after the
+          // channel's release is a no-op.
+          return Object.freeze({ ...projected, watchOutput: (id: string) => { check('read-only'); return lease.own(watch.call(control, id)) } })
+        }
         if (key === 'autoRecapOnOpen' && (mode === 'passive-shadow' || mode === 'replay-shadow')) return false
         if (key === 'pluginScene') {
           const scene = channel.pluginScene
@@ -103,7 +124,9 @@ export function createChannelUi(channel: ChannelUi, mode: AdapterMode, lease: Ch
         }
         if (key === 'listEfforts') {
           check('read-only')
-          return Promise.resolve({ efforts: (channel.effortLevels ?? []).map(id => ({ id, name: id })), defaultEffort: undefined })
+          const route = args[0] as { provider: string; model: string } | undefined
+          const live = route === undefined || (route.provider === channel.provider && route.model === channel.model)
+          return Promise.resolve({ efforts: (live ? channel.effortLevels ?? [] : []).map(id => ({ id, name: id })), defaultEffort: undefined })
         }
       }
       // A renderer observes the already-owned Channel emitter, never mounts
@@ -120,6 +143,26 @@ export function createChannelUi(channel: ChannelUi, mode: AdapterMode, lease: Ch
         return release
       }
       if (observation) return lease.own(result)
+      if (key === 'backendChannels' && result !== undefined) {
+        return methods(result as NonNullable<ReturnType<ChannelUi['backendChannels']>>, {
+          snapshot: 'read-only', peekImport: 'read-only', activate: 'mutate', importFromSettings: 'mutate', save: 'mutate', remove: 'mutate',
+        })
+      }
+      if (key === 'backendAuth' && result !== undefined) {
+        const host = result as NonNullable<ReturnType<ChannelUi['backendAuth']>>
+        const login = methods<Pick<typeof host, 'login'>>({ login: present => host.login((oauth, provider) => settle(present(query(oauth), provider))) }, { login: 'mutate' })
+        if (host.logout === undefined) return login
+        return Object.freeze({ ...login, ...methods({ logout: () => host.logout!() }, { logout: 'mutate' }) })
+      }
+      if (key === 'backendModes' && result !== undefined) {
+        return methods(result as NonNullable<ReturnType<ChannelUi['backendModes']>>, { snapshot: 'read-only', set: 'mutate' })
+      }
+      if (key === 'backendMcp' && result !== undefined) {
+        return methods(result as NonNullable<ReturnType<ChannelUi['backendMcp']>>, { reconnect: 'mutate', toggle: 'mutate' })
+      }
+      if (key === 'backendGoals' && result !== undefined) {
+        return methods(result as NonNullable<ReturnType<ChannelUi['backendGoals']>>, { set: 'mutate', pause: 'mutate', resume: 'mutate', clear: 'mutate' })
+      }
       if (key === 'settingsHost' && result !== undefined) {
         return methods(result as NonNullable<ReturnType<ChannelUi['settingsHost']>>, {
           listNamespaces: 'read-only', credentialConfigured: 'read-only', write: 'mutate', writeCredential: 'mutate',
@@ -147,7 +190,7 @@ export function createChannelUi(channel: ChannelUi, mode: AdapterMode, lease: Ch
       // 65ms @200k. The snapshot array is already frozen by the session, so
       // hand it back as-is; the lease/shadow `check()` above still gates the
       // call itself (same contract as before the Channel UI split).
-      if (key === 'traceEvents') return result
+      if (key === 'traceEvents' || key === 'trajectoryLaneEvents') return result
       if (key === 'agentViewRows' || key === 'settingsSections') return project(result)
       return settle(result)
     }

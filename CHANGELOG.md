@@ -5,6 +5,31 @@
 > 条目分类：✨ 新增 · ⚙️ 改进 · 🐛 修复 · 🛡️ 安全。
 > 全量断言随平台浮动（Windows 比 Linux 多十余项），**以 `python test_all.py` 的实际输出为准，本文不写死数字**（历史条目里的数字是当时那次运行的记录）。
 
+## [v1.2.0] — 2026-10-31 —— 整壳转正：dsh-TUI v0.17.0 多内核界面 + HooH 内核 + 自包含 MSI
+
+### ✨ 新增
+- **re-vendor dsh-TUI v0.17.0 整树**（用户提供上游完整源码）：`frontend/dsh-ui/` 从 v0.12 时代（949 文件）整树迁到 v0.17.0（src 1814 文件 + 完整 tui-profile/bin/cli/presets/locale 包面），HooH 适配层按新接口升级（CommandCompletion 形状 / render 返回 Promise / 主题色键 error·inactive）。
+- **HooH 内核（`backends/hooh/`）**：引擎以**多内核身份**注册进界面（dsh/claude/codex/hooh 并列）——manifest + detect/open + NDJSON→AgentEvent 翻译器（session/turn/step/assistant.delta 流式/tool.*/permission/question/notice 词汇表）+ AgentSession（审批/提问/模型/强度/命令/活动指示 capabilities）。真引擎端到端事件流全通。
+- **`ace app` 整壳入口 + 默认入口切换**：plain `ace` = dsh-TUI 本尊（落地页/流式/工具卡/状态栏/命令面板），`ace classic` = 瑞士规范前端，`ace ui` = 最小壳，`ace --no-tui` = 引擎直连（脚本/CI）。
+- **运行时平台包 junction 装配**（本机一次性）：从本机 dsh 安装合并 `@deepseek-ai/*`（cordis 单实例），`dsh-working-activity` 数据源顶替维持。
+- **打包：整壳随 MSI 进发行包**：`packaging/build_app_payload.ps1`（staged npm ci --omit=dev + 桩拷回 + 运行时合并 + 便携 node.exe + 自校验 + 启动冒烟）、`packaging/build_release.ps1` 一键链路（freeze → payload → MSI+zip）、WiX 品牌化（ARPPRODUCTICON 互字 .ico + 开始菜单 HooH）、`ace.cmd` 双布局探测（源码树 / `_internal\app` 载荷）。
+- **HooH 内核命令说明就地翻译**：握手把 `locales/` 的真文案发给界面（此前命令面板显示裸 i18n 键）。
+
+### ⚙️ 改进
+- **品牌三处 + 词表**：开屏大字 `HOOH`（全大写——字形表只有 A-Z，小写掉 fallback 方块，实测「H ▮▮ H」）、词标 `✦ HooH`、铭牌 `HooH v…`、标签题 `HooH · 会话名`、通知标题「HooH · 任务已完成」；开屏字体从按日轮换钉成 `shadow`（`DSH_TUI_SPLASH_FONT`，/settings 可换）。
+- **设置面板边框可见性**：卡片边框 token `promptBorder` → `inactive`（纯黑底上原色几乎不可见）。
+- **`ace --mock` 直通整壳**：启动器把 `--mock` 译成 `ACE_MOCK=1`（此前被整壳吞掉、悄悄走真模型）。
+- **app-entry 一次性品牌归一**：`~/.dsh-tui/settings.json` 带自动迁移标记时翻 `minimal/whale/whaleGirl` 三键（`hoohNormalized` 标记保证只做一次，用户此后改动全尊重）。
+- **可移植性**：清除三处个人 venv 绝对路径探针（ace.cmd / setup_env.py / process.ts → 官方安装根 + `HOOH_ENGINE_EXE`）；本机解释器偏好改由 `ACE_PYTHON` 环境变量承载。
+
+### 🐛 修复
+- **`--no-tui` 旗标缺失**：`ai_code.py` 补上显式别名（脚本路径 `ace --mock --no-tui --input ...` 一直报 unrecognized arguments）；e2e rel03_native_smoke 3/3 首次全绿。
+- **node_modules 死链**：仓库迁移后 `@dsh-std` 7 个 junction 指向旧路径，重建。
+- **壳的 ink 自退出缺陷**：v0.17 内核上不再复现（v0.12 树 ~370ms 无声退出；三探针对照验证）。
+
+### 门禁
+- vitest 57 文件 / 692 条全绿；test_all [38] 18/18；e2e rel03 3/3；`npm run build` 错误集合与 HEAD 逐字一致（迁移自带 tsc 边界，dsh-ui 树噪声 83→119→107 不追，政策见 MIGRATION.md）。
+
 ## [Unreleased] —— 裁决面收口 + 三平台平衡 + 执行边界证据链
 
 ### 🛡️ 安全

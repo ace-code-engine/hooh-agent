@@ -1,104 +1,107 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="989" height="818" viewBox="0 0 989 818" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'DejaVu Sans Mono','Noto Sans Mono CJK SC',monospace" font-size="15">
+<svg xmlns="http://www.w3.org/2000/svg" width="1016" height="842" viewBox="0 0 1016 842" font-family="ui-monospace,SFMono-Regular,Menlo,Consolas,'DejaVu Sans Mono','Noto Sans Mono CJK SC',monospace" font-size="15">
 <style>
 text{white-space:pre;dominant-baseline:middle}
-@keyframes s0{0%,5.051%{opacity:0}5.052%,100%{opacity:1}}
-.r0{animation:s0 11.88s steps(1,end) infinite}
-@keyframes s1{0%,7.407%{opacity:0}7.408%,100%{opacity:1}}
-.r1{animation:s1 11.88s steps(1,end) infinite}
-@keyframes s2{0%,9.764%{opacity:0}9.765%,100%{opacity:1}}
-.r2{animation:s2 11.88s steps(1,end) infinite}
-@keyframes s3{0%,12.121%{opacity:0}12.122%,100%{opacity:1}}
-.r3{animation:s3 11.88s steps(1,end) infinite}
-@keyframes s4{0%,14.478%{opacity:0}14.479%,100%{opacity:1}}
-.r4{animation:s4 11.88s steps(1,end) infinite}
-@keyframes s5{0%,16.835%{opacity:0}16.836%,100%{opacity:1}}
-.r5{animation:s5 11.88s steps(1,end) infinite}
-@keyframes s6{0%,19.192%{opacity:0}19.193%,100%{opacity:1}}
-.r6{animation:s6 11.88s steps(1,end) infinite}
-@keyframes s7{0%,21.549%{opacity:0}21.550%,100%{opacity:1}}
-.r7{animation:s7 11.88s steps(1,end) infinite}
-@keyframes s8{0%,23.906%{opacity:0}23.907%,100%{opacity:1}}
-.r8{animation:s8 11.88s steps(1,end) infinite}
-@keyframes s9{0%,26.263%{opacity:0}26.264%,100%{opacity:1}}
-.r9{animation:s9 11.88s steps(1,end) infinite}
-@keyframes s10{0%,28.620%{opacity:0}28.621%,100%{opacity:1}}
-.r10{animation:s10 11.88s steps(1,end) infinite}
-@keyframes s11{0%,30.976%{opacity:0}30.977%,100%{opacity:1}}
-.r11{animation:s11 11.88s steps(1,end) infinite}
-@keyframes s12{0%,33.333%{opacity:0}33.334%,100%{opacity:1}}
-.r12{animation:s12 11.88s steps(1,end) infinite}
-@keyframes s13{0%,35.690%{opacity:0}35.691%,100%{opacity:1}}
-.r13{animation:s13 11.88s steps(1,end) infinite}
-@keyframes s14{0%,38.047%{opacity:0}38.048%,100%{opacity:1}}
-.r14{animation:s14 11.88s steps(1,end) infinite}
-@keyframes s15{0%,40.404%{opacity:0}40.405%,100%{opacity:1}}
-.r15{animation:s15 11.88s steps(1,end) infinite}
-@keyframes s16{0%,42.761%{opacity:0}42.762%,100%{opacity:1}}
-.r16{animation:s16 11.88s steps(1,end) infinite}
-@keyframes s17{0%,45.118%{opacity:0}45.119%,100%{opacity:1}}
-.r17{animation:s17 11.88s steps(1,end) infinite}
-@keyframes s18{0%,47.475%{opacity:0}47.476%,100%{opacity:1}}
-.r18{animation:s18 11.88s steps(1,end) infinite}
-@keyframes s19{0%,49.832%{opacity:0}49.833%,100%{opacity:1}}
-.r19{animation:s19 11.88s steps(1,end) infinite}
-@keyframes s20{0%,52.189%{opacity:0}52.190%,100%{opacity:1}}
-.r20{animation:s20 11.88s steps(1,end) infinite}
-@keyframes s21{0%,54.545%{opacity:0}54.546%,100%{opacity:1}}
-.r21{animation:s21 11.88s steps(1,end) infinite}
-@keyframes s22{0%,56.902%{opacity:0}56.903%,100%{opacity:1}}
-.r22{animation:s22 11.88s steps(1,end) infinite}
-@keyframes s23{0%,59.259%{opacity:0}59.260%,100%{opacity:1}}
-.r23{animation:s23 11.88s steps(1,end) infinite}
-@keyframes s24{0%,61.616%{opacity:0}61.617%,100%{opacity:1}}
-.r24{animation:s24 11.88s steps(1,end) infinite}
-@keyframes s25{0%,63.973%{opacity:0}63.974%,100%{opacity:1}}
-.r25{animation:s25 11.88s steps(1,end) infinite}
-@keyframes s26{0%,66.330%{opacity:0}66.331%,100%{opacity:1}}
-.r26{animation:s26 11.88s steps(1,end) infinite}
-@keyframes s27{0%,68.687%{opacity:0}68.688%,100%{opacity:1}}
-.r27{animation:s27 11.88s steps(1,end) infinite}
-@keyframes s28{0%,71.044%{opacity:0}71.045%,100%{opacity:1}}
-.r28{animation:s28 11.88s steps(1,end) infinite}
-@keyframes s29{0%,73.401%{opacity:0}73.402%,100%{opacity:1}}
-.r29{animation:s29 11.88s steps(1,end) infinite}
-@keyframes s30{0%,75.758%{opacity:0}75.759%,100%{opacity:1}}
-.r30{animation:s30 11.88s steps(1,end) infinite}
+@keyframes s0{0%,4.934%{opacity:0}4.935%,100%{opacity:1}}
+.r0{animation:s0 12.16s steps(1,end) infinite}
+@keyframes s1{0%,7.237%{opacity:0}7.238%,100%{opacity:1}}
+.r1{animation:s1 12.16s steps(1,end) infinite}
+@keyframes s2{0%,9.539%{opacity:0}9.540%,100%{opacity:1}}
+.r2{animation:s2 12.16s steps(1,end) infinite}
+@keyframes s3{0%,11.842%{opacity:0}11.843%,100%{opacity:1}}
+.r3{animation:s3 12.16s steps(1,end) infinite}
+@keyframes s4{0%,14.145%{opacity:0}14.146%,100%{opacity:1}}
+.r4{animation:s4 12.16s steps(1,end) infinite}
+@keyframes s5{0%,16.447%{opacity:0}16.448%,100%{opacity:1}}
+.r5{animation:s5 12.16s steps(1,end) infinite}
+@keyframes s6{0%,18.750%{opacity:0}18.751%,100%{opacity:1}}
+.r6{animation:s6 12.16s steps(1,end) infinite}
+@keyframes s7{0%,21.053%{opacity:0}21.054%,100%{opacity:1}}
+.r7{animation:s7 12.16s steps(1,end) infinite}
+@keyframes s8{0%,23.355%{opacity:0}23.356%,100%{opacity:1}}
+.r8{animation:s8 12.16s steps(1,end) infinite}
+@keyframes s9{0%,25.658%{opacity:0}25.659%,100%{opacity:1}}
+.r9{animation:s9 12.16s steps(1,end) infinite}
+@keyframes s10{0%,27.961%{opacity:0}27.962%,100%{opacity:1}}
+.r10{animation:s10 12.16s steps(1,end) infinite}
+@keyframes s11{0%,30.263%{opacity:0}30.264%,100%{opacity:1}}
+.r11{animation:s11 12.16s steps(1,end) infinite}
+@keyframes s12{0%,32.566%{opacity:0}32.567%,100%{opacity:1}}
+.r12{animation:s12 12.16s steps(1,end) infinite}
+@keyframes s13{0%,34.868%{opacity:0}34.869%,100%{opacity:1}}
+.r13{animation:s13 12.16s steps(1,end) infinite}
+@keyframes s14{0%,37.171%{opacity:0}37.172%,100%{opacity:1}}
+.r14{animation:s14 12.16s steps(1,end) infinite}
+@keyframes s15{0%,39.474%{opacity:0}39.475%,100%{opacity:1}}
+.r15{animation:s15 12.16s steps(1,end) infinite}
+@keyframes s16{0%,41.776%{opacity:0}41.777%,100%{opacity:1}}
+.r16{animation:s16 12.16s steps(1,end) infinite}
+@keyframes s17{0%,44.079%{opacity:0}44.080%,100%{opacity:1}}
+.r17{animation:s17 12.16s steps(1,end) infinite}
+@keyframes s18{0%,46.382%{opacity:0}46.383%,100%{opacity:1}}
+.r18{animation:s18 12.16s steps(1,end) infinite}
+@keyframes s19{0%,48.684%{opacity:0}48.685%,100%{opacity:1}}
+.r19{animation:s19 12.16s steps(1,end) infinite}
+@keyframes s20{0%,50.987%{opacity:0}50.988%,100%{opacity:1}}
+.r20{animation:s20 12.16s steps(1,end) infinite}
+@keyframes s21{0%,53.289%{opacity:0}53.290%,100%{opacity:1}}
+.r21{animation:s21 12.16s steps(1,end) infinite}
+@keyframes s22{0%,55.592%{opacity:0}55.593%,100%{opacity:1}}
+.r22{animation:s22 12.16s steps(1,end) infinite}
+@keyframes s23{0%,57.895%{opacity:0}57.896%,100%{opacity:1}}
+.r23{animation:s23 12.16s steps(1,end) infinite}
+@keyframes s24{0%,60.197%{opacity:0}60.198%,100%{opacity:1}}
+.r24{animation:s24 12.16s steps(1,end) infinite}
+@keyframes s25{0%,62.500%{opacity:0}62.501%,100%{opacity:1}}
+.r25{animation:s25 12.16s steps(1,end) infinite}
+@keyframes s26{0%,64.803%{opacity:0}64.804%,100%{opacity:1}}
+.r26{animation:s26 12.16s steps(1,end) infinite}
+@keyframes s27{0%,67.105%{opacity:0}67.106%,100%{opacity:1}}
+.r27{animation:s27 12.16s steps(1,end) infinite}
+@keyframes s28{0%,69.408%{opacity:0}69.409%,100%{opacity:1}}
+.r28{animation:s28 12.16s steps(1,end) infinite}
+@keyframes s29{0%,71.711%{opacity:0}71.712%,100%{opacity:1}}
+.r29{animation:s29 12.16s steps(1,end) infinite}
+@keyframes s30{0%,74.013%{opacity:0}74.014%,100%{opacity:1}}
+.r30{animation:s30 12.16s steps(1,end) infinite}
+@keyframes s31{0%,76.316%{opacity:0}76.317%,100%{opacity:1}}
+.r31{animation:s31 12.16s steps(1,end) infinite}
 .cur{animation:blink 1.05s steps(1,end) infinite}
 @keyframes blink{0%,49%{opacity:1}50%,100%{opacity:0}}
 </style>
-<rect width="989" height="818" rx="10" fill="#1b1f29"/>
-<rect y="40" width="989" height="778" fill="#11141b"/>
+<rect width="1016" height="842" rx="10" fill="#1b1f29"/>
+<rect y="40" width="1016" height="802" fill="#11141b"/>
 <circle cx="22" cy="20" r="5.5" fill="#ff5f57"/><circle cx="40" cy="20" r="5.5" fill="#febc2e"/><circle cx="58" cy="20" r="5.5" fill="#28c840"/>
-<text x="494.5" y="21" text-anchor="middle" font-size="12.5" fill="#7d879c">hooh-agent — python ai_code.py --mock</text>
-<text class="r0" x="22" y="52" xml:space="preserve"><tspan fill="#d7dce5">HooH</tspan><tspan fill="#7d879c"> 1.1.0 · 互</tspan></text>
-<text class="r1" x="22" y="76" xml:space="preserve"><tspan fill="#7d879c">── 当前会话 ──────────────────────────────────────────────────────────────────────────── v1.1.0 </tspan></text>
+<text x="508.0" y="21" text-anchor="middle" font-size="12.5" fill="#7d879c">hooh-agent — python ai_code.py --mock</text>
+<text class="r0" x="22" y="52" xml:space="preserve"><tspan fill="#d7dce5">HooH</tspan><tspan fill="#7d879c"> 1.2.0 · 互</tspan></text>
+<text class="r1" x="22" y="76" xml:space="preserve"><tspan fill="#7d879c">── 当前会话 ──────────────────────────────────────────────────────────────────────────── v1.2.0 </tspan></text>
 <text class="r2" x="22" y="100" xml:space="preserve"><tspan fill="#d7dce5">  模型    mock（离线演示，无需密钥）</tspan></text>
-<text class="r3" x="22" y="124" xml:space="preserve"><tspan fill="#d7dce5">  边界    权限 readonly · 沙箱 off · 联网 开 · 审批 on_request</tspan></text>
+<text class="r3" x="22" y="124" xml:space="preserve"><tspan fill="#d7dce5">  边界    权限 write · 沙箱 off · 联网 开 · 审批 on_request</tspan></text>
 <text class="r4" x="22" y="148" xml:space="preserve"><tspan fill="#d7dce5">  目录    …</tspan></text>
 <text class="r5" x="22" y="172" xml:space="preserve"><tspan fill="#d7dce5">  历史    新会话（暂无历史）</tspan></text>
 <text class="r6" x="22" y="196" xml:space="preserve"><tspan fill="#d7dce5">   ▐▛███▜▌ </tspan><tspan fill="#d7dce5">   </tspan><tspan fill="#7d879c">思考强度 ○ auto</tspan></text>
 <text class="r7" x="22" y="220" xml:space="preserve"><tspan fill="#d7dce5">   ▝▜   ▛▘ </tspan></text>
 <text class="r8" x="22" y="244" xml:space="preserve"><tspan fill="#7d879c">知识库: …/.ace_kb</tspan></text>
 <text class="r9" x="22" y="268" xml:space="preserve"><tspan fill="#7d879c">会话日志: .ace_sessions/（/audit 查看全链路）</tspan></text>
-<text class="r10" x="22" y="292" xml:space="preserve"><tspan fill="#d7dce5">  输入 </tspan><tspan fill="#c39ac9">/help</tspan><tspan fill="#d7dce5"> 查看命令，</tspan><tspan fill="#c39ac9">@</tspan><tspan fill="#d7dce5"> 打开快捷方式，</tspan><tspan fill="#c39ac9">/exit</tspan><tspan fill="#d7dce5"> 退出</tspan></text>
-<text class="r11" x="22" y="316" xml:space="preserve">&#160;</text>
-<text class="r12" x="22" y="340" xml:space="preserve"><tspan fill="#d7dce5">█████ ∴ 思考中 ○ 0s   ◈</tspan></text>
-<text class="r13" x="22" y="364" xml:space="preserve">&#160;</text>
-<text class="r14" x="22" y="388" xml:space="preserve"><tspan fill="#d7dce5">▅ 正在调用 datetime_now 0s</tspan></text>
-<text class="r15" x="22" y="412" xml:space="preserve">&#160;</text>
-<text class="r16" x="22" y="436" xml:space="preserve"><tspan fill="#d7dce5">█████ ∴ 思考中 ○ 0s   ◈</tspan></text>
-<text class="r17" x="22" y="460" xml:space="preserve"><tspan fill="#d7dce5">当前时间是 2026-10-12 21:18:36</tspan></text>
-<text class="r18" x="22" y="484" xml:space="preserve">&#160;</text>
-<text class="r19" x="22" y="508" xml:space="preserve"><tspan fill="#5fd68a">  ✓ 完成（2 轮, 0.6s）</tspan></text>
-<text class="r20" x="22" y="532" xml:space="preserve"><tspan fill="#d7dce5">  会话: 2 轮 | 工具执行 1 次 | 违规 0 次 | 已运行 1s</tspan></text>
-<text class="r21" x="22" y="556" xml:space="preserve"><tspan fill="#d7dce5">  语言: 中文 | 技能: 通用助手 | 引用: 0 项</tspan></text>
-<text class="r22" x="22" y="580" xml:space="preserve"><tspan fill="#d7dce5">  权限: readonly | 违规累计 0 | 执行累计 1</tspan></text>
-<text class="r23" x="22" y="604" xml:space="preserve"><tspan fill="#d7dce5">  快照: 0 个（自动清理上限 20，/undo 一键回滚最近）</tspan></text>
-<text class="r24" x="22" y="628" xml:space="preserve"><tspan fill="#d7dce5">  模块: v2=True v1={'work': True, 'guardian': True, 'archive': True, 'nuwa': True} parser=True</tspan></text>
-<text class="r25" x="22" y="652" xml:space="preserve"><tspan fill="#f0c674">  成本: 价格未知（配置 pricing 可补） · 输入 ≈272 / 输出 ≈131 tokens（价格表快照，可用配置 pricing 覆盖）</tspan></text>
-<text class="r26" x="22" y="676" xml:space="preserve"><tspan fill="#7d879c">跨会话累计（1 段）：2 轮 · 1 次工具（失败 0）· token 入 9630 / 出 131 · 估算 —</tspan></text>
-<text class="r27" x="22" y="700" xml:space="preserve"><tspan fill="#7d879c">  上下文 ░░░░░░░░░░░░░░░░░░░░ 1%（估算值，不是服务端读数）</tspan></text>
-<text class="r28" x="22" y="724" xml:space="preserve"><tspan fill="#7d879c">  上下文: 约 338 tokens / 窗口 32768（1%，压缩触发点约 23040；估算值，不是服务端读数）</tspan></text>
-<text class="r29" x="22" y="748" xml:space="preserve"><tspan fill="#5fd68a">权限已切换为 readonly</tspan></text>
-<text class="r30" x="22" y="772" xml:space="preserve"><tspan fill="#7d879c">  再见，HooH 已退出。</tspan></text>
+<text class="r10" x="22" y="292" xml:space="preserve"><tspan fill="#f0c674">  ⚠ 当前为写权限：terminal_exec 可执行任意 shell 命令。生产环境建议 readonly 起步，按需用 /permission 切换。</tspan></text>
+<text class="r11" x="22" y="316" xml:space="preserve"><tspan fill="#d7dce5">  输入 </tspan><tspan fill="#c39ac9">/help</tspan><tspan fill="#d7dce5"> 查看命令，</tspan><tspan fill="#c39ac9">@</tspan><tspan fill="#d7dce5"> 打开快捷方式，</tspan><tspan fill="#c39ac9">/exit</tspan><tspan fill="#d7dce5"> 退出</tspan></text>
+<text class="r12" x="22" y="340" xml:space="preserve">&#160;</text>
+<text class="r13" x="22" y="364" xml:space="preserve"><tspan fill="#d7dce5">█████ ∴ 思考中 ○ 0s   ◈</tspan></text>
+<text class="r14" x="22" y="388" xml:space="preserve">&#160;</text>
+<text class="r15" x="22" y="412" xml:space="preserve"><tspan fill="#d7dce5">▅ 正在调用 datetime_now 0s</tspan></text>
+<text class="r16" x="22" y="436" xml:space="preserve">&#160;</text>
+<text class="r17" x="22" y="460" xml:space="preserve"><tspan fill="#d7dce5">█████ ∴ 思考中 ○ 0s   ◈</tspan></text>
+<text class="r18" x="22" y="484" xml:space="preserve"><tspan fill="#d7dce5">当前时间是 2026-10-31 17:33:37</tspan></text>
+<text class="r19" x="22" y="508" xml:space="preserve">&#160;</text>
+<text class="r20" x="22" y="532" xml:space="preserve"><tspan fill="#5fd68a">  ✓ 完成（2 轮, 0.6s）</tspan></text>
+<text class="r21" x="22" y="556" xml:space="preserve"><tspan fill="#d7dce5">  会话: 2 轮 | 工具执行 1 次 | 违规 0 次 | 已运行 1s</tspan></text>
+<text class="r22" x="22" y="580" xml:space="preserve"><tspan fill="#d7dce5">  语言: 中文 | 技能: 通用助手 | 引用: 0 项</tspan></text>
+<text class="r23" x="22" y="604" xml:space="preserve"><tspan fill="#d7dce5">  权限: write | 违规累计 0 | 执行累计 1</tspan></text>
+<text class="r24" x="22" y="628" xml:space="preserve"><tspan fill="#d7dce5">  快照: 0 个（自动清理上限 20，/undo 一键回滚最近）</tspan></text>
+<text class="r25" x="22" y="652" xml:space="preserve"><tspan fill="#d7dce5">  模块: v2=True v1={'work': True, 'guardian': True, 'archive': True, 'nuwa': True} parser=True</tspan></text>
+<text class="r26" x="22" y="676" xml:space="preserve"><tspan fill="#f0c674">  成本: 价格未知（配置 pricing 可补） · 输入 ≈272 / 输出 ≈131 tokens（价格表快照，可用配置 pricing 覆盖）</tspan></text>
+<text class="r27" x="22" y="700" xml:space="preserve"><tspan fill="#7d879c">跨会话累计（1 段）：2 轮 · 1 次工具（失败 0）· token 入 9672 / 出 131 · 估算 —</tspan></text>
+<text class="r28" x="22" y="724" xml:space="preserve"><tspan fill="#7d879c">  上下文 ░░░░░░░░░░░░░░░░░░░░ 1%（估算值，不是服务端读数）</tspan></text>
+<text class="r29" x="22" y="748" xml:space="preserve"><tspan fill="#7d879c">  上下文: 约 338 tokens / 窗口 32768（1%，压缩触发点约 23040；估算值，不是服务端读数）</tspan></text>
+<text class="r30" x="22" y="772" xml:space="preserve"><tspan fill="#5fd68a">权限已切换为 readonly</tspan></text>
+<text class="r31" x="22" y="796" xml:space="preserve"><tspan fill="#7d879c">  再见，HooH 已退出。</tspan></text>
 </svg>

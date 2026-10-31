@@ -5,7 +5,7 @@ import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { randomUUID } from 'node:crypto'
 import { resolveModelRoute, validateModelRoute } from '../../modelRoute.js'
 import { readModelPref } from '../../modelPrefs.js'
-import { readPresetPref } from '../../presetPrefs.js'
+import { presetOverrideFromEnv, readPresetPref } from '../../presetPrefs.js'
 import { forgetAgentViewSession, readAgentViewSessions, touchAgentViewSession, touchSession } from '../../sessionHistory.js'
 import { t } from '../../i18n.js'
 import {
@@ -23,12 +23,12 @@ import { reserveNewSession } from '../../sessionMounts.js'
 import { locateSession, previewSession, type SessionSource, type SessionSummary } from '../sessions/index.js'
 import { attachSessionToWorkspace } from '../workspace.js'
 import { logForDebugging } from '../../utils/debug.js'
-import type { createChannelBinding } from './binding.js'
+import type { DshChannelBinding } from './binding.js'
 import type { ChannelOwner } from './owner.js'
 import type { AgentViewDispatchResult, AgentViewRow, BackgroundResult, ResumeResult } from './types.js'
 import type { PreviewEntry } from '../sessions/index.js'
 
-type Binding = ReturnType<typeof createChannelBinding>
+type Binding = DshChannelBinding
 type ApprovalStore = {
   pendingAgentIds(): readonly string[]
   pendingAgentDetail(agentId: string): { toolName: string; reason?: string; command?: string } | undefined
@@ -40,7 +40,7 @@ export function createAgentViewProjection(
   ctx: Context,
   deps: {
     owner: Pick<ChannelOwner, 'current' | 'assertActive' | 'own'>
-    binding: Pick<Binding, 'agent' | 'capture' | 'isCurrent' | 'prepare' | 'abandon' | 'waitForDisposal'>
+    binding: Pick<Binding, 'agent' | 'session' | 'capture' | 'isCurrent' | 'prepare' | 'abandon' | 'waitForDisposal'>
     cwd(): string
     configuredPreset?: string
     configuredProvider?: string
@@ -182,7 +182,7 @@ export function createAgentViewProjection(
     let detached: Awaited<ReturnType<typeof deps.createDetached>>
     try {
       deps.owner.assertActive()
-      const composed = await composePreset(ctx, deps.configuredPreset ?? readPresetPref())
+      const composed = await composePreset(ctx, presetOverrideFromEnv() ?? readPresetPref() ?? deps.configuredPreset)
       const resolved = resolveModelRoute({ provider: deps.configuredProvider, model: deps.configuredModel }, readModelPref(), { provider: deps.provider, model: deps.model })
       const llm = ctx.get('llm') as { listModels(provider: string): Promise<readonly { id: string }[]> } | undefined
       const { route } = await validateModelRoute(llm, resolved, { provider: deps.provider, model: deps.model })
@@ -244,7 +244,9 @@ export function createAgentViewProjection(
     return true
   }
   const attach = async (sessionId: string): Promise<ResumeResult> => {
-    if (sessionId === String(deps.binding.agent.session.id)) return { ok: true }
+    // Same rule as `/resume` (#1651): a foreground whose agent unloaded under
+    // the screen has ended, so attaching to its own id reopens the log.
+    if (sessionId === String(deps.binding.agent.session.id) && deps.binding.session.status !== 'disposed') return { ok: true }
     const capture = deps.binding.capture()
     // A retiring Agent can remain in the registry until its JSONL writer has
     // drained. Read the live target only after that close, just like /resume.

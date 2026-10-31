@@ -27,8 +27,11 @@ rem   3) fall back to any interpreter that starts (works, minus the overlay menu
 rem   4) the py -3 launcher
 set "_ACE_PROBE="
 if defined ACE_PYTHON (set "_ACE_PROBE=%ACE_PYTHON%")
-if not defined _ACE_PROBE (if exist "C:\aider_env\Scripts\python.exe" set "_ACE_PROBE=C:\aider_env\Scripts\python.exe")
 if not defined _ACE_PROBE (if exist ".ace_env\Scripts\python.exe" set "_ACE_PROBE=.ace_env\Scripts\python.exe")
+rem Machine-agnostic probes only: official python.org install roots + py launcher.
+rem (A personal venv path here would ride the package onto other machines.)
+if not defined _ACE_PROBE (if exist "C:\Program Files\Python312\python.exe" set "_ACE_PROBE=C:\Program Files\Python312\python.exe")
+if not defined _ACE_PROBE (if exist "C:\Program Files\Python311\python.exe" set "_ACE_PROBE=C:\Program Files\Python311\python.exe")
 if not defined _ACE_PROBE (where python >nul 2>nul && python -c "import sys" >nul 2>nul && set "_ACE_PROBE=python")
 if not defined _ACE_PROBE (where py >nul 2>nul && set "_ACE_PROBE=py -3")
 
@@ -114,22 +117,39 @@ if /i "%~1"=="tui" (
 )
 
 rem ---------------------------------------------------------------------------
-rem Frontend dispatch (2026-10-31 REVERTED to classic-default): the vendored
-rem dsh shell (frontend/dsh-ui, `ace ui`) self-exits its ink app ~370ms after
-rem mount -- it has never been fully alive in this repo (its baseline smoke
-rem was failing). Until that is fixed, the WORKING UI is frontend/src.
+rem Frontend dispatch (2026-10-31 reworked): plain `ace` = the FULL dsh-TUI app
+rem (its own boot, screens, status bar, kernel picker) with the HooH engine as
+rem its kernel (`:fe_app` -> backends/hooh). `ace classic` = the Swiss-spec
+rem frontend (frontend/src); `ace ui` = the minimal migrated-shell entry.
 rem The global npm dsh-tui is never invoked from this launcher.
 rem PARENS ARE BANNED inside if-blocks here - see the tui block above.
 rem Batch quirks: shift does NOT affect %*, undefined vars expand literally.
 rem ---------------------------------------------------------------------------
-set "_ACE_REST="
+rem Scripted runs (`ace --mock --no-tui --input ...`): those are PYTHON flags --
+rem the app entry would refuse them loudly (needs a TTY). The flags may come in
+rem EITHER order (slot 1 or 2); when --no-tui is present the WHOLE argv goes to
+rem the engine unchanged (`:ace_python_flags`) -- --mock is an engine flag too.
+set "_ACE_NOTUI="
+if /i "%~1"=="--no-tui" set "_ACE_NOTUI=1"
+if /i "%~2"=="--no-tui" set "_ACE_NOTUI=1"
+if defined _ACE_NOTUI goto :ace_python_flags
+if /i "%~1"=="app" (
+    if not "%~2"=="" for /f "tokens=1,* delims= " %%a in ("%*") do set "_ACE_REST=%%b"
+    goto :fe_app
+)
+if /i "%~1"=="classic" (
+    if not "%~2"=="" for /f "tokens=1,* delims= " %%a in ("%*") do set "_ACE_REST=%%b"
+    goto :fe_frontend
+)
 if /i "%~1"=="ui" (
     if not "%~2"=="" for /f "tokens=1,* delims= " %%a in ("%*") do set "_ACE_REST=%%b"
     goto :fe_shell
 )
-goto :fe_frontend
+goto :fe_app
 
 :fe_frontend
+rem `ace classic`: the Swiss-spec frontend. NOTE it passes %_ACE_REST% (args
+rem after the `classic` token), not %* -- %* would replay `classic` itself.
 if defined ACE_LEGACY_UI goto :ace_python
 where node >nul 2>nul
 if errorlevel 1 (
@@ -151,7 +171,7 @@ rem no tsconfig, falls back to the classic JSX transform, and the first
 rem render() dies with "React is not defined" -- while "npm start" keeps
 rem working, because there the cwd is frontend. So run it from frontend too.
 pushd "%~dp0frontend"
-node "node_modules\tsx\dist\cli.mjs" "src\index.tsx" %*
+node "node_modules\tsx\dist\cli.mjs" "src\index.tsx" %_ACE_REST%
 rem Double-click survival: a nonzero exit here closed the window instantly -
 rem the user saw a flash and could never read the error. Hold it open.
 if errorlevel 1 pause
@@ -178,8 +198,70 @@ if errorlevel 1 pause
 popd
 goto :eof
 
+:fe_app
+rem `ace app`: the FULL dsh-TUI app (its own boot, screens, status bar, kernel
+rem picker) driving the HooH engine as a first-class kernel. This is the
+rem 0.17 multi-kernel route: frontend/dsh-ui/backends/hooh pins the engine,
+rem the upstream entry composes the light profile around it. Needs a REAL
+rem terminal (stdout TTY) -- from a pipe it refuses loudly by design.
+rem `--mock` / `--input`-style flags: the app does not know ace's argv, so
+rem `--mock` is translated to ACE_MOCK=1 (the engine reads it at spawn).
+rem TWO LAYOUTS:
+rem   source checkout  frontend\dsh-ui + frontend\node_modules + PATH node
+rem   installed (MSI)  <install>\_internal\app (payload staged by
+rem                    packaging/build_app_payload.ps1: dsh-ui + production
+rem                    node_modules + node.exe). Detected by _internal\app
+rem                    existing while the source tree does not.
+if defined ACE_LEGACY_UI goto :ace_python
+if exist "%~dp0_internal\app\node.exe" if not exist "%~dp0frontend\dsh-ui\package.json" (
+    rem FROZEN layout: engine = the bundled ace.exe itself (HOOH_ENGINE_EXE),
+    rem node = the payload's own node.exe. No PATH lookups at all.
+    set "ACE_MOCK_SAVE="
+    if defined ACE_MOCK set "ACE_MOCK_SAVE=%ACE_MOCK%"
+    set "ACE_MOCK="
+    if /i "%~1"=="--mock" set "ACE_MOCK=1"
+    if /i "%~1"=="--mock" if not "%~2"=="" for /f "tokens=1,* delims= " %%a in ("%*") do set "_ACE_REST=%%b"
+    set "HOOH_ENGINE_EXE=%~dp0ace.exe"
+    pushd "%~dp0_internal\app\dsh-ui"
+    "..\node.exe" "..\node_modules\tsx\dist\cli.mjs" "backends\hooh\app-entry.ts" %_ACE_REST%
+    rem Double-click survival: hold the window open on failure.
+    if errorlevel 1 pause
+    popd
+    if defined ACE_MOCK_SAVE (set "ACE_MOCK=%ACE_MOCK_SAVE%") else (set "ACE_MOCK=")
+    goto :eof
+)
+where node >nul 2>nul
+if errorlevel 1 (
+    echo [HooH] Node was not found on PATH -- the app frontend needs Node 18+.
+    echo       Falling back to the Python REPL.
+    goto :ace_python
+)
+if not exist "frontend\node_modules\tsx\dist\cli.mjs" (
+    echo [HooH] frontend dependencies are not installed. Run: ace --install-ui
+    pause
+    exit /b 1
+)
+set "ACE_MOCK_SAVE="
+if defined ACE_MOCK set "ACE_MOCK_SAVE=%ACE_MOCK%"
+set "ACE_MOCK="
+if /i "%~1"=="--mock" set "ACE_MOCK=1"
+if /i "%~1"=="--mock" if not "%~2"=="" for /f "tokens=1,* delims= " %%a in ("%*") do set "_ACE_REST=%%b"
+pushd "%~dp0frontend\dsh-ui"
+node "..\node_modules\tsx\dist\cli.mjs" "backends\hooh\app-entry.ts" %_ACE_REST%
+rem Double-click survival: hold the window open on failure.
+if errorlevel 1 pause
+popd
+if defined ACE_MOCK_SAVE (set "ACE_MOCK=%ACE_MOCK_SAVE%") else (set "ACE_MOCK=")
+goto :eof
+
 :ace_python
-"%_ACE_PY%" ai_code.py --tools --max-history 12 %*
+"%_ACE_PY%" ai_code.py --tools --max-history 12 %_ACE_REST%
+goto :eof
+
+:ace_python_flags
+rem --no-tui ?????argv ?????--mock/--no-tui/--input ???????
+rem ACE_MOCK ??????? spawn ??????????????
+"%_ACE_PY%" ai_code.py %*
 goto :eof
 
 :env_failed

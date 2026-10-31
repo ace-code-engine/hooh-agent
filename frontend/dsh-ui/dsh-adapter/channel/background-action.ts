@@ -4,19 +4,21 @@ import { SessionId } from '@deepseek-ai/dsh-session'
 import { randomUUID } from 'node:crypto'
 import { resolveModelRoute, validateModelRoute } from '../../modelRoute.js'
 import { readModelPref } from '../../modelPrefs.js'
-import { readPresetPref } from '../../presetPrefs.js'
+import { presetOverrideFromEnv, readPresetPref } from '../../presetPrefs.js'
 import { clearResumeTarget, touchAgentViewSession, touchSession } from '../../sessionHistory.js'
 import { t } from '../../i18n.js'
 import { reserveMount, type MountReservation } from '../../sessionMounts.js'
 import { mountFailureText } from '../../sessions/resumeFailure.js'
 import { composePreset } from '../presets.js'
+import { createFreshAgent } from '../fresh-agent.js'
+import { createDshSession, dshHandleOf } from '../backend/session.js'
 import { attachSessionToWorkspace } from '../workspace.js'
 import { resetSessionProjection } from './session-reset.js'
-import type { createChannelBinding } from './binding.js'
+import type { DshChannelBinding } from './binding.js'
 import type { ChannelOwner } from './owner.js'
 import type { BackgroundResult, ChannelState } from './types.js'
 
-type Binding = ReturnType<typeof createChannelBinding>
+type Binding = DshChannelBinding
 
 /** `/bg` foreground handoff. The binding remains the sole identity writer;
  * this action only parks the exact previous handle passed by its transaction. */
@@ -62,19 +64,24 @@ export function createBackgroundCurrentAction(
     if (!reserved.ok && reserved.reason !== 'occupied') deps.notify(mountFailureText(reserved), { color: 'warning', timeoutMs: 8000 })
     const reservation: MountReservation = reserved.ok ? reserved.reservation : { settle: () => {}, abandon: () => {} }
     try {
-      const composed = await composePreset(ctx, options.configuredPreset ?? readPresetPref())
+      const composed = await composePreset(ctx, presetOverrideFromEnv() ?? readPresetPref() ?? options.configuredPreset)
       const route = await validateModelRoute(
         ctx.get('llm') as { listModels(provider: string): Promise<readonly { id: string }[]> } | undefined,
         resolveModelRoute({ provider: options.configuredProvider, model: options.configuredModel }, readModelPref(), { provider: options.provider, model: options.model }),
         { provider: options.provider, model: options.model },
       )
-      const handle = await deps.binding.prepare(adoption, () => agents.create({
+      // `/bg` starts an unseeded session nobody has typed into yet, so it
+      // shares the fresh-session gate: creation-time checkpoints (the
+      // projection cache flushes on `session/created`) must not publish the
+      // permission-only shell before the first real event.
+      const candidate = await deps.binding.prepare(adoption, async () => createDshSession(ctx, await createFreshAgent(ctx, agents, {
         sessionId,
         meta: { cwd: state.cwd, ...(composed.agentPreset === undefined ? {} : { agentPreset: composed.agentPreset }) },
         agentOptions: route.route,
         ...(composed.setup === undefined ? {} : { setup: composed.setup }),
-      }))
-      if (!deps.binding.isCurrent(adoption)) { await deps.binding.abandon(handle); reservation.abandon(); return { ok: false, reason: 'failed', error: 'Channel lifetime ended' } }
+      })))
+      const handle = dshHandleOf(candidate)
+      if (!deps.binding.isCurrent(adoption)) { await deps.binding.abandon(candidate); reservation.abandon(); return { ok: false, reason: 'failed', error: 'Channel lifetime ended' } }
       try {
         await attachSessionToWorkspace(ctx, state.cwd, sessionId)
       } catch (error) {
@@ -86,13 +93,13 @@ export function createBackgroundCurrentAction(
       // still current. A replacement is not a license to target that newer
       // agent; the prepared candidate is abandoned instead.
       if (!deps.binding.isCurrent(adoption)) {
-        await deps.binding.abandon(handle)
+        await deps.binding.abandon(candidate)
         reservation.abandon()
         return { ok: false, reason: 'failed', error: 'Channel lifetime ended' }
       }
       let committed = false
       try {
-        const result = deps.binding.adopt<BackgroundResult>(handle, adoption, (previous, disposePrevious) => {
+        const result = deps.binding.adopt<BackgroundResult>(candidate, adoption, (previous, disposePrevious) => {
           const previousSessionId = String(previous.agent.session.id)
           deps.parkSubagents(previous.agent)
           if (previous.handle !== undefined) {

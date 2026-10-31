@@ -9,6 +9,7 @@ export type SessionResetState = Pick<
   | 'goal'
   | 'sessionTitle'
   | 'sessionColor'
+  | 'workingDirectory'
   | 'tokens'
   | 'mainCost'
   | 'subagentCost'
@@ -22,7 +23,10 @@ export type SessionResetState = Pick<
   | 'tps'
   | 'tpsSamples'
   | 'lastUsage'
+  | 'turnUsage'
+  | 'turnOutcome'
   | 'contextSegments'
+  | 'costReport'
   /** Staged "Send to Chat" contexts belong to the composer that staged them:
    *  an adopted session must never carry the previous conversation's chips
    *  (or hand its model a panel context the user staged elsewhere). */
@@ -48,10 +52,13 @@ export function resetSessionProjection(
   resetSubagents()
   resetJobs()
   state.todos = []
-  state.pending = []
+  // Orphaned rows belong to no backend (their session ended or dropped
+  // them): they wait in the dock for the user, whichever session is next.
+  state.pending = state.pending.filter(item => item.orphaned === true)
   state.goal = undefined
   state.sessionTitle = ''
   state.sessionColor = ''
+  state.workingDirectory = undefined
   state.tokens = {
     input: 0,
     output: 0,
@@ -68,14 +75,21 @@ export function resetSessionProjection(
   state.activeToolCount = 0
   state.lastUserText = ''
   state.working = false
-  // The adoption path settles any in-flight compaction before it takes the
-  // new session over; a row that survived it would describe the old one.
+  // Progress belongs to the old foreground. A parked manual transaction is
+  // still live and restores its own row when that agent is bound again.
   state.compaction = undefined
   state.cancelPending = false
   state.spinnerMode = 'requesting'
   state.tps = undefined
   state.tpsSamples = []
   state.lastUsage = undefined
+  // The last turn's ledger belongs to the old session just as much.
+  state.turnUsage = undefined
+  // So does the turn's terminal state: replaying the target session
+  // re-populates it from that session's own last turn.end.
+  state.turnOutcome = undefined
+  // A backend-reported cost belongs to the session that reported it.
+  state.costReport = undefined
   state.attachedContexts = []
   state.contextSegments = {
     system: 0,

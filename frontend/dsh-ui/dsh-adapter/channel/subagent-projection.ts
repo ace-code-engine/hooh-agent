@@ -1,16 +1,81 @@
+import { randomUUID } from 'node:crypto'
 import type { Agent, AssistantStreamFrame } from '@deepseek-ai/dsh-agent'
 import { markChannelReadDirty } from '../../adapter/channel/read-view.js'
+import { agentMessageFailureOf, agentMessageTextOf, agentRelaySourceOf, foldAgentMessage } from '../../agent/messages.js'
 import { SubagentActivityStore, type SubagentState } from '../subagents.js'
+import type { SubagentTranscriptPage, SubagentTranscriptWindow } from '../../agent/capabilities.js'
+import type { AgentIdentity, AgentMessageControl, AgentMessageSubmitInput, AgentMessageSubmitResult, AgentMessageView } from '../../adapter/ports/channel-view.js'
 import type { ChannelState, ChatRow, SubagentControl, SubagentRow } from './types.js'
 import { isSubagentToolName } from './projection-helpers.js'
+import { teamMailboxAsRelay } from '../compat/agent-team-0.2.0.js'
+import { teamMessageOf } from '../team-tools.js'
+
+/** A relay's body as the agent-message feed shows it: a team message without
+ *  its `Team message from <name>:` framing block (the sender is `from`). */
+function relayTextOf(source: unknown, content: unknown): string {
+  const team = Array.isArray(content) ? teamMessageOf(source, content as readonly { readonly type: string }[]) : undefined
+  return team?.text ?? agentMessageTextOf(content)
+}
+
+/**
+ * Bound the retained description text. Evicting an older term does not cancel
+ * its pending spawn: a separate count keeps those unmatched starts from
+ * consuming a later delegation's title without retaining unbounded text.
+ */
+const MAX_PENDING_TASK_DESCRIPTIONS = 32
 
 type ProjectionState = Pick<ChannelState, 'rows' | 'subagents' | 'subagentCost' | 'emit' | 'emitStream'>
+
+/**
+ * Structural view of the host `ctx.subagents` continuation service
+ * (@deepseek-ai/dsh-subagent's SubagentRuntime) as this projection uses it.
+ * Reached by an optional service lookup, so every member is optional and
+ * the capability is the method's presence. Nothing here bypasses the
+ * continuation manager: `prompt` goes through its exact-parent authority,
+ * cold resume and inbox admission, `interrupt` through its authority check.
+ */
+export interface SubagentsServiceView {
+  interrupt?(target: string, reason: unknown): void
+  /** Browser-authored prompt to a direct continuable child: resolves with
+   *  the accepted message's inbox id. */
+  prompt?(request: {
+    readonly requestId: string
+    readonly parentSessionId: string
+    readonly childSessionId: string
+    readonly mode: 'continuable'
+    readonly delivery: 'queue' | 'steer'
+    readonly content: readonly { readonly type: 'text'; readonly text: string }[]
+  }, signal: AbortSignal): Promise<{ readonly messageId: string }>
+  /** Durable direct-child catalog read; no Agent is loaded, so the rows
+   *  carry no liveness guarantee. */
+  listChildren?(parentSessionId: string, signal?: AbortSignal): Promise<readonly SubagentCatalogEntryView[]>
+}
+
+/** One `listChildren` catalog row (SubagentCatalogEntry, structural). */
+export interface SubagentCatalogEntryView {
+  readonly id: string
+  readonly createdAt: number
+  readonly mode: 'one-shot' | 'continuable' | 'unknown'
+  readonly label?: string
+}
+
 interface ProjectionDependencies {
   rowIds: { value: number }
   agent(): Agent
-  subagents(): { interrupt?(target: string, reason: unknown): void } | undefined
+  subagents(): SubagentsServiceView | undefined
   /** Optional child metadata lookup; failures must not suppress spawning. */
   lookupChild(id: string): { status?: string; session?: unknown; options?: { provider?: string; model?: string } } | undefined
+  /** Aborted when the channel owner releases: cancels a prompt that has not
+   *  been accepted yet (an accepted child inbox belongs to the continuation
+   *  manager from then on). */
+  ownerSignal?: AbortSignal
+  /** The DSH child transcript source (docs/dsh-child-transcript.md),
+   *  injected only when the host composition serves session persistence.
+   *  Its presence is the `SubagentControl.history` capability: the shared
+   *  transcript tab renders exactly when it exists, with no backend-specific
+   *  UI. The reader re-captures parent identity, binding generation and
+   *  child ownership on every call, so a plain pass-through is fence-safe. */
+  readChildTranscript?: (agentId: string, window?: SubagentTranscriptWindow) => Promise<SubagentTranscriptPage | null>
 }
 
 /**
@@ -52,6 +117,12 @@ export function createSubagentProjection(getState: () => ProjectionState, deps: 
     // Transport passes null for an unkeyed event; never guess its ownership.
     return parent === undefined ? active : undefined
   }
+  /** DSH Session id of a bus carrier session, when it carries one. */
+  const sessionIdOf = (session: unknown): string | undefined => {
+    const id = (session as { id?: unknown } | null | undefined)?.id
+    return typeof id === 'string' ? id : undefined
+  }
+
   const park = (agent: Agent): void => {
     active.dropRows()
     parked.set(agent, active)
@@ -70,19 +141,58 @@ export function createSubagentProjection(getState: () => ProjectionState, deps: 
       if (child !== undefined && child.status !== 'running') active.store.patch(saved.agentId, { status: 'unknown' })
     }
   }
+  /**
+   * The addressable roster: the parent's durable direct-child catalog,
+   * filtered to continuable children only. One-shot, unknown-mode and
+   * diagnostic rows are not addressable (fail closed), and a missing
+   * continuation service rejects instead of answering an empty roster.
+   */
+  const listTargets = async (): Promise<readonly AgentIdentity[]> => {
+    const service = deps.subagents()
+    if (service?.listChildren === undefined) throw new Error('dsh-tui: the subagents continuation service is unavailable')
+    const entries = await service.listChildren(String(deps.agent().session.id))
+    return entries
+      .filter(entry => entry.mode === 'continuable')
+      .map(entry => {
+        const status = active.store.get(entry.id)?.status
+        return {
+          agentId: entry.id,
+          sessionId: entry.id,
+          ...(entry.label === undefined ? {} : { label: entry.label }),
+          mode: 'continuable' as const,
+          ...(status === undefined ? {} : { status }),
+        }
+      })
+  }
+
   return {
     get store() { return active.store },
     get pendingTaskDescriptions() { return active.pendingTaskDescriptions },
-    control: { interrupt: (id: string) => active.control.interrupt(id) },
+    control: {
+      interrupt: (id: string) => active.control.interrupt(id),
+      // The shared transcript page source: the capability exists exactly
+      // when the injected reader does.
+      ...(deps.readChildTranscript === undefined ? {} : { history: deps.readChildTranscript }),
+      message: {
+        via: 'direct-continuable',
+        // The prompt control plane takes both deliveries natively; the
+        // composer shows steer for Ctrl+Enter only because this says so.
+        steer: true,
+        listTargets,
+        submit: input => active.submitPrompt(input),
+        messages: () => [...active.agentMessages],
+      } satisfies AgentMessageControl,
+    },
     onSessionEvent(session: unknown, event: { type?: string }): boolean {
       let handled = false
+      const parentId = sessionIdOf(session)
       if (session === activeParent.session) {
-        active.onParentEvent(event)
+        active.onParentEvent(event, false, parentId)
         handled = true
       }
       for (const [parent, projection] of parked) {
         if (session === parent.session) {
-          projection.onParentEvent(event)
+          projection.onParentEvent(event, false, parentId)
           handled = true
         }
         if (projection.onSessionEvent(session, event)) handled = true
@@ -99,7 +209,7 @@ export function createSubagentProjection(getState: () => ProjectionState, deps: 
     bootstrapFromLog(events: readonly unknown[]) {
       // Live parked reducers already consumed this log. Re-folding historical
       // workflow edges would overwrite the current epoch and its settlement.
-      if (!restored) active.bootstrapFromLog(events)
+      if (!restored) active.bootstrapFromLog(events, sessionIdOf(activeParent.session))
       else active.syncNow()
     },
     syncNow: () => active.syncNow(),
@@ -107,7 +217,7 @@ export function createSubagentProjection(getState: () => ProjectionState, deps: 
     dropRows: () => active.dropRows(),
     park, restore,
     forget(agent: Agent) { parked.delete(agent) },
-    dispose() { parked.clear(); active.store.reset(); active.dropRows(); active.pendingTaskDescriptions.length = 0 },
+    dispose() { parked.clear(); active.reset() },
     reset() { active = make(); activeParent = deps.agent(); restored = false; getState().subagents = []; getState().subagentCost = [] },
   }
 }
@@ -136,8 +246,13 @@ function createSessionSubagentProjection(
   deps: ProjectionDependencies & { visible(): boolean },
 ) {
   const store = new SubagentActivityStore()
+  /** Observed agent↔agent relay facts and prompt receipts of this parent,
+   *  oldest first, folded by durable message id. */
+  const agentMessages: AgentMessageView[] = []
   const rowsByAgentId = new Map<string, ChatRow>()
+  /** Empty entries reserve starts whose ambiguous description was discarded. */
   const pendingTaskDescriptions: string[] = []
+  let evictedDescriptionCount = 0
   /** Workflow member identity: `tool-workflow/agent-end` carries no childId,
    * so member starts remember `runId:seq` → agentId for their settlement. */
   const workflowMembers = new Map<string, string>()
@@ -187,10 +302,49 @@ function createSessionSubagentProjection(
     syncNow()
     return true
   }
+  /** A relay delivered into a tracked child: the durable
+   *  AgentMessageSource names the sending session, the receiving side is
+   *  this child. An admitted relay is 'queued', since nothing stronger is
+   *  provable from the log alone; a plain user/message (no relay source)
+   *  never becomes one. */
+  const noteChildRelay = (childId: string, event: unknown): void => {
+    const raw = (event as { readonly data?: { readonly id?: unknown; readonly source?: unknown; readonly content?: unknown } }).data
+    if (raw === undefined || typeof raw.id !== 'string' || raw.id === '') return
+    // compat(dsh 0.2.0, log): a 0.2.0 mailbox delivery reads as the relay it became.
+    const data = teamMailboxAsRelay(raw)
+    const relay = agentRelaySourceOf(data.source)
+    if (relay === undefined) return
+    foldAgentMessage(agentMessages, {
+      messageId: raw.id,
+      from: relay.senderSessionId,
+      to: childId,
+      via: 'agent-relay',
+      text: relayTextOf(data.source, data.content),
+      state: 'queued',
+      ...(typeof (event as { seq?: unknown }).seq === 'number' ? { sourceRef: `seq:${(event as { seq: number }).seq}` } : {}),
+      observedAt: eventTime(event) ?? Date.now(),
+    })
+  }
+
+  /** A child session's own descriptor can beat the host's spawn edge. With no
+   *  row to attribute it to the label would be lost for good — an external
+   *  child never gets a catalog to re-state it — so park it under the session
+   *  id (the child id the host links rows by) for the row born later to adopt. */
+  const rememberEarlyLabel = (session: unknown, event: { type?: string }): void => {
+    if (event.type !== 'subagent/descriptor') return
+    const sessionId = (session as { id?: unknown } | null | undefined)?.id
+    const label = (event as unknown as { data?: { label?: unknown } }).data?.label
+    if (typeof sessionId !== 'string' || sessionId === '') return
+    store.holdKeyedLabel(sessionId, label)
+  }
   const onSessionEvent = (session: unknown, event: { type?: string }): boolean => {
     let id = store.getSubagentIdBySession(session)
     if (id === undefined) id = backfillSessionLink(session)
-    if (id === undefined) return false
+    if (id === undefined) {
+      rememberEarlyLabel(session, event)
+      return false
+    }
+    if (event.type === 'user/message') noteChildRelay(id, event)
     store.onSessionEvent(id, event)
     if (event.type === 'assistant/chunk') {
       streamDirty = true
@@ -267,16 +421,44 @@ function createSessionSubagentProjection(
     return typeof time === 'number' ? time : undefined
   }
   /** Parent-session durable discovery events, live or folded from the log. */
-  const onParentEvent = (event: unknown, historical = false): void => {
+  const onParentEvent = (event: unknown, historical = false, parentSessionId?: string): void => {
     if (!event || typeof event !== 'object') return
-    const ev = event as { type?: string; data?: { childId?: unknown; childCreatedAt?: unknown; label?: unknown; mode?: unknown; runId?: unknown; seq?: unknown; outcome?: unknown; name?: unknown; arguments?: unknown } }
+    const ev = event as { type?: string; seq?: unknown; data?: { childId?: unknown; childCreatedAt?: unknown; label?: unknown; mode?: unknown; runId?: unknown; seq?: unknown; outcome?: unknown; name?: unknown; arguments?: unknown; id?: unknown; source?: unknown; content?: unknown } }
     const data = ev.data ?? {}
     const childId = typeof data.childId === 'string' ? data.childId : undefined
+    if (ev.type === 'user/message') {
+      // A relay delivered into this parent: the durable AgentMessageSource
+      // names the sending session. Plain user text, injected context and
+      // settlement notices are not relays; they stay invisible here, just as
+      // the translator keeps them out of bubbles.
+      // compat(dsh 0.2.0, log): a 0.2.0 mailbox delivery reads as the relay it became.
+      const delivered = teamMailboxAsRelay(data)
+      const relay = agentRelaySourceOf(delivered.source)
+      if (relay !== undefined && typeof data.id === 'string' && data.id !== '') {
+        foldAgentMessage(agentMessages, {
+          messageId: data.id,
+          from: relay.senderSessionId,
+          ...(parentSessionId === undefined ? {} : { to: parentSessionId, parentSessionId }),
+          via: 'agent-relay',
+          text: relayTextOf(delivered.source, delivered.content),
+          state: 'queued',
+          ...(typeof ev.seq === 'number' ? { sourceRef: `seq:${ev.seq}` } : {}),
+          observedAt: eventTime(event) ?? Date.now(),
+        })
+      }
+      return
+    }
     if (ev.type === 'tool/call') {
       if (!historical && typeof data.name === 'string' && isSubagentToolName(data.name) && typeof data.arguments === 'string') {
         try {
           const args = JSON.parse(data.arguments) as { description?: unknown }
-          if (typeof args.description === 'string' && args.description) pendingTaskDescriptions.push(args.description)
+          if (typeof args.description === 'string' && args.description) {
+            if (pendingTaskDescriptions.length >= MAX_PENDING_TASK_DESCRIPTIONS) {
+              pendingTaskDescriptions.shift()
+              evictedDescriptionCount += 1
+            }
+            pendingTaskDescriptions.push(args.description)
+          }
         } catch { /* malformed arguments do not describe a child */ }
       }
       return
@@ -320,10 +502,10 @@ function createSessionSubagentProjection(
   /** Seed the dashboard from the durable parent log at bind/resume: catalog
    * children and workflow members survive a restart. Historical children the
    * registry no longer holds stay card-less (dashboard-only, `unknown`). */
-  const bootstrapFromLog = (events: readonly unknown[]): void => {
+  const bootstrapFromLog = (events: readonly unknown[], parentSessionId?: string): void => {
     if (!Array.isArray(events)) return
     try {
-      for (const event of events) onParentEvent(event, true)
+      for (const event of events) onParentEvent(event, true, parentSessionId)
     } catch { /* bootstrap is best-effort discovery; live events remain authoritative */ }
     syncNow()
   }
@@ -331,11 +513,40 @@ function createSessionSubagentProjection(
     if (!info?.id) return
     // The fact that the host spawned a child is authoritative even when its
     // optional discovery seam is absent, unloading, or throws.
+    // The queue is keyed by nothing, so only a NEW run may consume a term from
+    // it: a re-announced edge for the same runId (a continuable epoch's
+    // refresh) must leave the queue alone, or every later row shifts by one.
+    // An edge without a run key is itself such a refresh (the store's epoch
+    // rule) — only a real, different key opens a new epoch.
+    const knownRunId = store.runIdOf(info.id)
+    // A row that does not exist yet is a fresh run even when the edge carries
+    // no run key: the store's refresh rule is about a row it already tracks,
+    // and treating the first edge of an untracked child as a refresh would
+    // skip its term and hand that term to the next spawn instead.
+    const freshRun = !store.has(info.id)
+      || (info.runId !== undefined && (knownRunId === undefined || knownRunId !== info.runId))
+    // A queued term is a first-frame guess; `subagent/catalog`'s childId-keyed
+    // label is the authority and corrects it in the store (describeFromLabel).
+    // A row a keyed label already settled still consumes the term here — the
+    // store drops it instead of applying it, so the FIFO stays aligned.
+    //
+    // The queue carries no childId, so a term is only usable while exactly one
+    // delegation is outstanding. With two or more, any pick is a coin flip
+    // that puts a concurrent child's name on this card until its keyed label
+    // arrives. Discard the text, but retain every unmatched start slot: a new
+    // call can arrive before the rest of this batch starts. Forgetting those
+    // slots would let an older start consume that new call's title.
+    let description: string | undefined
+    if (freshRun) {
+      if (evictedDescriptionCount + pendingTaskDescriptions.length > 1) pendingTaskDescriptions.fill('')
+      if (evictedDescriptionCount > 0) evictedDescriptionCount -= 1
+      else description = pendingTaskDescriptions.shift() || undefined
+    }
     store.onSpawned(info.id, info.provider || 'subagent', info.provider, {
-      runId: info.runId ?? info.id,
+      ...(freshRun ? { runId: info.runId } : {}),
       local: info.local,
       startedAt: Date.now(),
-      description: pendingTaskDescriptions.shift(),
+      ...(description === undefined ? {} : { description, descriptionFromQueue: true }),
     })
     cardedIds.add(info.id)
     try {
@@ -370,6 +581,56 @@ function createSessionSubagentProjection(
     syncNow()
     getState().emit()
   }
+  /**
+   * The direct continuable prompt: one browser-authored message through
+   * the continuation manager, whose rules cover exact-parent authority,
+   * cold resume and inbox admission; this facade only shapes the request
+   * and folds the receipt. An accepted inbox is 'queued', never more; a
+   * failure maps to the stable vocabulary.
+   */
+  const submitPrompt = async (input: AgentMessageSubmitInput): Promise<AgentMessageSubmitResult> => {
+    const service = deps.subagents()
+    if (service?.prompt === undefined) return { ok: false, reason: 'unavailable' }
+    const text = input.text.trim()
+    if (text === '') return { ok: false, reason: 'failed', message: 'empty text' }
+    // Fail closed on a child this roster already knows cannot take a
+    // continuation; the service re-checks with full authority regardless.
+    if (store.get(input.targetId)?.mode === 'one-shot') return { ok: false, reason: 'not-resumable' }
+    const parentSessionId = String(deps.agent().session.id)
+    const requestId = `tui-${randomUUID()}`
+    const signals = [new AbortController().signal, deps.ownerSignal, input.signal].filter((signal): signal is AbortSignal => signal !== undefined)
+    try {
+      const receipt = await service.prompt(
+        {
+          requestId,
+          parentSessionId,
+          childSessionId: input.targetId,
+          mode: 'continuable',
+          delivery: input.delivery,
+          content: [{ type: 'text', text }],
+        },
+        AbortSignal.any(signals),
+      )
+      foldAgentMessage(agentMessages, {
+        messageId: receipt.messageId,
+        intentId: requestId,
+        from: 'user',
+        to: input.targetId,
+        via: 'direct-continuable',
+        text,
+        state: 'queued',
+        sourceRef: receipt.messageId,
+        observedAt: Date.now(),
+        parentSessionId,
+      })
+      syncNow()
+      getState().emit()
+      return { ok: true, intentId: requestId, messageId: receipt.messageId, state: 'queued' }
+    } catch (error) {
+      return agentMessageFailureOf(error)
+    }
+  }
+
   const control: SubagentControl = {
     interrupt(agentId) {
       const child = store.get(agentId)
@@ -386,6 +647,6 @@ function createSessionSubagentProjection(
     },
   }
   const dropRows = (): void => { streamDirty = false; rowsByAgentId.clear() }
-  const reset = (): void => { dropRows(); cardedIds.clear(); workflowMembers.clear(); pendingTaskDescriptions.length = 0; store.reset(); getState().subagents = []; getState().subagentCost = [] }
-  return { store, control, pendingTaskDescriptions, onSessionEvent, onStreamFrame, onParentEvent, bootstrapFromLog, onStart, onEnd, syncNow, flush, dropRows, reset }
+  const reset = (): void => { dropRows(); cardedIds.clear(); workflowMembers.clear(); pendingTaskDescriptions.length = 0; evictedDescriptionCount = 0; agentMessages.length = 0; store.reset(); getState().subagents = []; getState().subagentCost = [] }
+  return { store, control, pendingTaskDescriptions, agentMessages, onSessionEvent, onStreamFrame, onParentEvent, bootstrapFromLog, onStart, onEnd, syncNow, flush, dropRows, reset, submitPrompt }
 }

@@ -1,12 +1,15 @@
-import type { Context } from '@deepseek-ai/cordis'
+import type { ServiceLookup } from './channel-host.js'
 import { randomUUID } from 'node:crypto'
 import { rememberImagePath, transcriptImageFromAttachment } from '../transcript-images.js'
-import { probeImageSize, adaptImageForAdmission, withinDimensionLimits } from '../../utils/imageResize.js'
+import { probeImageSize, sniffImageMediaType, adaptImageForAdmission, withinDimensionLimits } from '../../utils/imageResize.js'
 import type { AdaptOutcome, ImageSizeProbe, ResizeLimits } from '../../utils/imageResize.js'
+import { logForDebugging } from '../../utils/debug.js'
 import { mentionAttachments } from './mentions.js'
+import type { LocalImageStore } from './core/local-images.js'
 import type { ChannelOwner } from './owner.js'
 import type {
   ChannelImageBlock,
+  MentionAttachments,
   ComposerImageRef,
   StagedImageAdjustment,
   StagedImageHandle,
@@ -119,7 +122,7 @@ function admissionFailure(
     case 'animated-unsupported':
       return `resizing or converting this animated image cannot keep its frames (${outcome.detail})`
     default:
-      return `image could not be decoded to resize or convert it (${outcome.detail})`
+      return `the pasted image data could not be decoded (${outcome.detail})`
   }
 }
 
@@ -128,15 +131,138 @@ function admissionFailure(
 const positiveOr = (value: unknown, fallback: number): number =>
   typeof value === 'number' && value > 0 ? value : fallback
 
+/** A controlled admission refusal, safe to expose alongside a failed mention. */
+export class ImageAdmissionError extends Error {}
+
+/** Shared paste/mention admission; the returned attachment is the store's truth. */
+export async function saveAdmittedImage(attachments: MentionAttachments, input: StagedImageInput): Promise<{ attachment: ChannelImageBlock['attachment']; adjustment?: StagedImageAdjustment }> {
+  if (input.data.byteLength > attachments.imageLimits.maxImageBytes) {
+    throw new ImageAdmissionError(`image exceeds this profile's per-image size limit`)
+  }
+  // Ingress adaptation (issue #938): the store admits by media type, byte
+  // budget and the per-side / total pixel caps, and refuses on all of them
+  // when the bytes reach it. Measure and re-encode HERE instead, while the
+  // paste can still be explained to the user. Admission is judged against
+  // the pair this gate HANDS OVER (the store may normalize further on its
+  // own — that step is outside this feature), and both triggers are
+  // size-independent:
+  //   * a source media type the profile does not accept is converted, so a
+  //     small PNG is never refused while a large one succeeds;
+  //   * a probe-recognized image inside the caps skips sharp entirely;
+  //   * an unrecognized format is decoded for measurement (never trusted by
+  //     byte budget alone — the #432 gap);
+  //   * with sharp absent the image goes to the store unchanged ONLY while
+  //     it is still admissible as-is — an accepted format whose size the
+  //     probe could not prove fits (upstream stays the backstop); a measured
+  //     oversize, a decode failure, an unaccepted format or a multi-frame
+  //     image this gate would have to re-encode is reported now instead of
+  //     becoming a token that dies at save time.
+  // The runtime guards keep older attachment fakes (whose imageLimits
+  // predate the dimension fields) on the legacy synchronous path.
+  const dimensionCap = attachments.imageLimits.maxImageDimension
+  const pixelCap = attachments.imageLimits.maxImagePixels
+  let mediaType = input.mediaType
+  let data = input.data
+  // The content wins over the declared label — the same rule the local
+  // image store applies (channel/core/local-images.ts): a paste declares
+  // its media type from the filename, and a renamed or mis-exported file
+  // (a wechat download, a re-saved screenshot) would otherwise be judged
+  // and stored under a type its bytes contradict. The sniff reads magic
+  // bytes only; content it cannot identify keeps the declared label and
+  // takes the decode-or-refuse path below.
+  const sniffed = sniffImageMediaType(data)
+  if (sniffed !== undefined && sniffed !== mediaType) mediaType = sniffed
+  let adapted: Extract<AdaptOutcome, { kind: 'adapted' }> | undefined
+  if (typeof dimensionCap === 'number' && typeof pixelCap === 'number'
+    && Number.isFinite(dimensionCap) && Number.isFinite(pixelCap)) {
+    const dimensionLimits = { maxImageDimension: dimensionCap, maxImagePixels: pixelCap }
+    const probe = probeImageSize(data)
+    const sourceAccepted = attachments.imageLimits.mediaTypes.includes(mediaType)
+    // Only a probe-measured oversize is *known* to be refused by the store;
+    // an unmeasurable image may well be admissible, which is what keeps the
+    // sharp-less degradation a degradation rather than a guess.
+    const knownOversize = probe !== null && !withinDimensionLimits(probe, dimensionLimits)
+    if (!sourceAccepted || probe === null || knownOversize) {
+      const outcome = await adaptImageForAdmission(
+        data,
+        mediaType,
+        dimensionLimits,
+        attachments.imageLimits.mediaTypes,
+      )
+      if (outcome.kind === 'adapted') {
+        // outcome.mediaType comes from the accepted list inside the gate, so
+        // it is one of the profile's media types at runtime — narrowing,
+        // not trusting.
+        mediaType = outcome.mediaType as typeof mediaType
+        data = outcome.data
+        adapted = outcome
+        if (data.byteLength > attachments.imageLimits.maxImageBytes) {
+          throw new ImageAdmissionError(`image still exceeds this profile's per-image size limit after resampling`)
+        }
+      } else if (outcome.kind === 'unavailable') {
+        // Degrade ONLY when the paste is still admissible as-is: an accepted
+        // format whose size the probe could not prove fits. Everything else
+        // (measured oversize, unaccepted format, decode failure, animation
+        // that cannot survive) is a refusal we can state now.
+        const degraded = outcome.reason === 'sharp-missing' && sourceAccepted && !knownOversize
+        if (!degraded) {
+          // The refused bytes are the only forensic handle on a "could not
+          // be decoded" paste — the temp export is unlinked right after —
+          // so an opted-in run records what the gate actually saw.
+          logForDebugging('image ingress refused', {
+            reason: outcome.reason,
+            detail: outcome.detail,
+            declared: input.mediaType,
+            sniffed,
+            bytes: data.byteLength,
+            prefix: Buffer.from(data.subarray(0, 16)).toString('hex'),
+            ...(input.name === undefined ? {} : { name: input.name }),
+          })
+          throw new ImageAdmissionError(admissionFailure(outcome, { probe, mediaType, limits: dimensionLimits }))
+        }
+      }
+    }
+  }
+  // What the store will actually see: an accepted media type, inside the
+  // byte cap. A media type can still be unaccepted here only when the
+  // adaptation did not run (legacy limits) or could not produce one.
+  if (!attachments.imageLimits.mediaTypes.includes(mediaType)) {
+    throw new ImageAdmissionError(`${mediaType} images are not accepted by this profile`)
+  }
+  // The source path is TUI-side display metadata; the store only sees the
+  // fields its contract names. mediaType/data may be the adapted pair from
+  // the ingress gate above.
+  const { path: _path, ...stored } = input
+  const attachment = await attachments.saveImage({ ...stored, mediaType, data })
+  const sourceSize = probeImageSize(input.data)
+  const width = positiveOr(attachment.width, adapted?.width ?? sourceSize?.width ?? 0)
+  const height = positiveOr(attachment.height, adapted?.height ?? sourceSize?.height ?? 0)
+  const resized = adapted?.resized === true || (adapted !== undefined && (width !== adapted.width || height !== adapted.height)) || (sourceSize !== null && (width !== sourceSize.width || height !== sourceSize.height))
+  const adjustment = adapted !== undefined || resized || attachment.mediaType !== mediaType
+    ? { sourceMediaType: input.mediaType, mediaType: attachment.mediaType, width, height, resized, flattened: adapted?.flattened ?? false }
+    : undefined
+  return { attachment, ...(adjustment === undefined ? {} : { adjustment }) }
+}
+
 /**
  * Owns the editable-composer image capabilities: the session epoch, the
  * capability map, its preview facades and the `[Image #N]` compatibility
  * bindings minted by the public scene `stageImage()` API.
  */
 export function createComposerImages(
-  ctx: Context,
+  ctx: ServiceLookup,
   owner: ChannelOwner,
-  deps: { generation(): number },
+  deps: {
+    generation(): number
+    /** An empty startup id adopts its first real session without losing the draft. */
+    sessionId?(): string
+    /** The in-memory store of a session that takes images itself (a
+     *  backend with the `images` capability); undefined = the DSH
+     *  attachments service. */
+    localImages?(): LocalImageStore | undefined
+    /** Staged images a session change keeps: those of held rows. */
+    retainedStageIds?(): ReadonlySet<string>
+  },
 ): ComposerImages {
   /** Session epoch for the staged-image maps: bumped by every clear so a
    *  `saveImage` that was still in flight when the session changed cannot
@@ -162,8 +288,15 @@ export function createComposerImages(
 
   const clearStagedImages = (): void => {
     stagedImageEpoch += 1
-    stagedImages.clear()
-    stagedImageViews.clear()
+    // Held rows are the user's messages waiting for the next session (#1651):
+    // their images go with them. References are content-addressed and
+    // durable, so only the drafts' capabilities are revoked.
+    const retained = deps.retainedStageIds?.() ?? new Set<string>()
+    for (const stageId of [...stagedImages.keys()]) {
+      if (retained.has(stageId)) continue
+      stagedImages.delete(stageId)
+      stagedImageViews.delete(stageId)
+    }
     legacyStagedImageRefs.clear()
     legacyStagedImageSequence = 0
   }
@@ -172,17 +305,23 @@ export function createComposerImages(
    *  point re-checks it, so a replacement session revokes the old draft's
    *  capabilities BEFORE any subscriber can observe it — the invariant the
    *  single-file channel got by clearing immediately after the agent rebind,
-   *  made independent of the caller's ordering. */
+   *  made independent of the caller's ordering. The empty startup session's
+   *  first real binding retains the same draft and image epoch. */
   let syncedGeneration: number | undefined
+  let syncedSessionId: string | undefined
   const syncSession = (): void => {
     const generation = deps.generation()
+    const sessionId = deps.sessionId?.()
     if (syncedGeneration === undefined) {
       syncedGeneration = generation
+      syncedSessionId = sessionId
       return
     }
     if (generation === syncedGeneration) return
+    const startupAdoption = syncedSessionId === '' && sessionId !== undefined && sessionId !== ''
     syncedGeneration = generation
-    clearStagedImages()
+    syncedSessionId = sessionId
+    if (!startupAdoption) clearStagedImages()
   }
 
   const includeLegacyImageRefs = (
@@ -208,86 +347,14 @@ export function createComposerImages(
     generation: number,
   ): Promise<StagedImageHandle> => {
     syncSession()
-    const attachments = mentionAttachments(ctx)
+    const local = deps.localImages?.()
+    const attachments = local ?? mentionAttachments(ctx)
     if (attachments === undefined) throw new Error('image attachments are unavailable in this profile')
     if (generation !== stagedImageEpoch) {
       throw new Error('the session changed while the image was being staged')
     }
-    if (input.data.byteLength > attachments.imageLimits.maxImageBytes) {
-      throw new Error(`image exceeds this profile's per-image size limit`)
-    }
-    // Ingress adaptation (issue #938): the store admits by media type, byte
-    // budget and the per-side / total pixel caps, and refuses on all of them
-    // when the bytes reach it. Measure and re-encode HERE instead, while the
-    // paste can still be explained to the user. Admission is judged against
-    // the pair this gate HANDS OVER (the store may normalize further on its
-    // own — that step is outside this feature), and both triggers are
-    // size-independent:
-    //   * a source media type the profile does not accept is converted, so a
-    //     small PNG is never refused while a large one succeeds;
-    //   * a probe-recognized image inside the caps skips sharp entirely;
-    //   * an unrecognized format is decoded for measurement (never trusted by
-    //     byte budget alone — the #432 gap);
-    //   * with sharp absent the image goes to the store unchanged ONLY while
-    //     it is still admissible as-is — an accepted format whose size the
-    //     probe could not prove fits (upstream stays the backstop); a measured
-    //     oversize, a decode failure, an unaccepted format or a multi-frame
-    //     image this gate would have to re-encode is reported now instead of
-    //     becoming a token that dies at save time.
-    // The runtime guards keep older attachment fakes (whose imageLimits
-    // predate the dimension fields) on the legacy synchronous path.
-    const dimensionCap = attachments.imageLimits.maxImageDimension
-    const pixelCap = attachments.imageLimits.maxImagePixels
-    let mediaType = input.mediaType
-    let data = input.data
-    let adapted: Extract<AdaptOutcome, { kind: 'adapted' }> | undefined
-    if (typeof dimensionCap === 'number' && typeof pixelCap === 'number'
-      && Number.isFinite(dimensionCap) && Number.isFinite(pixelCap)) {
-      const dimensionLimits = { maxImageDimension: dimensionCap, maxImagePixels: pixelCap }
-      const probe = probeImageSize(data)
-      const sourceAccepted = attachments.imageLimits.mediaTypes.includes(mediaType)
-      // Only a probe-measured oversize is *known* to be refused by the store;
-      // an unmeasurable image may well be admissible, which is what keeps the
-      // sharp-less degradation a degradation rather than a guess.
-      const knownOversize = probe !== null && !withinDimensionLimits(probe, dimensionLimits)
-      if (!sourceAccepted || probe === null || knownOversize) {
-        const outcome = await adaptImageForAdmission(
-          data,
-          mediaType,
-          dimensionLimits,
-          attachments.imageLimits.mediaTypes,
-        )
-        if (outcome.kind === 'adapted') {
-          // outcome.mediaType comes from the accepted list inside the gate, so
-          // it is one of the profile's media types at runtime — narrowing,
-          // not trusting.
-          mediaType = outcome.mediaType as typeof mediaType
-          data = outcome.data
-          adapted = outcome
-          if (data.byteLength > attachments.imageLimits.maxImageBytes) {
-            throw new Error(`image still exceeds this profile's per-image size limit after resampling`)
-          }
-        } else if (outcome.kind === 'unavailable') {
-          // Degrade ONLY when the paste is still admissible as-is: an accepted
-          // format whose size the probe could not prove fits. Everything else
-          // (measured oversize, unaccepted format, decode failure, animation
-          // that cannot survive) is a refusal we can state now.
-          const degraded = outcome.reason === 'sharp-missing' && sourceAccepted && !knownOversize
-          if (!degraded) throw new Error(admissionFailure(outcome, { probe, mediaType, limits: dimensionLimits }))
-        }
-      }
-    }
-    // What the store will actually see: an accepted media type, inside the
-    // byte cap. A media type can still be unaccepted here only when the
-    // adaptation did not run (legacy limits) or could not produce one.
-    if (!attachments.imageLimits.mediaTypes.includes(mediaType)) {
-      throw new Error(`${mediaType} images are not accepted by this profile`)
-    }
-    // The source path is TUI-side display metadata; the store only sees the
-    // fields its contract names. mediaType/data may be the adapted pair from
-    // the ingress gate above.
-    const { path, ...stored } = input
-    const attachment = await attachments.saveImage({ ...stored, mediaType, data })
+    const { attachment, adjustment } = await saveAdmittedImage(attachments, input)
+    const { path } = input
     // A session change (/new, resume, rewind, model switch, background)
     // cleared the maps while the save was in flight: the durable object is
     // harmless, but the OLD session's capability must not reach the new one.
@@ -298,28 +365,12 @@ export function createComposerImages(
     const stageId = randomUUID()
     stagedImages.set(stageId, attachment)
     if (path !== undefined) rememberImagePath(String(attachment.attachmentId), path)
-    const view = transcriptImageFromAttachment(attachment, () => ctx.get('attachments'))
+    const view = local !== undefined ? local.facade(attachment) : transcriptImageFromAttachment(attachment, () => ctx.get('attachments'))
     if (view !== undefined) stagedImageViews.set(stageId, view)
     while (stagedImages.size > STAGED_IMAGE_LIMIT) {
       const oldest = stagedImages.keys().next().value as string | undefined
       if (oldest === undefined) break
       deleteStagedImage(oldest)
-    }
-    // The adjustment travels with the capability so the composer can say what
-    // happened instead of letting a rewritten image reach the store silently.
-    // Its numbers come from the STORE's own report, not from what this gate
-    // handed over: the store normalizes further (dimensions, and the media type
-    // too), and a notice quoting the gate's numbers would contradict the
-    // preview card the user is looking at.
-    const adjustment: StagedImageAdjustment | undefined = adapted === undefined ? undefined : {
-      sourceMediaType: input.mediaType,
-      mediaType: attachment.mediaType,
-      width: positiveOr(attachment.width, adapted.width),
-      height: positiveOr(attachment.height, adapted.height),
-      resized: adapted.resized
-        || positiveOr(attachment.width, adapted.width) !== adapted.width
-        || positiveOr(attachment.height, adapted.height) !== adapted.height,
-      flattened: adapted.flattened,
     }
     return adjustment === undefined ? { stageId } : { stageId, adjustment }
   }
@@ -360,7 +411,7 @@ export function createComposerImages(
     },
     stagedImageLimits(): ComposerImageLimits | undefined {
       syncSession()
-      const limits = mentionAttachments(ctx)?.imageLimits
+      const limits = (deps.localImages?.() ?? mentionAttachments(ctx))?.imageLimits
       if (limits === undefined) return undefined
       return {
         maxImageBytes: limits.maxImageBytes,

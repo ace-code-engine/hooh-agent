@@ -27,11 +27,21 @@
 | `--install-ui` / `--setup` | ❌ 无意义 | 包内已自带解释器与界面依赖；`setup_env.py` 那套"找/建解释器"逻辑在冻结包里没有用武之地 |
 | `--install-executor` | ⚠️ 视情况 | 打包时 `executor/` 里有 Go 二进制就一并带上；没带则需要联网下载 |
 | Rust 元处理引擎（`engine/`） | ❌ **不进包** | 冻结版自动走同口径纯 Python 路径，功能不缺、只是部分命令略慢；理由与实测见下节 |
-| **Ink 主外壳（`frontend/`）** | ❌ **不进包**（exe 只有 Python UI） | 三条实测理由见下节：`datas` 里没有 `frontend/`；它跑起来要 **Node ≥18** + `frontend/node_modules`（`tsx` 直跑 TS 源码）；而且**没有构建产物可带** |
+| **经典 Ink 前端（`frontend/src`）** | ❌ 不进包（见下节 D3） |
+| **整壳应用（`frontend/dsh-ui`，`ace app`）** | ✅ **随 MSI 进包**（载荷 `app\`，见下方 2026-10-31 更新） |
 
 **不悄悄退回"找系统 Python"是有意的**：那会把"宿主机装没装 Python"变成行为差异，同一份
 发行包在两台机器上能力不同——比明确禁用更难排查。这与 HooH 其余"不静默降级"的取态一致。
 
+> **2026-10-31 更新**：上表与下节的 D3 口径针对的是**经典前端**（`frontend/src`，
+> 需要 Node + 全量 node_modules 跑 TS 源码）——它确实不进 exe。
+> 但 `ace app`（dsh-TUI 整壳，`frontend/dsh-ui/`）走的是**另一条打包路**：
+> `packaging/build_app_payload.ps1` 把整棵 vendored 树 + 生产 `node_modules`
+> + 便携 `node.exe` + `@deepseek-ai/*` 运行时直接**作为载荷**（`dist\ace\app\`）
+> 放进发行包，`ace.cmd` 双布局探测（源码树在 → 源码跑；只有 `_internal\app`
+> → 载荷跑）。所以现在的能力表是：**Python UI 永远在，`ace app` 在 MSI 里
+> 也自包含可用**；`ace classic` 仍只限源码运行（它要的正是那种"开发机"）。
+> 一键链路：`packaging/build_release.ps1`（freeze → app payload → MSI+zip）。
 ## Ink 主外壳不进包（打包口径 **D3**，2026-09-27 定）
 
 `frontend/`（TypeScript + Ink，**声明的主外壳**）**不进 exe**。所以冻结发行跑的是

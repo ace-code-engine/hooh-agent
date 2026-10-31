@@ -1,0 +1,598 @@
+{
+  "name": "@deepseek-harness-tui/dsh-tui",
+  "version": "0.17.0",
+  "description": "Interactive terminal interface for DeepSeek Harness agents, sessions and tools.",
+  "keywords": [
+    "dsh",
+    "dsh-tui",
+    "dsh-plugin",
+    "deepseek",
+    "deepseek-harness",
+    "cordis",
+    "tui",
+    "terminal",
+    "cli",
+    "ink",
+    "agent",
+    "coding-agent"
+  ],
+  "license": "MIT",
+  "author": {
+    "name": "chimney",
+    "url": "https://github.com/ccch1mneyyy"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ccch1mneyyy/dsh-TUI.git"
+  },
+  "bugs": {
+    "url": "https://github.com/ccch1mneyyy/dsh-TUI/issues"
+  },
+  "homepage": "https://github.com/ccch1mneyyy/dsh-TUI#readme",
+  "packageManager": "pnpm@11.21.0",
+  "publishConfig": {
+    "access": "public"
+  },
+  "type": "module",
+  "imports": {
+    "#tui-profile/tui-channel": "./tui-profile/protocols/tui-channel.js",
+    "#tui-profile/profile-definitions": "./tui-profile/protocols/profile-definitions.js",
+    "#tui-profile/tui-contributions": "./tui-profile/protocols/tui-contributions.js"
+  },
+  "bin": {
+    "dsh-tui": "./bin/dsh-tui.js",
+    "dst": "./bin/dsh-tui.js"
+  },
+  "main": "lib/types/index.js",
+  "types": "lib/types/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/types/index.d.ts",
+      "import": "./lib/types/index.js"
+    },
+    "./working-activity": {
+      "types": "./lib/types/working-activity.d.ts",
+      "import": "./lib/types/working-activity.js"
+    },
+    "./oauth": {
+      "types": "./lib/types/oauth.d.ts",
+      "import": "./lib/types/oauth.js"
+    },
+    "./workspaces": {
+      "types": "./lib/types/workspaces.d.ts",
+      "import": "./lib/types/workspaces.js"
+    },
+    "./command-trees": {
+      "types": "./lib/types/command-trees.d.ts",
+      "import": "./lib/types/command-trees.js"
+    },
+    "./preset-patch": {
+      "types": "./lib/types/preset-patch.d.ts",
+      "import": "./lib/types/preset-patch.js"
+    },
+    "./settings-sections": {
+      "types": "./lib/types/settings-sections.d.ts",
+      "import": "./lib/types/settings-sections.js"
+    },
+    "./scenes": {
+      "types": "./lib/types/scenes.d.ts",
+      "import": "./lib/types/scenes.js"
+    },
+    "./panels": {
+      "types": "./lib/types/panels.d.ts",
+      "import": "./lib/types/panels.js"
+    },
+    "./extensions": {
+      "types": "./lib/types/extensions.d.ts",
+      "import": "./lib/types/extensions.js"
+    },
+    "./plugin-host": {
+      "types": "./lib/types/plugin-host.d.ts",
+      "import": "./lib/types/plugin-host.js"
+    },
+    "./api": {
+      "types": "./lib/types/api.d.ts",
+      "import": "./lib/types/api.js"
+    },
+    "./jsx-runtime": {
+      "types": "./lib/types/jsx-runtime.d.ts",
+      "import": "./lib/types/jsx-runtime.js"
+    },
+    "./invariant": {
+      "types": "./lib/types/dsh-adapter/invariant.d.ts",
+      "default": "./lib/types/dsh-adapter/invariant.js"
+    },
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./settings.json": "./lib/settings.json",
+    "./package.json": "./package.json",
+    "./icon": "./assets/plugin-icon.svg",
+    "./locale/en.json": "./locale/en.json",
+    "./locale/zh.json": "./locale/zh.json"
+  },
+  "files": [
+    "bin",
+    "cli/*.mjs",
+    "cli/*.d.ts",
+    "cli/*.json",
+    "cli/adapters",
+    "lib",
+    "!lib/types/backends/codex/protocol/generated",
+    "assets",
+    "locale",
+    "cordis.patch.yml",
+    "cordis.yml",
+    "tui-profile/feed",
+    "tui-profile/registry",
+    "tui-profile/protocols",
+    "tui-profile/schemas",
+    "presets",
+    "guide"
+  ],
+  "engines": {
+    "node": "^22.19 || >=24"
+  },
+  "scripts": {
+    "clean": "node scripts/clean-lib.mjs",
+    "build:dsh-std": "pnpm --dir vendor/dsh-std install --frozen-lockfile --ignore-scripts && pnpm --dir vendor/dsh-std --filter @dsh-std/core --filter @dsh-std/manifest --filter @dsh-std/connection --filter @dsh-std/presentation --filter @dsh-std/command --filter @dsh-std/storage --filter @dsh-std/messages -r build",
+    "build:mathjax": "pnpm --filter @dsh-tui-vendor/mathjax-tex-svg run build",
+    "build:vendor": "node scripts/build-vendor.mjs",
+    "compile": "node scripts/build-vendor.mjs && npm run clean && node --import tsx/esm scripts/gen-backend-index.mjs && tsc -p tsconfig.json && node scripts/gen-settings-json.mjs",
+    "compile:src": "node --import tsx/esm scripts/gen-backend-index.mjs && tsc -p tsconfig.json && node scripts/gen-settings-json.mjs",
+    "typecheck": "tsc -p tsconfig.typecheck.json",
+    "prepare": "node scripts/prepare-guard.mjs && npm run compile",
+    "build": "npm run compile && npm run verify:build",
+    "dev": "node scripts/dev-test.mjs",
+    "dev:copy-config": "node scripts/dev-copy-config.mjs",
+    "dev:test": "node scripts/verify-dev-command.mjs && node scripts/dev-test.mjs --no-launch",
+    "prompt:debug": "node scripts/read-prompt-debug.mjs",
+    "tui": "node --import tsx/esm scripts/run.ts",
+    "smoke": "node --import tsx/esm scripts/smoke.tsx",
+    "verify:build": "node scripts/run-verify-build.mjs",
+    "verify:cli": "node --test cli/test/cli.test.mjs cli/test/edges.test.mjs cli/test/package.test.mjs cli/test/boundary.test.mjs",
+    "verify:cli:runtime": "node cli/test/runtime.mjs",
+    "verify:cli-subcommands": "node scripts/verify-cli-subcommands.mjs",
+    "verify:boundary": "node --import tsx/esm scripts/verify-adapter-boundary.ts",
+    "verify:i18n": "node --import tsx/esm scripts/verify-i18n.ts",
+    "verify:contract": "node --import tsx/esm scripts/verify-upstream-contract.ts && node --import tsx/esm scripts/verify-host-contract.ts",
+    "verify:alpha-source": "node scripts/verify-alpha-source.mjs",
+    "verify:herdr": "node --import tsx/esm scripts/verify-herdr-integration.ts",
+    "verify:manifest-deps": "node --import tsx/esm scripts/verify-manifest-deps.ts",
+    "verify:oauth": "node scripts/verify-oauth.mjs",
+    "verify:patch-surface": "node --import tsx/esm scripts/verify-patch-surface.ts && node --import tsx/esm scripts/verify-lite-profile-rows.mjs",
+    "verify:fixed-window": "node scripts/verify-fixed-window.mjs",
+    "verify:web-coexistence": "node scripts/verify-web-coexistence.mjs",
+    "verify:plugin-spec": "node --import tsx/esm scripts/verify-plugin-spec.ts",
+    "verify:plugin-grants": "node --import tsx/esm scripts/verify-plugin-grants.ts",
+    "verify:plugin-grant-write": "node --import tsx/esm scripts/verify-plugin-grant-write.ts",
+    "verify:plugin-grant-lifecycle": "node --import tsx/esm scripts/verify-plugin-grant-lifecycle.ts",
+    "verify:plugin-storage": "node --import tsx/esm scripts/verify-plugin-storage.ts",
+    "verify:plugin-messages": "node --import tsx/esm scripts/verify-plugin-messages.ts",
+    "verify:packaged-presets": "node scripts/verify-packaged-presets.mjs",
+    "verify:minimal-preset-tools": "node scripts/verify-minimal-preset-tools.mjs",
+    "verify:agent-capabilities": "node --import tsx/esm scripts/verify-agent-capabilities.ts",
+    "verify:minimal-ui-naming": "node --import tsx/esm scripts/verify-minimal-ui-naming.ts",
+    "verify:liangshen-bootstrap": "node scripts/verify-liangshen-bootstrap.mjs",
+    "verify:liangshen-instruction-hint": "node scripts/verify-liangshen-instruction-hint.mjs",
+    "verify:liangshen-bash": "node scripts/verify-liangshen-bash.mjs",
+    "verify:package": "npm pack --dry-run --json --ignore-scripts | node scripts/verify-package.mjs",
+    "verify:bun-package": "node scripts/verify-bun-package.mjs",
+    "verify:installer-bundle": "node scripts/verify-installer-bundle.mjs",
+    "verify:prompt-debug": "npm run build && node scripts/verify-prompt-debug.mjs",
+    "verify:clipboard-image": "node --import tsx/esm scripts/verify-clipboard-image.ts",
+    "verify:history-search": "node --import tsx/esm scripts/verify-history-search.mjs",
+    "verify:initial-prompt": "node scripts/verify-initial-prompt.mjs && node scripts/verify-startup-argv.mjs",
+    "verify:plugin-ledger": "node --import tsx/esm scripts/verify-plugin-ledger.ts",
+    "verify:plugin-commands": "node --import tsx/esm scripts/verify-plugin-commands.ts",
+    "verify:plugin-negotiation": "node --import tsx/esm scripts/verify-plugin-negotiation.ts",
+    "verify:plugin-feed": "node --import tsx/esm scripts/verify-plugin-feed.ts",
+    "verify:plugin-guard": "node --import tsx/esm scripts/verify-plugin-guard.ts",
+    "verify:plugin-lifecycle": "node --import tsx/esm scripts/verify-plugin-lifecycle.ts",
+    "verify:plugin-panels": "node --import tsx/esm scripts/verify-plugin-panels.tsx",
+    "verify:runtime-themes": "node --import tsx/esm scripts/verify-runtime-themes.ts",
+    "verify:theme-hotswap": "node --import tsx/esm scripts/verify-theme-hotswap.tsx",
+    "verify:theme-preview": "node --import tsx/esm scripts/verify-theme-preview.tsx",
+    "verify:tips": "node --import tsx/esm scripts/verify-tips.tsx",
+    "verify:thinking-preview": "node --import tsx/esm scripts/verify-thinking-preview.tsx",
+    "verify:streaming-markdown-spacing": "node --import tsx/esm scripts/verify-streaming-markdown-spacing.tsx",
+    "verify:wheel-selection": "node --import tsx/esm scripts/verify-wheel-selection.ts",
+    "verify:pointer-events": "node --import tsx/esm scripts/verify-pointer-events.ts",
+    "verify:terminal-images": "node --import tsx/esm scripts/verify-terminal-images.tsx",
+    "verify:overlay-occlusion": "node --import tsx/esm scripts/verify-overlay-occlusion.tsx",
+    "verify:terminal-images-sixel": "node --import tsx/esm scripts/verify-terminal-images-sixel.tsx",
+    "verify:sixel-transcript": "node --import tsx/esm scripts/verify-sixel-transcript.tsx",
+    "verify:image-preview": "node --import tsx/esm scripts/verify-image-preview.tsx",
+    "verify:backdrop-dim": "node --import tsx/esm scripts/verify-backdrop-dim.tsx",
+    "verify:composer-image-tokens": "node --import tsx/esm scripts/verify-composer-image-tokens.tsx",
+    "verify:transcript-images": "node --import tsx/esm scripts/verify-transcript-images.tsx",
+    "verify:chat-overlay": "node --import tsx/esm scripts/verify-chat-overlay.ts",
+    "verify:approval-visibility": "node --import tsx/esm scripts/verify-approval-visibility.tsx && npm run verify:approval-source-badge",
+    "verify:approval-source-badge": "node --import tsx/esm scripts/verify-approval-source-badge.tsx",
+    "verify:permission-roster": "node scripts/verify-permission-roster.mjs",
+    "verify:permission-modes": "node scripts/verify-permission-modes.mjs",
+    "verify:permission-prefs": "node scripts/verify-permission-prefs.mjs",
+    "verify:plan-exit-restore": "node scripts/verify-plan-exit-restore.mjs",
+    "verify:shift-tab-mode": "node scripts/verify-shift-tab-mode.mjs",
+    "verify:live-session": "node --import tsx/esm scripts/verify-live-session.ts",
+    "sync:profile": "node scripts/sync-profile.mjs",
+    "sync:profile:check": "node scripts/sync-profile.mjs --check",
+    "verify:sync-profile": "node scripts/verify-sync-profile.mjs",
+    "bundle:installer": "node scripts/make-installer-bundle.mjs",
+    "bundle:standalone": "node scripts/make-standalone-bundle.mjs",
+    "verify:image-downsample": "node --import tsx/esm scripts/verify-image-downsample.tsx",
+    "verify:migrate-sessions": "node --import tsx/esm scripts/verify-migrate-sessions.ts",
+    "verify:source-hygiene": "node scripts/verify-source-hygiene.mjs",
+    "verify:renderer-primitives": "node --import tsx/esm scripts/verify-renderer-primitives.tsx",
+    "verify:terminal-size-source": "node scripts/verify-terminal-size-source.mjs",
+    "verify:product-migration": "node --import tsx/esm scripts/verify-product-migration.ts",
+    "verify:spinner-identity": "node --import tsx/esm scripts/verify-spinner-identity.ts",
+    "verify:table-layout": "node --import tsx/esm scripts/verify-table-layout.tsx",
+    "verify:mermaid-diagram": "node --import tsx/esm scripts/verify-mermaid-diagram.tsx",
+    "verify:latex-math": "node --import tsx/esm scripts/verify-latex-math.tsx",
+    "verify:settings": "node --import tsx/esm scripts/verify-settings-definitions.ts",
+    "verify:math-renderer": "node --import tsx/esm scripts/verify-math-renderer.tsx",
+    "verify:math-block-image": "node --import tsx/esm scripts/verify-math-block-image.tsx",
+    "verify:math-inline-image": "node --import tsx/esm scripts/verify-math-inline-image.tsx",
+    "verify:semantic-copy": "node --import tsx/esm scripts/verify-semantic-copy.tsx",
+    "verify:btw": "node --import tsx/esm scripts/verify-btw.tsx",
+    "verify:preset-patch": "node --import tsx/esm scripts/verify-preset-patch.ts",
+    "verify:adapter-skeleton": "node --import tsx/esm scripts/verify-adapter-skeleton.ts",
+    "verify:adapter-ports": "node --import tsx/esm scripts/verify-adapter-ports.ts",
+    "verify:adapter-effect-class": "node --import tsx/esm scripts/verify-adapter-effect-class.ts",
+    "verify:adapter-shadow": "node --import tsx/esm scripts/verify-adapter-shadow.ts",
+    "verify:adapter-descriptor": "node --import tsx/esm scripts/verify-adapter-descriptor.ts",
+    "verify:protocol-single-source": "node --import tsx/esm scripts/verify-protocol-single-source.ts",
+    "verify:compat-removal": "node --import tsx/esm scripts/verify-compat-removal.ts",
+    "verify:adapter-upstream-driver": "node --import tsx/esm scripts/verify-adapter-upstream-driver.ts",
+    "verify:adapter-kernel-runtime": "node --import tsx/esm scripts/verify-adapter-kernel-runtime.ts",
+    "verify:adapter-live-probes": "node --import tsx/esm scripts/verify-adapter-live-probes.ts",
+    "verify:adapter-replay-harness": "node --import tsx/esm scripts/verify-adapter-replay-harness.ts",
+    "verify:adapter-detection": "node --import tsx/esm scripts/verify-adapter-detection.ts",
+    "verify:adapter-slices": "node --import tsx/esm scripts/verify-adapter-slices.ts",
+    "verify:channel-ui": "node --import tsx/esm scripts/verify-channel-ui.ts",
+    "verify:projection-golden": "node --import tsx/esm scripts/verify-projection-golden.ts",
+    "verify:dsh-translate": "node --import tsx/esm scripts/verify-dsh-translate.ts",
+    "verify:agent-domain": "node --import tsx/esm scripts/verify-agent-domain.ts",
+    "verify:codex-contract": "node --import tsx/esm scripts/verify-codex-contract.ts",
+    "verify:claude-contract": "node --import tsx/esm scripts/verify-claude-contract.ts",
+    "verify:claude-live": "DSH_TUI_CLAUDE_LIVE=1 node --import tsx/esm scripts/verify-claude-live.ts",
+    "verify:claude-headless": "DSH_TUI_CLAUDE_LIVE=1 node --import tsx/esm scripts/verify-claude-headless.tsx",
+    "verify:adapter-channel": "node --import tsx/esm scripts/verify-adapter-channel.ts",
+    "verify:binding-transaction": "node --import tsx/esm scripts/verify-binding-transaction.ts",
+    "verify:session-extraction": "node --import tsx/esm scripts/verify-session-extraction.ts",
+    "verify:rewind-edit": "node --import tsx/esm scripts/verify-rewind-edit.tsx",
+    "verify:model-mode-workspace-extraction": "node --import tsx/esm scripts/verify-model-mode-workspace-extraction.ts",
+    "verify:model-lifecycle-fences": "node --import tsx/esm scripts/verify-model-lifecycle-fences.ts",
+    "verify:reports-metadata": "node --import tsx/esm scripts/verify-reports-metadata.ts",
+    "verify:session-reset": "node --import tsx/esm scripts/verify-session-reset.ts",
+    "verify:adapter-channel-conformance": "node --import tsx/esm scripts/verify-adapter-channel-conformance.ts",
+    "verify:win32-protocol": "node --import tsx/esm scripts/verify-win32-protocol.ts",
+    "verify:selection-resize": "node --import tsx/esm scripts/verify-selection-viewport-resize.ts",
+    "verify:selection-stale-guard": "node --import tsx/esm scripts/verify-selection-stale-guard.tsx",
+    "verify:inject-channel": "node --import tsx/esm scripts/verify-inject-channel.mjs",
+    "verify:session-mounts": "node --import tsx/esm scripts/verify-session-mounts.mjs",
+    "verify:handoff-stdin": "node --import tsx/esm scripts/verify-handoff-stdin.ts",
+    "verify:session-supervisor": "node --import tsx/esm scripts/verify-session-supervisor.tsx",
+    "verify:composer-draft-handoff": "node --import tsx/esm scripts/verify-composer-draft-handoff.tsx",
+    "verify:background-extraction": "node --import tsx/esm scripts/verify-background-extraction.ts",
+    "verify:plugin-catalog-extraction": "node --import tsx/esm scripts/verify-plugin-catalog-extraction.ts",
+    "verify:channel-composition": "node --import tsx/esm scripts/verify-channel-composition.ts",
+    "verify:channel-trace-read": "node --import tsx/esm scripts/verify-channel-trace-read.ts",
+    "verify:activity-store": "node --import tsx/esm scripts/verify-activity-store.ts",
+    "verify:activity-store-render": "node --import tsx/esm scripts/verify-activity-store-render.tsx",
+    "verify:status-fields": "node --import tsx/esm scripts/verify-status-fields.tsx",
+    "verify:plugin-field-order": "node --import tsx/esm scripts/verify-plugin-field-order.ts",
+    "verify:plugin-field-picker": "node --import tsx/esm scripts/verify-plugin-field-picker.tsx",
+    "verify:activity-ownership": "node --import tsx/esm scripts/verify-activity-ownership.ts"
+  },
+  "peerDependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.287",
+    "@deepseek-ai/cordis": "^4.0.1 || 4.0.5-alpha.2",
+    "@deepseek-ai/dsh-agent": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-agent-instructions": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-agent-preset-registry": "0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-app-boot": "0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-atomic-write": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-cmdline": "0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-commands": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-cordis-host-runner": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-deepseek-account": "0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-home-paths": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-host-webserver": "0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-http-proxy": "0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-launch-environment": "0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-llm": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-llm-pi-ai": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-persona": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-plugin-manager": "0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-ptc-runtime-node": "0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-scope": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-session": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-settings": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-skill": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-storage": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-storage-domain": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-storage-json": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-system-prompt": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-terminal": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-terminal-bash": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-tool-ask-user": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-tool-bash-persistent": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-tool-cordis": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-tool-subagent": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-user-approval": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-user-questions": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-web-app": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-workspace": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/schemastery": "^3.18.1 || 3.18.5-alpha.2"
+  },
+  "peerDependenciesMeta": {
+    "@anthropic-ai/claude-agent-sdk": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-web-app": {
+      "optional": true
+    },
+    "@deepseek-ai/cordis": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-app-boot": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-cmdline": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-home-paths": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-http-proxy": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-launch-environment": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-agent": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-agent-instructions": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-agent-preset-registry": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-atomic-write": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-commands": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-cordis-host-runner": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-deepseek-account": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-host-webserver": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-llm": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-llm-pi-ai": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-persona": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-plugin-manager": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-ptc-runtime-node": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-scope": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-session": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-settings": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-skill": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-storage": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-storage-domain": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-storage-json": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-system-prompt": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-terminal": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-terminal-bash": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tool-ask-user": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tool-bash-persistent": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tool-cordis": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tool-subagent": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-user-approval": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-user-questions": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-workspace": {
+      "optional": true
+    },
+    "@deepseek-ai/schemastery": {
+      "optional": true
+    }
+  },
+  "dependencies": {
+    "@alcalzone/ansi-tokenize": "^0.3.0",
+    "@dsh-std/command": "workspace:*",
+    "@dsh-std/connection": "workspace:*",
+    "@dsh-std/core": "workspace:*",
+    "@dsh-std/manifest": "workspace:*",
+    "@dsh-std/messages": "workspace:*",
+    "@dsh-std/presentation": "workspace:*",
+    "@dsh-std/storage": "workspace:*",
+    "@dsh-tui-vendor/mathjax-tex-svg": "workspace:*",
+    "auto-bind": "^4.0.0 || ^5.0.0",
+    "bidi-js": "^1.0.0",
+    "chalk": "^6.0.0",
+    "cli-boxes": "^3.0.0 || ^4.0.0",
+    "cli-highlight": "^2.1.11",
+    "code-excerpt": "^3.0.0 || ^4.0.0",
+    "diff": "^8.0.4",
+    "dsh-working-activity": "^0.5.0",
+    "emoji-regex": "^11.0.0",
+    "figures": "^6.1.0",
+    "get-east-asian-width": "^1.0.0",
+    "highlight.js": "^11.11.1",
+    "indent-string": "^5.0.0",
+    "lodash-es": "^4.17.0",
+    "lovely-mermaid": "0.3.3",
+    "marked": "^18.0.7",
+    "react": "^19.2.0",
+    "react-reconciler": "^0.34.0",
+    "semver": "^7.0.0",
+    "signal-exit": "^4.0.0",
+    "sixel": "0.16.0",
+    "stack-utils": "^2.0.0",
+    "strip-ansi": "^7.0.0",
+    "supports-hyperlinks": "^4.6.0",
+    "type-fest": "^5.8.0",
+    "usehooks-ts": "^3.1.0",
+    "wrap-ansi": "^10.0.1",
+    "ws": "^8.21.3",
+    "yaml": "^2.9.0",
+    "zod": "^4.4.3"
+  },
+  "optionalDependencies": {
+    "sharp": "0.35.5"
+  },
+  "bundledDependencies": [
+    "@dsh-std/command",
+    "@dsh-std/connection",
+    "@dsh-std/core",
+    "@dsh-tui-vendor/mathjax-tex-svg",
+    "@dsh-std/manifest",
+    "@dsh-std/messages",
+    "@dsh-std/presentation",
+    "@dsh-std/storage"
+  ],
+  "devDependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.287",
+    "@deepseek-ai/cordis": "^4.0.1 || 4.0.5-alpha.2",
+    "@deepseek-ai/cordis-plugin-group": "^1.0.4 || 1.0.5-alpha.2",
+    "@deepseek-ai/cordis-plugin-include": "^1.0.9 || 1.0.10-alpha.2",
+    "@deepseek-ai/cordis-plugin-loader": "^1.0.5 || 1.0.6-alpha.2",
+    "@deepseek-ai/cordis-plugin-timer": "^1.1.6 || 1.1.7-alpha.2",
+    "@deepseek-ai/cosmokit": "^1.8.5 || 1.8.6-alpha.2",
+    "@deepseek-ai/dsh-agent": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-agent-instructions": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-agent-loop": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-agent-preset-registry": "0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-app-boot": "0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-atomic-write": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-attachment": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-brand": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-cmdline": "0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-command-compact": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-commands": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-compaction-basic": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-compaction-tool-result-pruner": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-cordis-host-runner": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-deepseek-account": "0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-fs": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-fs-local": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-home-paths": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-host-webserver": "0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-http-proxy": "0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-launch-environment": "0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-llm": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-llm-pi-ai": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-persona": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-plan-mode": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-plugin-manager": "0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-ptc-runtime": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-ptc-runtime-node": "0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-sandbox": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-sandbox-policy": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-scope": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-session": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-session-format-catalog": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-session-format-v3-to-v4": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-session-persistence": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-session-persistence-jsonl": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-session-projection": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-settings": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-skill": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-skill-filesystem": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-storage": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-storage-domain": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-storage-json": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-subprocess": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-system-prompt": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-terminal": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-terminal-bash": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-timeout": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-tool-ask-user": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-tool-bash-persistent": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-tool-cordis": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-tool-fs": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-tool-fs-search": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-tool-goal": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-tool-jobs": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-tool-ralph": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-tool-str-replace-editor": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-tool-subagent": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-tool-subagent-control": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-tool-todo": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-tool-web": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-tool-workflow": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-tools": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-typert-protocol": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-user-approval": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-user-questions": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-web": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-web-app": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/dsh-web-deepseek-api": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-workflow-ptc": "0.2.1-rc.5",
+    "@deepseek-ai/dsh-workspace": "^0.1.0-rc.6 || ^0.1.1-rc.1 || 0.1.2-alpha.3 || 0.1.2-alpha.4 || 0.1.2-alpha.5 || 0.1.2-rc.1 || 0.1.3-alpha.2 || 0.1.5-alpha.1 || 0.1.5-alpha.2 || 0.1.5-rc.1 || 0.1.7-rc.1 || 0.1.7-rc.2 || 0.2.0-rc.1 || 0.2.0-rc.2 || 0.2.1-rc.2 || 0.2.1-rc.3 || 0.2.1-rc.4 || 0.2.1-rc.5",
+    "@deepseek-ai/schemastery": "^3.18.1 || 3.18.5-alpha.2",
+    "@types/lodash-es": "^4.17.0",
+    "@types/node": "^26.4.0",
+    "@types/react": "^19.0.0",
+    "@types/react-reconciler": "^0.33.0",
+    "@types/semver": "^7.0.0",
+    "@types/ws": "^8.18.2",
+    "@xterm/headless": "^6.0.0",
+    "tar": "^7.5.22",
+    "tsx": "^4.0.0",
+    "typescript": "^6.0.3"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "icon": "./assets/plugin-icon.svg"
+}

@@ -34,11 +34,22 @@ export interface LocalCommand {
    * `/skill-name` takes. The help menu hides them (chrome commands only).
    */
   skill?: boolean
+  /**
+   * `backend`: a command of the bound backend itself (Claude's own slash
+   * commands). Like a skill entry it is completion-only: the typed line goes
+   * to the backend verbatim as prompt text. A local command of the same name
+   * always wins.
+   */
+  origin?: 'backend'
 }
 
 export type LocalizedDescriptions = Readonly<Partial<Record<'zh' | 'en', string>>>
 
-/** A concrete completion row, including the text inserted by Tab/Enter. */
+/**
+ * A concrete completion row: the line Enter runs and the text Tab inserts — an
+ * example row (`CommandCompletionNode.example`) instead runs the draft as typed
+ * and hands Tab that same draft unchanged.
+ */
 export interface CommandCompletion extends LocalCommand {
   replacement: string
   commandLine: string

@@ -93,10 +93,67 @@
       原因在迁入树自身，非壳外因素；经典前端同环境全程存活），修复前不转正。
       plain ace 回归 `frontend/src`（瑞士规范前端），`ace ui` 保留为显式入口。
       上一轮的「dsh 壳转正」决定作废，等缺陷修复后重评。
-- [ ] **修壳的 ink 自退出缺陷**（~370ms，无错误信息——ErrorBoundary 未触发，
-      需要在 dsh-ui/ink 层面查 root.ts / instances.ts 的退出路径）
-- [ ] re-vendor 到上游 0.16.1
-- [ ] 工具表达第 1 项:ToolRow resultView 投影
-- [ ] questions/ 面板接入(choice_request 不再自动取消)
-- [ ] Launchpad 资产决策(鲸鱼 → HooH 或保留关闭)
-- [ ] 命令候选接 initialize 的 commands(替换 entry 硬编码六条)
+- [x] 2026-10-31 **re-vendor 到上游 v0.17.0**（用户提供 GitHub main 完整源码 zip，
+      超出本卡原定的 0.16.1 目标）：整树重迁 `frontend/dsh-ui/`（src 1814 文件），
+      hooh/ 适配层按新接口升级（CommandCompletion 形状 / render 返回 Promise /
+      主题色键），桩类化（ProtocolCatalog/ManifestDefinitionCatalog），
+      品牌三处重放，零新增 npm 包。门禁：692 条 vitest 全绿、build 错误集合与
+      HEAD 逐条一致、tsc 噪声 83→119（同源，不追）。
+- [x] 2026-10-31 **修壳的 ink 自退出缺陷（在 0.17.0 内核上不再复现）**：
+      同环境三探针（假 stdio / 管道 stdin 真入口 / winpty 伪 TTY）8–12 秒全程
+      存活；v0.12 树同条件 ~370ms 自退出。候选修复：新内核 componentDidCatch 的
+      nested-update 溢出恢复、unmount 的 shutdownInput 所有权闸门、首帧微任务
+      边界。**剩**：真终端人工复验（`ace ui` 实际跑）后重评「壳转正」。
+- [x] 2026-10-31 **默认入口切到整壳**（用户裁决：双击 ace.cmd / hooh.cmd 直接进
+      完整界面）：plain `ace` = `:fe_app`（dsh-TUI 本尊 + hooh 内核），
+      `ace classic` = 瑞士规范前端（frontend/src），`ace ui` = 最小壳保留，
+      `ace --mock` 经启动器译成 ACE_MOCK=1。经典前端再次降级为显式备用
+      （上一次回退针对的是最小壳的 ink 自退出；整壳路线绕开了它）。
+- [x] 2026-10-31 **首次真机验收反馈三连修**：① 命令面板 105 项全是裸 i18n 键
+      （`cmd_context`）——引擎握手就地翻译（`locales/zh.json` 单一真源，
+      69 条 ace 命令全部真文案；105 = 上游内置 ~60 + ace 69 去重，`[HooH]`
+      标签 = 后端来源，合并规则上游定：本地同名优先）；② 标签栏蓝色鲸鱼
+      emoji + 通知标题——`ChatTitle` 的标签题改 `HooH · <title>`，
+      toast 标题 i18n 改 `HooH · 任务已完成`；③ **开屏 logo 不见**——
+      `~/.dsh-tui/settings.json` 是 dsh-TUI 系共享用户层，从全局 dsh 一次性
+      迁来的 `minimal: true` 把开屏大字藏了；app-entry 加**一次性品牌归一**
+      （只认 `imported` 标记的文档，翻 `minimal/whale/whaleGirl` 三键，
+      `hoohNormalized` 标记保证只做一次，用户此后改动全尊重）。实测归一
+      已落盘。`ace --mock` 现在真正传到引擎（之前被整壳吞掉、悄悄走真模型）。
+      启动 2.3s 分解：1.6s tsx 编译 1800 文件 + 0.6s 宿主组合根；
+      esbuild 预打包可到 <500ms，记为后续项。
+- [x] 2026-10-31 **开屏 logo 丑 → 真 bug**：品牌词写的是混合大小写 `HooH`，
+      而开屏字形表只有 A-Z——小写 `oo` 掉进缺字兜底的空心方块，渲染成
+      「H ▮▮ H」（真机截图）。三修：品牌词全大写 `HOOH`（splashFonts +
+      branding）；开屏字体从按日期轮换（上游 9 款彩蛋）**钉成 `shadow`**
+      （ANSI Shadow，最带质感的一款，`DSH_TUI_SPLASH_FONT` 缺省，
+      /settings 仍可换）；无头帧验证 9 款全渲染正常。
+- [x] 2026-10-31 **设置面板边框隐形**：卡片边框 token `promptBorder`
+      （#55606F）在纯黑底上过暗，真机几乎不可见（用户截图只剩两截亮色残段）。
+      无头帧验证边框字符本身完整（U+2502/╭╮╰╯ 全在）——是**可见性**问题
+      不是渲染缺陷；`CARD_BORDER` 改 `inactive`（雾灰蓝，亮一档）。
+- [x] 2026-10-31 **打包：整壳随 MSI 进发行包**。学习了 DSH 官方打包（Electron +
+      electron-builder + 定制 NSIS：per-user、品牌侧栏、多语言、差分更新、
+      代码签名——GUI 桌面应用的重型线）；HooH 是终端应用，沿用仓库既有的
+      PyInstaller → WiX MSI + 便携 zip 线，把整壳作为**载荷**塞进去：
+      `packaging/build_app_payload.ps1`（staged npm ci --omit=dev + @dsh-std
+      桩从树内拷回 + @deepseek-ai 运行时从本机 dsh 安装合并 + 便携 node.exe
+      + 自校验 + 启动冒烟），`ace.cmd` 双布局（源码树在 → 源码跑；只有
+      `_internal\app` → 载荷跑，引擎 = 打包内 ace.exe 本身，HOOH_ENGINE_EXE）。
+      一键链路 `packaging/build_release.ps1`。WiX 品牌化：ARPPRODUCTICON
+      （互字 .ico）+ 开始菜单目录改名 HooH。可移植性：清掉三处写死的个人
+      venv 探针（ace.cmd/setup_env.py/process.ts → 官方安装根 + 环境变量）。
+      门禁：check_packaging 全绿（修掉品牌改名后的陈旧 smoke 标记 + Unreleased
+      CHANGELOG 豁免）；载荷自校验 8523 文件/40.9MB 哈希一致；冻结引擎在
+      ASCII 路径下整轮对话端到端跑通（EXIT 0）——本仓 G:\_归档\ 非 ASCII 路径
+      + 会话沙箱会让 mock_turn/native_tools 两条 smoke 假失败，属环境伪影，
+      CI（ASCII 路径）不受影响。
+- [ ] **启动提速**：esbuild 预打包整壳成单文件（2.3s → 目标 <500ms）
+- [ ] **启动提速**：esbuild 预打包整壳成单文件（2.3s → 目标 <500ms）
+- [ ] **真终端验收 `ace app`**（有 TTY 的窗口里跑通一轮 + 审批面板 + /model）
+- [ ] 工具表达第 1 项:ToolRow resultView 投影（`ace app` 路线下大部分随上游原生获得）
+- [x] 2026-10-31 **Launchpad 资产决策：互字标方案已实现又被用户否决（「算了，
+      不用」）**——HoohMark（块字互 + 入场动画 + 呼吸态）做出来看过之后，
+      用户裁决不要吉祥物；接线已完整回退（LogoV2 恢复原 gate、组件删除），
+      开屏保持「大字 HOOH（shadow 体）+ 文字信息」，无识别物。主题色维持
+      雾蓝家族不变。此决定**不再重开**，除非用户点名。

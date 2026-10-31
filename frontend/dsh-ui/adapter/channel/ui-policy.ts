@@ -9,7 +9,7 @@ type MethodKeys<T> = { [K in keyof T]: T[K] extends (...args: never[]) => unknow
 export type ChannelPreferences = Pick<ChannelUi,
   | 'setDiffLayout' | 'setThinkingFold' | 'setJobGroupFold' | 'setToolBackground' | 'setScrollGutter'
   | 'setPageMargin' | 'setFoldTerminalCommand' | 'setPromptSessionLabel'
-  | 'setExpandEditor' | 'setSmoothStreaming' | 'setStatusBar' | 'setWhale' | 'setWhaleIdle' | 'setWhaleGirl' | 'setMinimalUi' | 'setMinimal' | 'setSplashFont'
+  | 'setExpandEditor' | 'setSmoothStreaming' | 'setStatusBar' | 'setWhale' | 'setWhaleIdle' | 'setWhaleGirl' | 'setMinimalUi' | 'setMinimal' | 'setSplashFont' | 'setBrand'
 >
 export const CHANNEL_UI_EFFECTS = Object.freeze({
   'setDiffLayout': 'mutate',
@@ -19,6 +19,7 @@ export const CHANNEL_UI_EFFECTS = Object.freeze({
   'setScrollGutter': 'mutate',
   'setPageMargin': 'mutate',
   'setFoldTerminalCommand': 'mutate',
+  'setTurnUsageRow': 'mutate',
   'setPromptSessionLabel': 'mutate',
   'setExpandEditor': 'mutate',
   'setSmoothStreaming': 'mutate',
@@ -26,6 +27,7 @@ export const CHANNEL_UI_EFFECTS = Object.freeze({
   'setWhale': 'mutate',
   'setWhaleIdle': 'mutate',
   'setSplashFont': 'mutate',
+  'setBrand': 'mutate',
   'setWhaleGirl': 'mutate',
   'setMinimalUi': 'mutate',
   // Deprecated pre-rename alias of setMinimalUi (see the port's doc comment).
@@ -57,6 +59,10 @@ export const CHANNEL_UI_EFFECTS = Object.freeze({
   'removePending': 'mutate',
   'cancel': 'mutate',
   'interruptAndDeliver': 'mutate',
+  'interruptAndDock': 'mutate',
+  'deliverDocked': 'mutate',
+  'swapDockedForDraft': 'mutate',
+  'holdInputs': 'mutate',
   'rewindTo': 'mutate',
   'promptRewind': 'mutate',
   'buildSessionTree': 'mutate',
@@ -94,6 +100,12 @@ export const CHANNEL_UI_EFFECTS = Object.freeze({
   'balanceInfo': 'mutate',
   'providerSetup': 'read-only',
   'oauthProviderStatuses': 'read-only',
+  'backendAuth': 'read-only',
+  'backendChannels': 'read-only',
+  'backendModes': 'read-only',
+  'backendMcp': 'read-only',
+  'backendGoals': 'read-only',
+  'backendInit': 'read-only',
   'settingsHost': 'read-only',
   'settingsSections': 'read-only',
   'subscribeSettingsSections': 'subscribe',
@@ -129,11 +141,22 @@ export const CHANNEL_UI_EFFECTS = Object.freeze({
   'backgroundCurrent': 'mutate',
   'replyToAgent': 'mutate',
   'traceEvents': 'read-only',
+  // Pure composition fact (which trajectory source is mounted); no service
+  // is acquired and no cache warmed by answering it.
+  'trajectorySource': 'read-only',
+  // Lane drilldown reads over the fold's own logs: the same append-only
+  // snapshots traceEvents hands back, plus a small roster. No upstream
+  // service, no host cache.
+  'trajectoryLanes': 'read-only',
+  'trajectoryLaneEvents': 'read-only',
+  'trajectoryBackendLabel': 'read-only',
   'subscribe': 'subscribe'
 } satisfies Record<MethodKeys<ChannelUi>, HostEffectClass>)
 
 export const CHANNEL_UI_PROPERTIES = [
   'version',
+  'ready',
+  'startupFailure',
   'rows',
   'status',
   'sessionTitle',
@@ -141,6 +164,11 @@ export const CHANNEL_UI_PROPERTIES = [
   'agentId',
   'sessionId',
   'agentBindingGeneration',
+  'sessionRef',
+  'backendCapabilities',
+  'costReport',
+  'rateLimit',
+  'olderHistory',
   'autoRecapOnOpen',
   'settingsNamespace',
   'model',
@@ -155,6 +183,7 @@ export const CHANNEL_UI_PROPERTIES = [
   'subagentCost',
   'cwd',
   'displayCwd',
+  'workingDirectory',
   'gitBranch',
   'working',
   'compaction',
@@ -169,7 +198,12 @@ export const CHANNEL_UI_PROPERTIES = [
   'reasoningEffort',
   'effortLevels',
   'lastUsage',
+  'turnUsage',
+  'turnOutcome',
+  'liveTurnEnds',
   'contextOccupancy',
+  'contextBreakdown',
+  'team',
   'tps',
   'tpsSamples',
   'activityFrames',
@@ -180,6 +214,7 @@ export const CHANNEL_UI_PROPERTIES = [
   'scrollGutter',
   'pageMargin',
   'foldTerminalCommand',
+  'turnUsageRow',
   'promptSessionLabel',
   'expandEditor',
   'smoothStreaming',
@@ -187,6 +222,7 @@ export const CHANNEL_UI_PROPERTIES = [
   'whale',
   'whaleIdle',
   'splashFont',
+  'brand',
   'whaleGirl',
   'minimalUi',
   // Deprecated pre-rename alias of minimalUi (see the port's doc comment).
@@ -206,6 +242,7 @@ export const CHANNEL_UI_PROPERTIES = [
   'jobControl',
   'mode',
   'modeIndex',
+  'modelDisplay',
   'agentPreset',
   'selection',
   'attachedContexts'

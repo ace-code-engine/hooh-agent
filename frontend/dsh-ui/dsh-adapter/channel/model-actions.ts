@@ -1,17 +1,18 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { ReasoningEffortId, type LlmModelInfo } from '@deepseek-ai/dsh-llm'
 import type { Agent, ModelSelectionRef } from '@deepseek-ai/dsh-agent'
-import type { CommandCompletionNode } from '../../commands.js'
-import { nearestLowerEffort, readEffortPref, resolveEffortDefault, writeEffortPref } from '../../effortPrefs.js'
+import { WORKING_GATE_NOTICES, type CommandCompletionNode } from '../../commands.js'
+import { nearestLowerEffort, readEffortPref, resolveEffortDefault, writeEffortPref, STANDARD_EFFORT_LADDER } from '../../effortPrefs.js'
 import { snapshotLiveSessionEvents } from '../compat/liveSession.js'
-import { getLang, t, tOr, type Lang } from '../../i18n.js'
+import { getLang, t, tOr, type I18nKey, type Lang } from '../../i18n.js'
 import { migratePresetPref, writePresetPref } from '../../presetPrefs.js'
 import { presetDisplayId, resolveCompatiblePreset, rosterOf, type AgentPresetInfo } from '../preset-resolution.js'
-import type { createChannelBinding } from './binding.js'
+import { installedMeetsVersion } from '../contract.js'
+import type { DshChannelBinding } from './binding.js'
 import type { ChannelOwner } from './owner.js'
 import type { ChannelState, EffortOption, PresetOption } from './types.js'
 
-type Binding = ReturnType<typeof createChannelBinding>
+type Binding = DshChannelBinding
 
 /**
  * Route metadata, effort preference and preset/model catalog actions.
@@ -36,12 +37,15 @@ export function createModelActions(
   const { owner, selection, notify } = deps
   const llmRuntime = ctx.get('llm') as
     | {
-      resolveModelInfo(provider: string, model: string): Promise<{ context?: { contextWindow: number }; reasoning?: { efforts: ReadonlyArray<{ id: string; name: string; description?: string }>; defaultEffort?: string } }>
+      // `reasoning` on the wire is `true` for rows that declare support
+      // without a tier list (pi-ai zai glm-5.3*); the object form may omit
+      // `efforts`. See tiersOf for how each shape resolves.
+      resolveModelInfo(provider: string, model: string): Promise<{ context?: { contextWindow: number }; reasoning?: boolean | { efforts?: ReadonlyArray<{ id: string; name: string; description?: string }>; defaultEffort?: string } }>
       listProviders(): readonly { id: string; name: string }[]
       listModels(provider: string): Promise<readonly LlmModelInfo[]>
     }
     | undefined
-  let preferredEffort: string | undefined = deps.initialEffort ?? readEffortPref()
+  let preferredEffort: string | undefined = readEffortPref() ?? deps.initialEffort
   // Last fallback notice shown for a (preferred → applied) pair: bind fires on
   // every session switch, so an unchanged downgrade must not re-toast.
   let lastEffortFallbackNotice: { preferred: string; applied: string | undefined } | undefined
@@ -78,26 +82,64 @@ export function createModelActions(
       deps.checkContextWarning()
     }
   }
+  /** Localized label of a standard ladder tier. The five names are the
+   *  host's own vocabulary (`effort-tier-*`): they label a *route* that
+   *  declares reasoning support without a tier list, whichever backend serves
+   *  it. A backend that shows its own ladder carries its own copy (B-3). */
+  const STANDARD_EFFORT_LABEL_KEYS: Record<string, I18nKey> = {
+    low: 'effort-tier-low',
+    medium: 'effort-tier-medium',
+    high: 'effort-tier-high',
+    xhigh: 'effort-tier-xhigh',
+    max: 'effort-tier-max',
+  }
+  const standardEffortLabel = (id: string): string => {
+    const key = STANDARD_EFFORT_LABEL_KEYS[id]
+    return key === undefined ? id : tOr(key, id)
+  }
+  /** The standard ladder as picker options, resolved per call so a language
+   * switch relabels tiers with no cache to invalidate. */
+  const standardEffortOptions = (): Array<{ id: string; name: string }> =>
+    STANDARD_EFFORT_LADDER.map(id => ({ id, name: standardEffortLabel(id) }))
+  /** Effort tiers for one route-metadata answer. A row that declares
+   * reasoning support without a tier list (`reasoning: true`, or an object
+   * whose `efforts` is absent, as pi-ai zai rows for glm-5.3* do) gets the
+   * standard ladder: the kernel accepts the standard ids and validates at
+   * set time, and offering nothing would hide tiers the route does run.
+   * An explicit `efforts: []` means the route supports none and is kept
+   * as is, like any declared list; `reasoning` absent/false offers nothing. */
+  const tiersOf = (reasoning: boolean | { efforts?: ReadonlyArray<{ id: string; name: string; description?: string }>; defaultEffort?: string } | undefined): ReadonlyArray<{ id: string; name: string; description?: string }> => {
+    if (reasoning === true) return standardEffortOptions()
+    if (reasoning === undefined || reasoning === false) return []
+    if (reasoning.efforts !== undefined) return reasoning.efforts
+    return standardEffortOptions()
+  }
   const resolveEfforts = async (capture: EffortCapture): Promise<EffortResult | 'unavailable' | 'error' | 'stale'> => {
     if (llmRuntime === undefined || typeof llmRuntime.resolveModelInfo !== 'function') return 'unavailable'
     try {
       const info = await llmRuntime.resolveModelInfo(capture.provider, capture.model)
       applyRouteMetadata(capture, info)
       if (!effortCurrent(capture)) return 'stale'
-      const efforts = info.reasoning?.efforts ?? []
+      const efforts = tiersOf(info.reasoning)
       state.effortLevels = efforts.map(level => level.id)
-      return { efforts, defaultEffort: info.reasoning?.defaultEffort }
+      return { efforts, defaultEffort: typeof info.reasoning === 'object' && info.reasoning !== null ? info.reasoning.defaultEffort : undefined }
     } catch (error) {
       if (!effortCurrent(capture)) return 'stale'
       notify(t('effort-read-failed', { error: error instanceof Error ? error.message : String(error) }), { color: 'error', timeoutMs: 8000 })
       return 'error'
     }
   }
-  const applyPreferredEffort = async (): Promise<void> => {
+  const applyPreferredEffort = async (preserveSessionEffort = false): Promise<void> => {
     if (llmRuntime === undefined || typeof llmRuntime.resolveModelInfo !== 'function') return
     const capture = captureEffort()
     const resolved = await resolveEfforts(capture)
     if (resolved === 'unavailable' || resolved === 'error' || resolved === 'stale' || !effortCurrent(capture)) return
+    // Passive bind only refreshes metadata for a session-owned selection.
+    // Explicit settings/model/effort actions retain the original default path.
+    if (preserveSessionEffort) {
+      state.emit()
+      return
+    }
     // This same binding-time lookup is the route's initial tier refresh even
     // without a stored preference. Do not make a separate competing refresh
     // operation that could invalidate the selected preference completion.
@@ -126,26 +168,18 @@ export function createModelActions(
         state.reasoningEffort = shipped
         state.emit()
       }
-      // An effort pin installed earlier (an exact hit, /effort <id>) survives
-      // every path that is NOT a bind: /settings' effortDefault hands the level
-      // straight to setDefaultEffort → applyPreferredEffort (plugin.ts:804 →
-      // setDefaultEffort above), which never resets selection.current — the four
-      // switch tails that do are all on the bind side. Leaving it would put the
-      // OLD tier back on the wire while the readout above announces the model
-      // default. Drop the effort only: the provider/model half of the pin is
-      // this route's, not the stale tier's. No emit — setDefaultEffort reaches
-      // here through that same non-bind path, and nothing UI-visible reads this
-      // ref (it is the router's ModelSelectionRef, not the IDE ChannelSelection
-      // the status line shows); the readout above already emits when it moves.
+      // Existing agents retain their pin across reattachment, and /settings
+      // reaches this path without a bind. Remove an unsupported old effort
+      // while keeping the selected route; otherwise the wire would retain the
+      // old tier while the readout announces the model default. The ref is not
+      // UI state; the readout above already emits when it moves.
       if (selection.current?.reasoningEffort !== undefined) {
         selection.current = { provider: capture.provider, model: capture.model }
       }
       return
     }
-    // Dedupe gates ONLY the toast: bind resets selection.current on every
-    // session switch, so the pin below must re-apply unconditionally — an
-    // early return here would ship the model default from the second session
-    // on (review C1). The status line shows the tier that actually ships.
+    // Dedupe gates ONLY the toast: a new Agent has a fresh selection, so the
+    // preference must apply even when the previous Agent used the same tier.
     const fresh = lastEffortFallbackNotice?.preferred !== preferredEffort || lastEffortFallbackNotice.applied !== applied
     if (applied !== preferredEffort && fresh) {
       lastEffortFallbackNotice = { preferred: preferredEffort, applied }
@@ -164,7 +198,7 @@ export function createModelActions(
       if (generation !== effortLevelsGeneration) return
       applyRouteMetadata(capture, info)
       if (!effortCurrent(capture)) return
-      state.effortLevels = (info.reasoning?.efforts ?? []).map(level => level.id)
+      state.effortLevels = tiersOf(info.reasoning).map(level => level.id)
       state.emit()
     }).catch(() => undefined)
   }
@@ -177,7 +211,22 @@ export function createModelActions(
     notify(t('effort-switched', { name: effort.name }))
     state.emit()
   }
-  const listEfforts = async (): Promise<{ efforts: readonly EffortOption[]; defaultEffort: string | undefined }> => {
+  const listEfforts = async (route?: { provider: string; model: string }): Promise<{ efforts: readonly EffortOption[]; defaultEffort: string | undefined; levelsFallback?: true }> => {
+    if (route !== undefined) {
+      const binding = deps.binding.capture()
+      if (llmRuntime === undefined || typeof llmRuntime.resolveModelInfo !== 'function') return { efforts: [], defaultEffort: undefined }
+      // Preview is independent of the live effort operation: browsing the
+      // picker must neither invalidate a pending preference nor publish the
+      // candidate's context window/tiers into the current session.
+      const info = await llmRuntime.resolveModelInfo(route.provider, route.model)
+      if (!owner.current() || !deps.binding.isCurrent(binding)) return { efforts: [], defaultEffort: undefined }
+      return {
+        efforts: tiersOf(info.reasoning),
+        defaultEffort: typeof info.reasoning === 'object' && info.reasoning !== null ? info.reasoning.defaultEffort : undefined,
+        ...(info.reasoning === true || (typeof info.reasoning === 'object' && info.reasoning !== null && info.reasoning.efforts === undefined)
+          ? { levelsFallback: true as const } : {}),
+      }
+    }
     const capture = captureEffort()
     const resolved = await resolveEfforts(capture)
     if (resolved === 'stale') return { efforts: [], defaultEffort: undefined }
@@ -203,10 +252,11 @@ export function createModelActions(
   }
   /**
    * Re-seat the future-sessions default reasoning effort. `id` is the settings
-   * user layer (the settings user layer outranks the cordis.yml `effort` pin);
-   * an absent level re-derives the boot chain (cordis `effort` → the persisted
-   * /effort choice). Also re-pins the live agent when its route offers the
-   * level, so the change lands on the next request. No-op when unchanged.
+   * user layer (an explicit value there outranks the persisted `/effort`
+   * choice); an absent level re-derives the boot chain (the persisted
+   * `/effort` choice → the cordis.yml `effort` deployment default). Also
+   * re-pins the live agent when its route offers the level, so the change
+   * lands on the next request. No-op when unchanged.
    */
   const setDefaultEffort = (id: string | undefined): void => {
     const resolved = resolveEffortDefault(id, deps.initialEffort, readEffortPref())
@@ -231,7 +281,13 @@ export function createModelActions(
   }
   const listModels = (): Promise<readonly LlmModelInfo[]> => {
     if (llmRuntime === undefined) return Promise.resolve([])
-    return Promise.all(llmRuntime.listProviders().map(provider => llmRuntime.listModels(provider.id).catch(() => []))).then(lists => lists.flat())
+    return Promise.all(llmRuntime.listProviders().map(provider => llmRuntime.listModels(provider.id).catch(() => []))).then(lists => lists.flat().map(model => {
+      // rc.2's official model-label plugin is display-only; keep route IDs intact.
+      const official = model.provider === 'deepseek-account' || model.provider === 'deepseek-official'
+      return official && model.id === 'deepseek-flash' && model.name === 'DeepSeek-V4.1-Flash' &&
+        installedMeetsVersion('@deepseek-ai/dsh-web-app', '0.2.1-rc.2')
+        ? { ...model, name: `${model.name} 1017` } : model
+    }))
   }
   const listProviders = () => Promise.resolve(llmRuntime === undefined ? [] : llmRuntime.listProviders().map(info => ({ ...info })))
   const dropModelNodeCache = (): void => { modelNodeCache.generation += 1; modelNodeCache.nodes = undefined; modelNodeCache.load = undefined }
@@ -262,7 +318,7 @@ export function createModelActions(
   const switchPreset = async (presetId: string): Promise<boolean> => {
     const presets = rosterOf(ctx)
     if (presets === undefined) { notify(t('preset-unavailable'), { color: 'error' }); return false }
-    if (state.working) { notify(t('preset-agent-running'), { color: 'warning' }); return false }
+    if (state.working) { notify(t(WORKING_GATE_NOTICES.preset), { color: 'warning' }); return false }
     const capture = deps.binding.capture()
     const targetAgent = deps.agent()
     const targetSession = targetAgent.session

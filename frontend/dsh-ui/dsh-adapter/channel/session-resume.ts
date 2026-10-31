@@ -5,9 +5,10 @@ import { SessionId, type SessionEvent } from '@deepseek-ai/dsh-session'
 import { explicitModelRoute, recordedModelRoute, resolveModelRoute, validateModelRoute } from '../../modelRoute.js'
 import { clearResumeTarget, writeResumeTarget, touchAgentViewSession, touchSession } from '../../sessionHistory.js'
 import { mountFailureText } from '../../sessions/resumeFailure.js'
+import type { AgentSession } from '../../agent/session.js'
 import { t } from '../../i18n.js'
 import { readModelPref } from '../../modelPrefs.js'
-import { migratePresetPref, readPresetPref } from '../../presetPrefs.js'
+import { migratePresetPref, presetOverrideFromEnv, readPresetPref } from '../../presetPrefs.js'
 import { agentViewHasTurns } from '../agent-view.js'
 import {
   occupancyOf,
@@ -19,14 +20,17 @@ import {
 import { ensureLegacySessionEventTypes } from '../compat/index.js'
 import { snapshotLiveSessionEvents } from '../compat/liveSession.js'
 import { composePreset, resolvePersistedPreset, resolvePersistedRoute } from '../presets.js'
+import { createFreshAgent } from '../fresh-agent.js'
 import { attachSessionToWorkspace } from '../workspace.js'
+import { createDshSession, dshHandleOf } from '../backend/session.js'
 import { resetSessionProjection } from './session-reset.js'
-import type { createChannelBinding } from './binding.js'
+import type { DshChannelBinding } from './binding.js'
 import type { ChannelOwner } from './owner.js'
 import { assertCapabilityShadowPolicy, type AdapterRuntimeOptions } from '../../adapter/kernel/runtime.js'
 import type { ChannelState, ResumeResult } from './types.js'
+import type { NewSessionOpener, NewSessionPlan } from './core/session-switch.js'
 
-type Binding = ReturnType<typeof createChannelBinding>
+type Binding = DshChannelBinding
 type ResumeState = Pick<
   ChannelState,
   | 'working'
@@ -46,11 +50,7 @@ type ResumeState = Pick<
   | 'emit'
 > & Parameters<typeof resetSessionProjection>[0]
 
-export type NewSessionTarget = {
-  /** Internal guarded workspace handoff; never exposed on ChannelUi.newSession(). */
-  readonly cwd: string
-  readonly displayCwd?: string
-}
+export type { NewSessionTarget } from './core/session-switch.js'
 
 type ResumeAgents = {
   resume(options: {
@@ -79,7 +79,7 @@ export function createSessionResumeActions(
   },
   deps: {
     owner: Pick<ChannelOwner, 'current'>
-    binding: Pick<Binding, 'agent' | 'capture' | 'isCurrent' | 'prepare' | 'abandon' | 'adopt' | 'waitForDisposal'>
+    binding: Pick<Binding, 'agent' | 'session' | 'capture' | 'isCurrent' | 'prepare' | 'abandon' | 'adopt' | 'waitForDisposal'>
     /**
      * Adopt an agent this process already has live. `/resume` uses it so a
      * target that is already running here is re-attached in place (parking the
@@ -184,23 +184,32 @@ export function createSessionResumeActions(
       const composed = await composePreset(ctx, await resolvePersistedPreset(ctx, SessionId(sessionId)))
       const explicitRoute = explicitModelRoute({ provider: options.configuredProvider, model: options.configuredModel })
       const persistedRoute = await resolvePersistedRoute(ctx, SessionId(sessionId))
-      let handle: AgentHandle
+      let candidate: AgentSession
       try {
-        handle = await deps.binding.prepare(adoption, () => agents.resume({
+        candidate = await deps.binding.prepare(adoption, async () => createDshSession(ctx, await agents.resume({
           resumeSessionId: SessionId(sessionId),
+          // The session's own recorded route is what it actually ran, so it
+          // outranks the static cordis.yml route (the deployment default).
           agentOptions: {
-            provider: explicitRoute?.provider ?? persistedRoute?.provider,
-            model: explicitRoute?.model ?? persistedRoute?.model,
+            provider: persistedRoute?.provider ?? explicitRoute?.provider,
+            model: persistedRoute?.model ?? explicitRoute?.model,
           },
           ...(composed.setup === undefined ? {} : { setup: composed.setup }),
-        }))
+        })))
       } catch (error) {
+        // 请核: the supported host's writer-lock error.name is SessionAlreadyOwnedError.
+        if (error !== null && typeof error === 'object' && 'name' in error && error.name === 'SessionAlreadyOwnedError') {
+          const message = t('resume-owned-elsewhere')
+          deps.notify(message, { color: 'warning', timeoutMs: 8000 })
+          return { ok: false, reason: 'failed', error: message, code: 'owned-elsewhere' }
+        }
         const message = error instanceof Error ? error.message : String(error)
         deps.notify(t('resume-failed', { err: message }), { color: 'error', timeoutMs: 8000 })
         return { ok: false, reason: 'failed', error: message }
       }
+      const handle = dshHandleOf(candidate)
       if (!deps.binding.isCurrent(adoption)) {
-        await deps.binding.abandon(handle)
+        await deps.binding.abandon(candidate)
         return { ok: false, reason: 'cancelled' }
       }
       try {
@@ -209,16 +218,21 @@ export function createSessionResumeActions(
         deps.notify(t('resume-attach-failed', { err: error instanceof Error ? error.message : String(error) }), { color: 'warning', timeoutMs: 8000 })
       }
       if (entrySession !== undefined && (!deps.owner.current() || deps.binding.agent.session !== entrySession)) {
-        await deps.binding.abandon(handle)
+        await deps.binding.abandon(candidate)
         deps.notify(t('resume-session-changed'), { color: 'error' })
         return { ok: false, reason: 'failed', error: 'live session changed during resume' }
       }
       // `adopt` is a transaction: it revokes the candidate and disposes it when
       // the tail fails, and it can also refuse before the tail ever runs. Only a
       // normal return is a commit, which is what the outer finally keys on.
-      const result = deps.binding.adopt<ResumeResult>(handle, adoption, (committedBinding, disposePrevious) => {
+      const result = deps.binding.adopt<ResumeResult>(candidate, adoption, (committedBinding, disposePrevious) => {
         const previousSessionId = String(committedBinding.agent.session.id)
-        const keepPrevious = keepCurrent && committedBinding.handle !== undefined
+        // Reopening the screen's own ended session (#1651) is not a switch:
+        // the handle it replaces is the disposed one, and parking it would put
+        // a dead entry in the background ledger under the id this adoption now
+        // owns — the live-adoption lookup prefers that entry over the screen's
+        // current handle. Dispose it instead (idempotent).
+        const keepPrevious = keepCurrent && previousSessionId !== sessionId && committedBinding.handle !== undefined
           && (committedBinding.handle.agent.status === 'running' || agentViewHasTurns(snapshotLiveSessionEvents(committedBinding.handle.agent.session)))
         if (keepCurrent && (committedBinding.handle === undefined || keepPrevious)) deps.parkSubagents(committedBinding.agent)
         state.cwd = handle.agent.session.header.cwd ?? state.cwd
@@ -228,7 +242,7 @@ export function createSessionResumeActions(
         // Reset the input FIFO and pending-decision indicators BEFORE the first
         // emit (main's bind → clear → refresh order); see the /new tail.
         deps.clearStagedImages()
-        resetAndBind(handle, composed.agentPreset, explicitRoute ?? recordedModelRoute(snapshotLiveSessionEvents(handle.agent.session)), true)
+        resetAndBind(handle, composed.agentPreset, recordedModelRoute(snapshotLiveSessionEvents(handle.agent.session)) ?? explicitRoute, true)
         writeResumeTarget(sessionId)
         touchSession(sessionId)
         state.emit()
@@ -256,8 +270,8 @@ export function createSessionResumeActions(
    * Reserve `sessionId` for a disk resume on THIS terminal.
    *
    * Returning a reservation means the caller owns the session in the ledger
-   * until it calls `finish()`. That covers the whole attempt, not just the
-   * `agents.resume` call: the awaits in between (veto, compaction, preset and
+   * until it calls `settle()` or `abandon()`. That covers the whole attempt,
+   * not just `agents.resume`: the awaits in between (veto, compaction, preset and
    * route reads) are exactly the window a publisher beat — or a peer — could
    * otherwise slip into.
    * @param sessionId - Session about to be resumed from disk.
@@ -370,8 +384,10 @@ export function createSessionResumeActions(
     // default disposition disposes the handle that IS running, so a second
     // Enter on the `current` row stopped the live turn while reporting success.
     // `attachToAgent()` has always short-circuited here; this is the same rule
-    // for the unified screen's `/resume` path.
-    if (String(sessionId) === String(entrySession.id)) return { ok: true }
+    // for the unified screen's `/resume` path. A disposed foreground (its
+    // agent unloaded under the screen, #1651) has nothing running: resuming
+    // its own id reopens the log like any other disk resume.
+    if (String(sessionId) === String(entrySession.id) && deps.binding.session.status !== 'disposed') return { ok: true }
     // Switching away starts disposal without blocking the synchronous commit.
     // Do not adopt that closing Agent (or reopen its still-held JSONL writer).
     await deps.binding.waitForDisposal(sessionId)
@@ -386,62 +402,80 @@ export function createSessionResumeActions(
       if (!reserved.ok) return reserved.result
       reservation = reserved.reservation
     }
-    if (await deps.sessionSwitchVetoed('resume', sessionId)) {
+    try {
+      if (await deps.sessionSwitchVetoed('resume', sessionId)) {
+        return { ok: false, reason: 'cancelled' }
+      }
+      // Settle the transaction of the session being LEFT — the foreground
+      // binding, not the target. With one transaction per live agent this is
+      // exactly the two behaviors the switch needs: returning to a session that
+      // is compacting in the background leaves the fresh foreground (which owns
+      // nothing) untouched, so the compaction survives; navigating to a
+      // DIFFERENT session still settles the one left behind, so a compaction
+      // never keeps running invisibly after a plain switch.
+      await deps.settleCompaction()
+      if (!deps.binding.isCurrent(adoption) || deps.binding.agent.session !== entrySession) {
+        return { ok: false, reason: 'cancelled' }
+      }
+      // The target was read BEFORE those awaits. Re-read it in BOTH directions:
+      // the registry can have replaced or dropped that agent while we yielded
+      // (adopting the captured object would hand the screen a session nothing
+      // owns any more), and it can also have GROWN one — a peer action mounting
+      // this very session here means the disk path below would resume a log this
+      // process is already driving. `agent-view-projection.attach` has always made
+      // the first check.
+      const liveNow = agents.get?.(SessionId(sessionId))
+      if (liveNow !== live) {
+        return { ok: false, reason: 'cancelled' }
+      }
+      // A live target is adopted in place — the same path `/agentview` uses, so
+      // the session being left is parked rather than disposed of. Only a target
+      // with no live agent here goes back to the persistence backend.
+      if (live !== undefined) return deps.adoptLive(live)
+      // The inner transaction now owns cleanup through open/adopt/commit.
+      // Until this handoff, every exit (including a throwing veto or recheck)
+      // gives the reservation back without waiting for a publisher beat.
+      const transferred = reservation
+      reservation = undefined
+      return resume(sessionId, 'agent-view', true, adoption, entrySession, transferred)
+    } finally {
       reservation?.abandon()
-      return { ok: false, reason: 'cancelled' }
     }
-    await deps.settleCompaction()
-    if (!deps.binding.isCurrent(adoption) || deps.binding.agent.session !== entrySession) {
-      reservation?.abandon()
-      return { ok: false, reason: 'cancelled' }
-    }
-    // The target was read BEFORE those awaits. Re-read it in BOTH directions:
-    // the registry can have replaced or dropped that agent while we yielded
-    // (adopting the captured object would hand the screen a session nothing
-    // owns any more), and it can also have GROWN one — a peer action mounting
-    // this very session here means the disk path below would resume a log this
-    // process is already driving. `agent-view-projection.attach` has always made
-    // the first check.
-    const liveNow = agents.get?.(SessionId(sessionId))
-    if (liveNow !== live) {
-      reservation?.abandon()
-      return { ok: false, reason: 'cancelled' }
-    }
-    // A live target is adopted in place — the same path `/agentview` uses, so
-    // the session being left is parked rather than disposed of. Only a target
-    // with no live agent here goes back to the persistence backend.
-    if (live !== undefined) return deps.adoptLive(live)
-    return resume(sessionId, 'agent-view', true, adoption, entrySession, reservation)
   }
 
-  const newSessionWithTarget = async (target?: NewSessionTarget): Promise<boolean> => {
+  /**
+   * How a DSH `/new` opens its fresh session: the capability shadow gate,
+   * the agents service, compaction settled first, the preset and validated
+   * model route, the cross-process mount reservation, `agents.create`,
+   * workspace ownership, and the DSH half of the adoption tail. The
+   * transaction itself (working check, veto, prepare/adopt, the re-check
+   * after a slow open) lives in core/session-switch.ts.
+   */
+  const newSessionOpener: NewSessionOpener = {
+    // An input still in the FIFO when /new adopts is stale-dropped (with a
+    // notice), never delivered to either session; that is the DSH contract.
+    dropsParkedInputs: true,
     // The typed workspace target seam still creates a real Agent/session; it
     // must pass the same shadow policy gate as the public /new action.
-    assertCapabilityShadowPolicy('host.channel.actions.new-session', deps.runtime.mode, deps.runtime.slices)
-    const adoption = deps.binding.capture()
-    const targetCwd = target?.cwd ?? state.cwd
-    const targetDisplayCwd = target?.displayCwd
-    const current = (): boolean => deps.owner.current() && deps.binding.isCurrent(adoption)
-    if (state.working) {
-      deps.notify(t('new-session-while-working'), { color: 'warning' })
-      return false
-    }
-    const agents = ctx.get('agents') as { create(options: CreateAgentOptions): Promise<AgentHandle> } | undefined
-    if (!agents) {
+    assertAllowed: () => assertCapabilityShadowPolicy('host.channel.actions.new-session', deps.runtime.mode, deps.runtime.slices),
+    available(): boolean {
+      if (ctx.get('agents') !== undefined) return true
       deps.notify(t('new-session-unavailable'), { color: 'error' })
       return false
-    }
-    let sessionId: SessionId
-    let composed: Awaited<ReturnType<typeof composePreset>>
-    let route: { provider: string; model: string }
-    try {
-      if (await deps.sessionSwitchVetoed('new') || !current()) return false
+    },
+    async plan(target, current): Promise<NewSessionPlan | undefined> {
+      const agents = ctx.get('agents') as { create(options: CreateAgentOptions): Promise<AgentHandle> } | undefined
+      if (agents === undefined) throw new Error(t('new-session-unavailable'))
       await deps.settleCompaction()
-      if (!current()) return false
-      sessionId = SessionId(randomUUID())
-      const presetPref = options.configuredPreset === undefined ? readPresetPref() : undefined
-      composed = await composePreset(ctx, options.configuredPreset ?? presetPref)
-      if (!current()) return false
+      if (!current()) return undefined
+      const sessionId = SessionId(randomUUID())
+      // Preset precedence for a session created from inside the TUI: the
+      // DSH_TUI_PRESET launch instruction, the persisted `/preset` choice,
+      // then the cordis.yml default.
+      const presetOverride = presetOverrideFromEnv()
+      const presetPref = readPresetPref()
+      const composed = await composePreset(ctx, presetOverride ?? presetPref ?? options.configuredPreset)
+      if (!current()) return undefined
       const resolved = resolveModelRoute(
         { provider: options.configuredProvider, model: options.configuredModel },
         readModelPref(),
@@ -449,81 +483,49 @@ export function createSessionResumeActions(
       )
       const llm = ctx.get('llm') as { listModels(provider: string): Promise<readonly { id: string }[]> } | undefined
       const validated = await validateModelRoute(llm, resolved, { provider: options.provider, model: options.model })
-      route = validated.route
-      if (!current()) return false
-      if (!migratePresetPref(presetPref, composed.agentPreset)) {
+      const route = validated.route
+      if (!current()) return undefined
+      if (presetOverride === undefined && !migratePresetPref(presetPref, composed.agentPreset)) {
         deps.notify(t('preset-switched-pref-failed', { id: composed.agentPreset ?? presetPref ?? 'unknown' }), { color: 'warning' })
       }
       if (validated.rejected !== undefined) {
         deps.notify(t('model-route-invalid', { provider: validated.rejected.provider, model: validated.rejected.model, fallback: `${route.provider}/${route.model}` }), { color: 'warning', timeoutMs: 8000 })
       }
-    } catch (error) {
-      if (current()) {
-        const message = error instanceof Error ? error.message : String(error)
-        deps.notify(t('new-session-failed', { err: message }), { color: 'error', timeoutMs: 8000 })
+      const targetCwd = target.cwd
+      let reservation: MountReservation | undefined
+      return {
+        // Reserve before the factory runs: the moment `agents.create`
+        // returns, this process holds the only write handle on a log no peer
+        // has been told about yet, and the publisher would not name it until
+        // its next beat.
+        async reserve() { reservation = await reserveCreatedSession(sessionId) },
+        open: async cwd => createDshSession(ctx, await createFreshAgent(ctx, agents, {
+          sessionId,
+          meta: { cwd, ...(composed.agentPreset === undefined ? {} : { agentPreset: composed.agentPreset }) },
+          agentOptions: route,
+          ...(composed.setup === undefined ? {} : { setup: composed.setup }),
+        })),
+        async attach(_candidate, isCurrent) {
+          try {
+            await attachSessionToWorkspace(ctx, targetCwd, sessionId)
+          } catch (error) {
+            if (isCurrent()) deps.notify(t('new-session-attach-failed', { err: error instanceof Error ? error.message : String(error) }), { color: 'warning', timeoutMs: 8000 })
+          }
+        },
+        adopt(candidate): string {
+          const handle = dshHandleOf(candidate)
+          resetAndBind(handle, composed.agentPreset, route, false)
+          clearResumeTarget()
+          touchSession(handle.agent.id)
+          return String(handle.agent.id)
+        },
+        finish(committed) {
+          if (committed) reservation?.settle()
+          else reservation?.abandon()
+        },
       }
-      return false
-    }
-    // Reserve BEFORE the factory runs: the moment `agents.create` returns, this
-    // process holds the only write handle on a log no peer has been told about
-    // yet, and the publisher would not name it until its next beat.
-    const reservation = await reserveCreatedSession(sessionId)
-    let handle: AgentHandle
-    try {
-      handle = await deps.binding.prepare(adoption, () => agents.create({
-        sessionId,
-        meta: { cwd: targetCwd, ...(composed.agentPreset === undefined ? {} : { agentPreset: composed.agentPreset }) },
-        agentOptions: route,
-        ...(composed.setup === undefined ? {} : { setup: composed.setup }),
-      }))
-    } catch (error) {
-      reservation.abandon()
-      if (current()) {
-        const message = error instanceof Error ? error.message : String(error)
-        deps.notify(t('new-session-failed', { err: message }), { color: 'error', timeoutMs: 8000 })
-      }
-      return false
-    }
-    if (!current()) { await deps.binding.abandon(handle); reservation.abandon(); return false }
-    try {
-      await attachSessionToWorkspace(ctx, targetCwd, sessionId)
-    } catch (error) {
-      if (current()) deps.notify(t('new-session-attach-failed', { err: error instanceof Error ? error.message : String(error) }), { color: 'warning', timeoutMs: 8000 })
-    }
-    if (!current()) { await deps.binding.abandon(handle); reservation.abandon(); return false }
-    // Do not catch this synchronous commit tail. A post-commit setup failure
-    // is owned by binding.adopt(), which revokes the new live handle and must
-    // reject its caller rather than masquerade as an ordinary precommit false.
-    let committed = false
-    try {
-      const result = deps.binding.adopt(handle, adoption, (committedBinding, disposePrevious) => {
-        const previousSessionId = String(committedBinding.agent.session.id)
-        // The target only becomes shared channel state inside the successful
-        // adoption tail. A losing prepared handle therefore cannot publish or
-        // roll back another workspace's cwd.
-        state.cwd = targetCwd
-        state.displayCwd = targetDisplayCwd ?? deps.describeWorkspace(targetCwd).description ?? targetCwd
-        deps.resetIdeSelection()
-        // Reset the input FIFO and the pending-decision indicators BEFORE the
-        // first emit: a submit enqueued from a session-changed subscriber must
-        // land on a fresh chain instead of behind the replaced session's parked
-        // promise (main's bind → clear → refresh order).
-        deps.clearStagedImages()
-        resetAndBind(handle, composed.agentPreset, route, false)
-        clearResumeTarget()
-        touchSession(handle.agent.id)
-        disposePrevious('dispose')
-        deps.notifySessionSwitched('new', String(handle.agent.id), previousSessionId)
-        return true
-      })
-      committed = true
-      return result
-    } finally {
-      if (committed) reservation.settle()
-      else reservation.abandon()
-    }
+    },
   }
-  const newSession = (): Promise<boolean> => newSessionWithTarget()
 
-  return { resumeInto, resumeTo, newSession, newSessionWithTarget }
+  return { resumeInto, resumeTo, newSessionOpener }
 }
