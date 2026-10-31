@@ -263,6 +263,16 @@ jobs:
     defaults:
       run:
         working-directory: frontend
+    env:
+      # ★ 这条 env 不是"顺手抄的"，它决定了测试里到底拿哪个 Python 当参照。
+      # `resolvePython()` 在非 Windows 上会**先试 `/usr/bin/python3`**（判据只是
+      # 文件存在），所以光用 setup-python 装 3.13.14 没用 —— 测试仍然跑在镜像自带的
+      # 系统 python3 上。2026-10-31 三次全红就是这么来的：钉了 3.12、又钉了 3.13、
+      # 再钉 3.13.14，三次其实是同一个二进制在跑（系统 python3），Unicode 库是
+      # 15.0，而 TS 静态表对齐的是 15.1 → U+2630 一类的东亚宽度类别差一堆。
+      # `ACE_PYTHON` 是 resolvePython() 的第一优先级，写成裸命令名 `python3` 就交给
+      # PATH 解析 —— 于是"装了哪个版本，参照就是哪个版本"，和本机的取态一致。
+      ACE_PYTHON: python3
     steps:
       - uses: actions/checkout@v4
 
@@ -273,20 +283,15 @@ jobs:
           cache-dependency-path: frontend/package-lock.json
 
       # integration.test.ts 会 spawn `python ai_code.py --serve`，而引擎要 requests
-      # （`resolvePython()` 依次探 ACE_PYTHON → 已知路径 → `python`，setup-python 提供后者）
+      # （`resolvePython()` 依次探 ACE_PYTHON → 已知路径 → `python`）—— 上面那条
+      # ACE_PYTHON 同时保证集成测试和宽度守卫用同一个解释器。
       #
-      # 为什么这里钉 **3.13.14**（连补丁号一起）而不是跟别的 job 一样 3.12：
-      # `test/text.test.ts` 那条宽度守卫拿 TS 的**静态**宽度表跟 Python 的
-      # `unicodedata.east_asian_width()`（**活表**）逐码点比对 —— 这条比对只有在
-      # "参照解释器的 Unicode 库版本"固定时才有意义。两个坑都踩过：
-      #   · 3.12 带 Unicode 15.0、3.13 带 15.1，U+2630 一类的东亚宽度类别在版本
-      #     之间会变 → 同一张 TS 表在 3.12 上"差一堆宽字符"（CI run 41201592332）；
-      #   · 光钉 `3.13` 还不够：CI 实际拿到 3.13.17，它的 Unicode 库又变了，于是
-      #     同一个用例在 3.13.14（本机）绿、在 3.13.17（runner）红（CI run 41202696839）。
-      # 参照版本 = 冻结发行实际打包的那个解释器（`packaging/ace.spec` 用构建机的
-      # venv，当前 3.13.14）。升级构建解释器时，这一行和 `frontend/src/render/text.ts`
-      # 的宽度表要一起动 —— 那正是这条守卫存在的目的，不是它的毛病。
-      # 别的 Python job 保持各自的取态，不跟着改。
+      # 为什么钉 **3.13.14**（连补丁号）：`test/text.test.ts` 拿 TS 的**静态**宽度表
+      # 跟 Python 的**活表** `unicodedata.east_asian_width()` 逐码点比对，这条比对
+      # 只有在"参照解释器的 Unicode 库版本"固定时才有意义。参照 = 冻结发行实际打包
+      # 的那个解释器（`packaging/ace.spec` 用构建机 venv，当前 3.13.14 = Unicode 15.1）。
+      # 升级构建解释器时这一行和 `frontend/src/render/text.ts` 的区间表要一起动 ——
+      # 那正是这条守卫存在的目的。别的 Python job 保持各自的取态，不跟着改。
       - uses: actions/setup-python@v5
         with:
           python-version: "3.13.14"

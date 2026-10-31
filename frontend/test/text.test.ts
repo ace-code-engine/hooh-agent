@@ -29,11 +29,14 @@ import { resolvePython } from '../src/protocol/client.js';
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..', '..');
 // ⚠️ 这条比对是**版本敏感**的：TS 侧是手抄的静态区间表，Python 侧是解释器自带的
-// `unicodedata`（活表）。CPython 连**补丁版**都可能换掉那份 Unicode 库（3.13.14 是
-// Unicode 15.1，CI 上的 3.13.17 已经不是），于是同一张表在一个补丁版绿、在另一个红。
-// 所以 CI 的 frontend job 把解释器**钉到补丁号**（`.github/workflows/ci.yml` 里
-// `python-version: "3.13.14"`，等于冻结发行打包的那一版）。哪天真红了、先看那条钉版
-// 还在不在，再看是不是 `frontend/src/render/text.ts` 的区间表该跟着升级了。
+// `unicodedata`（活表）。两件事一起决定了"参照是谁"：
+//   1. `resolvePython()`（`src/protocol/client.ts`）在非 Windows 上会**先试
+//      `/usr/bin/python3`**，判据只是"文件存在" —— 光在 CI 装个新 Python 没用；
+//   2. 参照解释器的 Unicode 库版本必须和 TS 表对齐的那版一致（本表对齐 15.1）。
+// 所以 CI 的 frontend job 既钉 `python-version: 3.13.14`，又设 `ACE_PYTHON=python3`
+// （resolvePython 的第一优先级，裸命令名走 PATH）把两者钉成同一个二进制。
+// 哪天真红了：先看这条钉还在不在、`ACE_PYTHON` 有没有被绕开，再看
+// `frontend/src/render/text.ts` 的区间表是不是该跟着新 Unicode 升级了。
 const PY = resolvePython();
 
 /** 要扫的码点范围（跳过代理区，那不是合法字符）。 */
