@@ -21,7 +21,7 @@ cd frontend
 npm install
 npm start -- --mock -m "现在几点"     # 离线，不需要 API key
 npm test                              # vitest：单元 + 假引擎界面 + 真引擎集成
-npm run build                         # tsc --noEmit（只做类型检查）
+npm run build                         # tsc --noEmit：只查 src/ + tools/（迁入树另有一套尺度）
 npm run preview                       # 把真实渲染帧打到终端（见下）
 ```
 

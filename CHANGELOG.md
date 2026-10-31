@@ -57,6 +57,9 @@
 ### 🐛 修复
 - **主页长值溢出糊串**：模型名（`deepseek-v4-flash`）、resume 标签（`继续上次：…`）超列宽时与提示词糊成一串（`deepseek-v4-flash换模型` / `0轮回车继续`）；`render_home` 超长保底空格。
 - **思考强度提示漏最高档**：主页提示只列四档，漏了第 5 档 `max` / `最高`（三语补齐）。
+- **CI 红两条（v1.2.0 推送当次）**：
+  - `Frontend (tsc + vitest)` 的类型门禁把**迁入树**也算进了严尺度：`npm run build` 的 `tsconfig.json` 原先 `include` 了 `test/`，而测试要从 `../dsh-ui/hooh/` 取迁入壳的纯逻辑，那一条 import 会把含 ink 渲染器的整棵 vendored 树拉进编译程序 —— 57 条报错**全部**落在 `dsh-ui/`，我们自己的代码 0 条。现在门禁只查 `src` + `tools`（我们写的接线层），迁入树按它自己那套宽松尺度单独编译、不追类型等式（见 `dsh-ui/MIGRATION.md`）；测试的真实性交给 `npm test` 执行而不是靠 tsc。
+  - `Security / OpenSSF Scorecard` 在 2 秒内失败：`ossf/scorecard-action@v2` **没有浮动 v2 标签**（上游只发 `v2.x.y`），报 `unable to find version v2`。钉到 `@v2.5.0`，并补 `actions: read` 权限（评分要看 workflow 配置）。
 
 ## [v1.1.0] · 2026-10-04 —— 界面重做：一份规范、一个主面、三语成套
 

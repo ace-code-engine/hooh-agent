@@ -119,13 +119,20 @@ jobs:
     timeout-minutes: 10
     permissions:
       contents: read
+      # Needed to read workflow/Dependabot config when scoring those checks.
+      actions: read
       security-events: write
+      # publish_results talks to the OSSF API over an OIDC token.
       id-token: write
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
-      - uses: ossf/scorecard-action@v2
+      # Pinned to a real release tag on purpose: `ossf/scorecard-action` publishes
+      # no floating `v2` tag, so `@v2` failed at "unable to find version v2" in 2s
+      # (2026-10-31 run 41198329826). Keep this exact-version; the weekly schedule
+      # will tell us when a newer release exists.
+      - uses: ossf/scorecard-action@v2.5.0
         with:
           results_file: results.sarif
           results_format: sarif
