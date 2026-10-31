@@ -5,6 +5,9 @@
 
 ## 怎么选入方式
 
+> **只想装一下试试**：仓库首页 About 栏那个链接（`releases/latest/download/HooH-Setup.msi`）
+> 点一下就直接下最新版安装包，永远不用挑版本号。
+
 | 你的情况 | 用哪个 |
 |---|---|
 | Windows，想双击就用 | **`hooh-<版本>-windows-amd64.msi`**（推荐——自带 Python 运行时、完整界面、Node，装完离线可跑 `--mock`） |

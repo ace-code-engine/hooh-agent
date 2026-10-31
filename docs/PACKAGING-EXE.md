@@ -269,6 +269,31 @@ PyInstaller 单目录包的模块与资源都在 `_internal/` 下，而生成器
 **与 `release-executor.yml` 共用同一个 tag `v<版本>`。** 两者谁先跑都行：先跑的创建
 Release，后跑的 `gh release upload --clobber` 追加资产。
 
+### 稳定下载链接（仓库 About 栏那一条）
+
+GitHub 的 `releases/latest/download/<文件名>` 要求**文件名固定**，而版本化资产名里带版本号
+（`hooh-1.2.1-windows-amd64.msi`）—— 每发一版就换名字，链接也就废了。所以每个 Release 除
+版本化资产外，再上传两份**别名资产**：
+
+| 别名 | 内容 |
+|---|---|
+| `HooH-Setup.msi` | 与 `hooh-<版本>-windows-amd64.msi` 同一份文件 |
+| `HooH-portable.zip` | 与 `hooh-<版本>-windows-amd64.zip` 同一份文件 |
+
+仓库主页的 Website（About 右侧 ⚙ → Website）指向
+`https://github.com/ace-code-engine/hooh-agent/releases/latest/download/HooH-Setup.msi`：
+**点一下就下载最新版安装包**，发布新版也不用改它。每次发版记得：
+
+```powershell
+Copy-Item dist\hooh-<版本>-windows-amd64.msi dist\HooH-Setup.msi
+Copy-Item dist\hooh-<版本>-windows-amd64.zip dist\HooH-portable.zip
+gh release upload v<版本> dist\HooH-Setup.msi dist\HooH-portable.zip
+```
+
+版本化资产才是「这一版打了什么」的存档（校验表里列的也是它）；别名只服务那一个固定链接，
+别写进文档的下载表。
+
+
 ## 在 CI 上构建，而不是在这台机器上
 
 PyInstaller 不在仓库的离线 wheel 清单里（`vendor/` 只覆盖界面依赖），所以构建必须发生在
