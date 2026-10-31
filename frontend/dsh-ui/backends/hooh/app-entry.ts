@@ -17,9 +17,14 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
 
+import { HOOH_UI_VERSION } from '../../hooh/version.js'
+
 process.env.DSH_TUI_BACKEND ??= 'hooh'
 process.env.DSH_TUI_HOST_ENTRY ??= '1'
-process.env.HOOH_VERSION ??= '1.1.0'
+// 内核版本 == 产品版本：只有 `hooh/version.ts` 一个源（机械校验要求它等于
+// core/version.py）。此前这里也写死过 '1.1.0'，升到 1.2.0 后内核选择器里
+// 报的仍是旧版本 —— 同一个产品不该有两个版本号。
+process.env.HOOH_VERSION ??= HOOH_UI_VERSION
 process.env.DSH_TUI_LAUNCHER_VERSION ??= process.env.HOOH_VERSION
 // 品牌字体钉死：开屏大字不再按日期轮换（上游彩蛋），HooH 每天长一个样。
 // `shadow`（ANSI Shadow）有厚度、认得出 O——实测 9 款里最好的一款；

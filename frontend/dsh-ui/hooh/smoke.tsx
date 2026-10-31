@@ -10,18 +10,27 @@
  *   node node_modules/tsx/dist/cli.mjs dsh-ui/hooh/smoke.tsx
  */
 
+// **第一条 import**：在 i18n 求值之前把界面语言钉成 zh（见 smoke-lang.ts）。
+import './smoke-lang.js'
+
 import React from 'react'
 import { EventEmitter } from 'node:events'
+import { join } from 'node:path'
 
 import { Launchpad } from '../screens/Launchpad.js'
 import { renderSync } from '../ink/root.js'
+import { HOOH_UI_VERSION } from './version.js'
 import { launchpadData, type AceSnapshot } from './adapter.js'
 
+/** 仓库根（本文件在 `frontend/dsh-ui/hooh/`）。首屏铭牌要打**真实**的目录 ——
+ *  原先写死的是某台机器上的旧路径（`G:\AI_Project\ace`），测试跟着它一起漂。 */
+const REPO = join(import.meta.dirname, '..', '..', '..')
+
 const SNAP: AceSnapshot = {
-  version: '1.1.0',
+  version: HOOH_UI_VERSION,
   model: 'deepseek-v4-flash',
   permission: 'readonly',
-  cwd: 'G:\\AI_Project\\ace',
+  cwd: REPO,
   effort: 'max',
   preset: 'code',
   lastSessionTitle: '把 dsh-TUI 的 UI 迁到 ace 这边',

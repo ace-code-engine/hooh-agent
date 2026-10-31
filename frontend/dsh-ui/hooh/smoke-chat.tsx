@@ -10,6 +10,10 @@
  *   node node_modules/tsx/dist/cli.mjs dsh-ui/hooh/smoke-chat.tsx
  */
 
+// **第一条 import**：在 i18n 求值之前把界面语言钉成 zh（见 smoke-lang.ts）。
+// 这条 fixture 画的 MessageList 也会走 i18n（工具卡标题等），不钉就跟宿主 locale 漂。
+import './smoke-lang.js'
+
 import React from 'react'
 import { EventEmitter } from 'node:events'
 import { mkdtempSync } from 'node:fs'

@@ -18,6 +18,7 @@ import { basename, join } from 'node:path'
 import { App } from './App.js'
 import { render } from '../ui.js'
 import { openEngine } from './engine.js'
+import { HOOH_UI_VERSION } from './version.js'
 import type { AceSnapshot } from './adapter.js'
 
 /** 仓库根（本文件在 `frontend/dsh-ui/hooh/`）。**绝对路径**——ace.cmd 是 pushd
@@ -29,7 +30,9 @@ const REPO = join(import.meta.dirname, '..', '..', '..')
 function snapshot(): AceSnapshot {
   const env = process.env
   return {
-    version: env.ACE_VERSION ?? '1.1.0',
+    // 界面的版本号只有 `version.ts` 一个源（必须等于 core/version.py）；
+    // 环境变量只是**覆盖**口（打包/测试要伪装别的版本时才用）。
+    version: env.ACE_VERSION ?? HOOH_UI_VERSION,
     model: env.ACE_MODEL ?? 'deepseek-v4-flash',
     permission: env.ACE_PERMISSION ?? 'write',
     cwd: env.ACE_PROJECT_ROOT ?? REPO,

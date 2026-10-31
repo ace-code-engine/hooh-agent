@@ -274,9 +274,18 @@ jobs:
 
       # integration.test.ts 会 spawn `python ai_code.py --serve`，而引擎要 requests
       # （`resolvePython()` 依次探 ACE_PYTHON → 已知路径 → `python`，setup-python 提供后者）
+      #
+      # 为什么这里钉 **3.13** 而不是跟别的 job 一样 3.12：`test/text.test.ts` 那条
+      # 宽度守卫拿 TS 的**静态**宽度表跟 Python 的 `unicodedata.east_asian_width()`
+      # （**活表**）逐码点比对，两边 Unicode 版本必须一致这条比对才有意义。3.12 带
+      # Unicode 15.0、3.13 带 15.1：U+2630 的东亚宽度类别在两版之间变过，于是同一张
+      # TS 表在 3.12 上"差一堆宽字符"、在 3.13 上对齐（CI run 41201592332 的原样
+      # 失败，本机 3.13 却是绿的）。3.13 不是"随手挑个新版本"，而是**产品冻结后
+      # 实际运行的那一版**、也就是这张表要对齐的那一版。别的 Python job 保持各自
+      # 的取态，不跟着改。
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: "3.13"
 
       - name: Install deps
         run: |

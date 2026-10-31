@@ -151,6 +151,20 @@ if ((Test-Path $versionFile) -and (Test-Path $changelog)) {
     $v = ([regex]::Match([System.IO.File]::ReadAllText($versionFile, [System.Text.Encoding]::UTF8),
                          '__version__ = "([^"]+)"')).Groups[1].Value
     Check "core/version.py holds a bare version (no leading v)" ($v -and -not $v.StartsWith('v')) "got '$v'"
+    # The installed app's bottom-right badge reads a constant of its own
+    # (frontend/dsh-ui/hooh/version.ts: HOOH_UI_VERSION). It drifted once: the
+    # badge said HooH v1.1.0 while core/version.py said 1.2.0, and every check
+    # stayed green -- nobody noticed until a rendered CI frame showed the stale
+    # number. The UI and the engine are one product, so their version is one
+    # fact; compare it mechanically instead of trusting two files to agree.
+    $uiVersionFile = Join-Path $Repo 'frontend\dsh-ui\hooh\version.ts'
+    if (Test-Path $uiVersionFile) {
+        $uv = ([regex]::Match([System.IO.File]::ReadAllText($uiVersionFile, [System.Text.Encoding]::UTF8),
+                              "HOOH_UI_VERSION\s*=\s*'([^']+)'")).Groups[1].Value
+        Check "frontend/dsh-ui/hooh/version.ts matches core/version.py __version__" ($uv -eq $v) "ui='$uv' core='$v'"
+    } else {
+        Write-Host "  SKIP  frontend/dsh-ui/hooh/version.ts not found"
+    }
     $tag = "v$v"
     $cl = [System.IO.File]::ReadAllText($changelog, [System.Text.Encoding]::UTF8)
     # -qF semantics: a plain substring, and the "## [$tag]" text also appears in

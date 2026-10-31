@@ -9,6 +9,9 @@
  * 跑法：node node_modules/tsx/dist/cli.mjs dsh-ui/hooh/smoke-entry.tsx
  */
 
+// **第一条 import**：在 i18n 求值之前把界面语言钉成 zh（见 smoke-lang.ts）。
+import './smoke-lang.js'
+
 import React from 'react'
 import { EventEmitter } from 'node:events'
 import { mkdtempSync } from 'node:fs'
@@ -18,6 +21,7 @@ import { join } from 'node:path'
 import { App } from './App.js'
 import { renderSync } from '../ink/root.js'
 import { openEngine } from './engine.js'
+import { HOOH_UI_VERSION } from './version.js'
 import type { AceSnapshot } from './adapter.js'
 
 class FakeOut extends EventEmitter {
@@ -45,7 +49,7 @@ async function main(): Promise<void> {
   const root = mkdtempSync(join(tmpdir(), 'hooh-entry-'))
   const stdout = new FakeOut()
   const snap: AceSnapshot = {
-    version: '1.1.0', model: 'deepseek-v4-flash', permission: 'readonly', cwd: root,
+    version: HOOH_UI_VERSION, model: 'deepseek-v4-flash', permission: 'readonly', cwd: root,
     effort: 'max', preset: 'code',
     commands: ['/help'].map((name) => ({
       name: name.slice(1), description: name, replacement: name, commandLine: name,

@@ -97,6 +97,13 @@ Write-Host "  + dsh-ui tree"
 # activityFrames (spinner frames, single source of truth) and hooh/engine.ts
 # (resolvePython). Ship frontend/src + the frontend tsconfig next to dsh-ui
 # so those relative imports resolve exactly as in the repo.
+#
+# NOTE (2026-10-31): the rest of `frontend/src` (`App.tsx`, `index.tsx`, the
+# classic Swiss-spec UI) is NOT part of this runtime -- `ace classic` has no
+# frozen branch and only ever runs from a source checkout (ace.cmd :fe_frontend
+# pushd's into <repo>\frontend). So its ink-kernel imports never resolve here
+# and `frontend/vendor` is deliberately not staged; adding it would just bloat
+# the payload. Only the two bridge modules above are reachable from dsh-ui.
 Copy-Item (Join-Path $Front "src") $AppDir -Recurse -Force
 Copy-Item (Join-Path $Front 'tsconfig.json') $AppDir -Force
 

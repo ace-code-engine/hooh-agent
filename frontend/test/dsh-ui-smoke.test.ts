@@ -8,10 +8,13 @@
  *
  * 为什么断言这些字符串：
  *   · `deepseek-v4-flash` / `readonly` —— 来自我们的 `AceSnapshot`（模型、权限档）；
- *   · 工作目录 —— 我们从 ace 传进去的 cwd；
- *   · `会话与工作区` —— **上游状态机**（`resolveLaunchpadActions`）产出的动作条目，
- *     说明"用它们的逻辑 + 我们的状态"这条线是通的；
- *   · `HooH v` / `✦ HooH` —— 品牌（我们改的那几处）没被上游文本盖掉。
+ *   · 工作目录 —— 我们从 ace 传进去的 cwd（fixture 按自身位置算仓库根，断言也按
+ *     `ROOT` 算，双方都不写死某台机器的路径）；
+ *   · `会话与工作区` / `继续「` —— **上游状态机**（`resolveLaunchpadActions`）产出的
+ *     动作条目，说明"用它们的逻辑 + 我们的状态"这条线是通的。界面语言由 fixture
+ *     用 `DSH_TUI_LANG=zh` 显式钉死（见 `hooh/smoke-lang.ts`），不跟宿主 locale 漂；
+ *   · `HooH v…` / `✦ HooH` —— 品牌（我们改的那几处）没被上游文本盖掉，版本号取
+ *     `hooh/version.ts` 的单一源（必须等于 core/version.py）。
  */
 
 import { execFileSync } from 'node:child_process';
@@ -20,7 +23,12 @@ import { fileURLToPath } from 'node:url';
 
 import { describe, expect, it } from 'vitest';
 
+import { HOOH_UI_VERSION } from '../dsh-ui/hooh/version.js';
+
+/** `frontend/`（测试与 fixture 都在它下面）。 */
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
+/** 仓库根：smoke fixture 的 SNAP.cwd 就是它（fixture 按自己的位置推，同一口径）。 */
+const REPO = join(ROOT, '..');
 
 function smoke(): string {
   return execFileSync(
@@ -43,7 +51,7 @@ describe('★迁入的 dsh-TUI UI：在我们仓库里渲染，数据是我们�
   it('模型 / 权限 / 工作目录来自 ace 的 AceSnapshot', () => {
     expect(out).toContain('deepseek-v4-flash');
     expect(out).toContain('readonly');
-    expect(out).toContain('G:\\AI_Project\\ace');
+    expect(out).toContain(REPO);
   });
 
   it('动作表是**上游的状态机**产出、喂的是我们的状态', () => {
@@ -53,8 +61,9 @@ describe('★迁入的 dsh-TUI UI：在我们仓库里渲染，数据是我们�
   });
 
   it('品牌是 HooH（我们改的三处没被上游文本盖掉）', () => {
-    // 右下角版本铭牌：上游打的是 `dsh-tui v…`
-    expect(out).toContain('HooH v1.1.0');
+    // 右下角版本铭牌：上游打的是 `dsh-tui v…`。版本值取界面层单一源
+    // （`hooh/version.ts`，机械校验要求它等于 core/version.py）。
+    expect(out).toContain(`HooH v${HOOH_UI_VERSION}`);
     expect(out).not.toContain('dsh-tui v');
     // 角标（`✦ …`）在 chrome=minimal 的布局下不画，所以只钉"没有旧品牌"这一半；
     // 大字标题走的是块字字形（不是文本），断言不了字符串 —— 它的正确性由

@@ -8,6 +8,14 @@ None of the 135 copied files carry a per-file license/copyright header
 (grep for `Copyright|SPDX|Licensed under` over the closure = 0 hits), so nothing was stripped;
 the upstream package-level LICENSE is vendored as `LICENSE.upstream`.
 
+**2026-10-31 — 文件名大小写改回上游拼法（29 个文件）**：这批文件搬进来时文件名被压成了全小写
+（`box.js` / `stringwidth.js` / `appcontext.js` …），而**内容、以及文件之间互相 import 的写法**是上游的
+大驼峰（`./Box.js` / `./stringWidth.js`）。Windows 大小写不敏感，本机一直能跑；Linux（CI）上是
+`Failed to load url … Does the file exist?` —— 2026-10-31 那次 CI 上 41 个测试文件连 collect 都过不去。
+现在文件名已逐个改回上游拼法（`git mv`，**内容一个字节没动**：135 个文件仍与
+`@deepseek-harness-tui/dsh-tui@0.12.0` 逐字节相同），`kernel.js` 里那两处跟着改。
+判据：`frontend/test/import-case.test.ts`（纯字符串比对，Windows 上也能拦住只会在 Linux 炸的写法）。
+
 **Totals: 135 files / 27890 lines**, all `.js` (compiled ESM).
 
 License and attribution declarations for this directory — including the full texts for the

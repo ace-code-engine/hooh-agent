@@ -6,13 +6,13 @@
  *      相邻的 `kernel.d.ts` 只给这**一个**入口补类型，vendor 里的 135 个 `.js` 一个字节不动。
  *   2. 一句话定死 specifier，随后四路写手照抄即可。
  *
- * ⚠️ **大小写不是笔误，必须照抄**：Windows 上 `Box.js` 与 `box.js` 是同一个文件，
- * 但 Node 的 ESM 缓存**按 specifier 字符串**记模块 —— 同一个 `.js` 写两种大小写就是
- * **两个模块实例**（实测 `TerminalSizeContext` 两条路径拿到的是两个不同的 context 对象，
- * Provider 就白包了，`useTerminalSize()` 当场抛"must be used within an Ink App component"）。
- * 所以下面凡内核自己也 import 的文件，一律**沿用内核内部的写法**（首字母大写）：
- *   `Box.js`（内核 6 处这么写）/ `Text.js` / `TerminalSizeContext.js`。
- * 其余文件内核内部无人引用，按磁盘真实名字（小写）。
+ * ⚠️ **specifier 必须与磁盘上的真实文件名逐字对齐（含大小写）**：Node 的 ESM 缓存按
+ * specifier 字符串记模块 —— 同一个 `.js` 写两种大小写就是**两个模块实例**（实测
+ * `TerminalSizeContext` 两条路径拿到的是两个不同的 context 对象，Provider 就白包了，
+ * `useTerminalSize()` 当场抛"must be used within an Ink App component"）。
+ * 所以下面一律照抄上游的写法（首字母大写），磁盘上的文件名也在 2026-10-31 一并改回上游
+ * 的拼法：Windows 大小写不敏感，写错也能跑；Linux/CI 会直接 `Failed to load url`。
+ * 判据是 `frontend/test/import-case.test.ts`（在 Windows 上也查得出来）。
  *
  * 依赖前置（缺一不可，见 `.recon/S1-switch-foundation.md` 接口 A）：
  *   1. `node frontend/vendor/dsh-ink/setup-deps.mjs` —— 建 `vendor/dsh-ink/node_modules/` 的 junction；
@@ -23,8 +23,8 @@
  */
 export { default as Box } from './lib/types/ink/components/Box.js';
 export { default as Text } from './lib/types/ink/components/Text.js';
-export { default as ScrollBox } from './lib/types/ink/components/scrollbox.js';
-export { AlternateScreen } from './lib/types/ink/components/alternatescreen.js';
+export { default as ScrollBox } from './lib/types/ink/components/ScrollBox.js';
+export { AlternateScreen } from './lib/types/ink/components/AlternateScreen.js';
 export { TerminalSizeContext } from './lib/types/ink/components/TerminalSizeContext.js';
 
 export { default as useInput } from './lib/types/ink/hooks/use-input.js';
@@ -32,7 +32,7 @@ export { default as useApp } from './lib/types/ink/hooks/use-app.js';
 export { useTerminalSize } from './lib/types/ink/hooks/use-terminal-size.js';
 
 // —— GUI 化追加（WP-GUI，docs/design/GUI-OVERHAUL.md §五.0）——
-// 这些内部件运行时一直存在，只是此前没转口。specifier 大小写沿用磁盘真实名
+// 这些内部件运行时一直存在，只是此前没转口。specifier 与磁盘上的上游文件名逐字对齐
 // （下面几个文件内核内部没有第二种写法的引用，不存在双实例陷阱）。
 //
 // 原始写函数（内核 App 在根部挂 TerminalWriteProvider；renderToScreen 没有 ⇒ null）。
